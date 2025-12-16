@@ -681,12 +681,18 @@ def parse_workflow_state(
         running = parse_running_jobs_from_log(log_path)
         failed_list = parse_failed_jobs_from_log(log_path)
 
+    # If we have running jobs in the log, override status to RUNNING
+    # (handles case where lock-based detection fails due to stale threshold)
+    if running and is_latest_log:
+        status = WorkflowStatus.RUNNING
+
     # Check for failures: either from parsed errors or from incomplete progress
     failed_jobs = len(failed_list)
     if failed_jobs > 0:
         status = WorkflowStatus.FAILED if status != WorkflowStatus.RUNNING else status
-    elif status == WorkflowStatus.COMPLETED and completed < total:
+    elif status == WorkflowStatus.COMPLETED and completed < total and not running:
         # Fallback: if workflow stopped but not all jobs completed, assume failure
+        # Only apply if there are no running jobs (avoids false positives)
         status = WorkflowStatus.FAILED
         failed_jobs = total - completed
 
