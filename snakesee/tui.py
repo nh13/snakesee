@@ -859,11 +859,18 @@ class WorkflowMonitorTUI:
 
         table = Table(expand=True, show_header=True, header_style=header_style)
         ind = self._sort_indicator
-        table.add_column(f"Rule{ind('completions', 0)}", style="cyan", no_wrap=True)
+        table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
         table.add_column(f"Duration{ind('completions', 1)}", justify="right")
-        table.add_column(f"Completed{ind('completions', 2)}", justify="right", style="green")
+        table.add_column(f"Completed{ind('completions', 2)}", justify="right")
 
-        jobs = self._filter_jobs(progress.recent_completions)
+        # Merge successful completions and failed jobs for a unified view
+        failed_job_ids = {id(job) for job in progress.failed_jobs_list}
+        all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
+
+        # Sort by end_time (most recent first) by default
+        all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
+
+        jobs = self._filter_jobs(all_jobs)
 
         # Sort if this table is active
         if is_sorting and jobs:
@@ -883,7 +890,16 @@ class WorkflowMonitorTUI:
             if job.end_time is not None:
                 completed_str = datetime.fromtimestamp(job.end_time).strftime("%H:%M:%S")
 
-            table.add_row(job.rule, duration_str, completed_str)
+            # Color based on success/failure status
+            is_failed = id(job) in failed_job_ids
+            rule_style = "red" if is_failed else "cyan"
+            time_style = "red" if is_failed else "green"
+
+            table.add_row(
+                f"[{rule_style}]{job.rule}[/{rule_style}]",
+                duration_str,
+                f"[{time_style}]{completed_str}[/{time_style}]",
+            )
 
         if not jobs:
             msg = f"[dim]No jobs matching '{self._filter_text}'[/dim]" if self._filter_text else ""
