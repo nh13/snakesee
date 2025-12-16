@@ -399,6 +399,8 @@ class TimeEstimator:
         pending_rules: dict[str, int] = {}
         for rule, count in completed_by_rule.items():
             proportion = count / total_completed
-            pending_rules[rule] = max(1, int(pending_count * proportion))
+            estimated = round(pending_count * proportion)
+            if estimated > 0:
+                pending_rules[rule] = estimated
 
         return pending_rules
