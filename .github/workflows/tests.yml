@@ -12,6 +12,7 @@ env:
   UV_VERSION: 0.8.22
 
 permissions:
+  contents: read
   pull-requests: write
 
 jobs:
