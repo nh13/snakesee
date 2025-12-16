@@ -1,0 +1,287 @@
+# snakesee
+
+[![Language][language-badge]][language-link]
+[![Python][python-badge]][python-link]
+[![Code style][code-style-badge]][code-style-link]
+[![Type checked][type-check-badge]][type-check-link]
+[![License][license-badge]][license-link]
+
+[![Tests][tests-badge]][tests-link]
+[![PyPI version][pypi-badge]][pypi-link]
+[![PyPI downloads][pypi-downloads-badge]][pypi-link]
+[![Bioconda][bioconda-badge]][bioconda-link]
+
+**A terminal UI for monitoring Snakemake workflows.**
+
+snakesee provides a rich TUI dashboard for passively monitoring Snakemake workflows. It reads directly from the `.snakemake/` directory, requiring no special flags or configuration when running Snakemake.
+
+## Features
+
+- **Zero configuration** - Works on any existing workflow without modification
+- **Historical browsing** - Navigate through past workflow executions
+- **Time estimation** - Predicts remaining time from historical data
+- **Rich TUI** - Vim-style keyboard controls, filtering, and sorting
+- **Multiple layouts** - Full, compact, and minimal display modes
+
+## Why snakesee?
+
+| Tool | Approach | Requirements | Status |
+|------|----------|--------------|--------|
+| **snakesee** | Passive (reads `.snakemake/`) | None | Active |
+| [snkmt](https://github.com/cademirch/snkmt) | Active (logger plugin) | `--logger snkmt` + SQLite | Active |
+| [Panoptes](https://github.com/panoptes-organization/panoptes) | Active (WMS monitor) | `--wms-monitor` + server | Early dev |
+| [snakemake-terminal-monitor](https://github.com/nesi/snakemake-terminal-monitor) | Passive (reads logs) | Requires running workflow | Maintained |
+| [snk](https://github.com/Wytamma/snk) | CLI wrapper | Workflow installation | Active |
+| Built-in `--dag`/`--rulegraph` | Static visualization | Graphviz | Built-in |
+
+## Installation
+
+### pip (recommended)
+
+```bash
+pip install snakesee
+```
+
+### pip with logo support
+
+```bash
+pip install snakesee[logo]
+```
+
+### conda / mamba
+
+```bash
+conda install -c bioconda snakesee
+```
+
+## Usage
+
+### Watch a workflow in real-time
+
+```bash
+# In a workflow directory
+snakesee watch
+
+# Or specify a path
+snakesee watch /path/to/workflow
+```
+
+### Get a one-time status snapshot
+
+```bash
+snakesee status
+snakesee status /path/to/workflow
+```
+
+### Options
+
+```bash
+snakesee watch --refresh 5.0      # Refresh every 5 seconds (default: 2.0)
+snakesee watch --no-estimate      # Disable time estimation
+snakesee status --no-estimate     # Status without ETA
+```
+
+## Time Estimation
+
+snakesee predicts remaining workflow time using historical execution data from `.snakemake/metadata/`. The estimation uses multiple strategies depending on available data:
+
+### Estimation Methods
+
+| Method | When Used | Confidence |
+|--------|-----------|------------|
+| **Weighted** | Historical data available | High (0.5-0.9) |
+| **Simple** | No historical data, some jobs completed | Medium (0.3-0.7) |
+| **Bootstrap** | No jobs completed yet | Low (0.05) |
+
+### How It Works
+
+1. **Per-rule timing**: Historical execution times are tracked for each rule (e.g., `align`, `sort`, `index`)
+2. **Temporal weighting**: Recent runs are weighted more heavily using exponential decay (7-day half-life by default)
+3. **Pending rule inference**: Assumes remaining jobs follow the same rule distribution as completed jobs
+4. **Parallelism adjustment**: Estimates concurrent job execution from historical completion rates
+
+### ETA Display Formats
+
+| Format | Meaning |
+|--------|---------|
+| `~5m` | High confidence estimate |
+| `3m - 8m` | Medium confidence, shows range |
+| `~10m (rough)` | Low confidence estimate |
+| `~15m (very rough)` | Very low confidence |
+| `unknown` | Insufficient data |
+
+### Temporal Weighting
+
+snakesee uses time-based exponential decay to weight historical runs:
+- **Recent runs** (within the last week) have the highest influence
+- **Older runs** progressively contribute less to estimates
+- **Default half-life**: 7 days (after 7 days, a run's weight is halved)
+
+This helps adapt to:
+- Hardware changes (new machine, more cores)
+- Software updates (faster tool versions)
+- Resource contention (shared clusters)
+
+```bash
+# Configure half-life (in days)
+snakesee watch --timing-halflife 3    # Fast-changing pipelines
+snakesee watch --timing-halflife 30   # Stable pipelines
+```
+
+### Wildcard Conditioning
+
+When enabled, snakesee tracks timing separately for each wildcard value (e.g., `sample=A`, `sample=B`). This improves estimates when different inputs have significantly different runtimes.
+
+```bash
+# Enable via CLI flag
+snakesee watch --wildcard-timing
+
+# Or toggle in TUI with 'w' key
+```
+
+**When to use**: Enable when your workflow processes inputs of varying sizes (e.g., genome samples, dataset batches) and execution times vary significantly between them.
+
+### Portable Timing Profiles
+
+Export timing data to share across machines or bootstrap new runs:
+
+```bash
+# Export profile from current workflow
+snakesee profile-export
+
+# Export to a specific file
+snakesee profile-export --output timing.json
+
+# Merge with existing profile (combine data)
+snakesee profile-export --merge
+
+# View profile contents
+snakesee profile-show .snakesee-profile.json
+
+# Use a profile for estimation
+snakesee watch --profile timing.json
+```
+
+Profiles are auto-discovered: snakesee searches for `.snakesee-profile.json` in the workflow directory and parent directories.
+
+### Tool-Specific Progress Plugins
+
+snakesee includes plugins that parse tool-specific log files to show real-time progress within running jobs. This is particularly useful for long-running bioinformatics tools.
+
+**Built-in plugins:**
+| Tool | Progress Detection |
+|------|-------------------|
+| **BWA** | Processed reads count |
+| **STAR** | Finished reads count |
+| **samtools sort** | Records processed |
+| **samtools index** | Records indexed |
+| **fastp** | Reads processed/passed |
+| **fgbio** | Records processed |
+
+**How it works:**
+1. When a job is running, snakesee searches for its log file
+2. Plugins detect the tool from rule name or log content
+3. Progress is extracted and displayed in the TUI
+
+**Creating custom plugins:**
+
+Create a Python file in `~/.snakesee/plugins/` or `~/.config/snakesee/plugins/`:
+
+```python
+# ~/.snakesee/plugins/my_tool.py
+import re
+from snakesee.plugins.base import ToolProgress, ToolProgressPlugin
+
+class MyToolPlugin(ToolProgressPlugin):
+    @property
+    def tool_name(self) -> str:
+        return "mytool"
+
+    def can_parse(self, rule_name: str, log_content: str) -> bool:
+        return "mytool" in rule_name.lower()
+
+    def parse_progress(self, log_content: str) -> ToolProgress | None:
+        # Parse your tool's log format
+        match = re.search(r"Processed (\d+) items", log_content)
+        if match:
+            return ToolProgress(
+                items_processed=int(match.group(1)),
+                unit="items"
+            )
+        return None
+```
+
+User plugins are automatically discovered and loaded when snakesee starts.
+
+**Entry-point plugins (for package authors):**
+
+Third-party packages can register plugins via setuptools entry points. Add to your `pyproject.toml`:
+
+```toml
+[project.entry-points."snakesee.plugins"]
+my_tool = "my_package.plugins:MyToolPlugin"
+```
+
+Entry-point plugins are discovered automatically when the package is installed.
+
+## TUI Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `?` | Show help |
+| `p` | Pause/resume auto-refresh |
+| `e` | Toggle time estimation |
+| `w` | Toggle wildcard conditioning |
+| `r` | Force refresh |
+| `Ctrl+r` | Hard refresh (reload historical data) |
+
+### Refresh Rate (vim-style)
+
+| Key | Action |
+|-----|--------|
+| `h` | Decrease by 5s (faster) |
+| `j` | Decrease by 0.5s (faster) |
+| `k` | Increase by 0.5s (slower) |
+| `l` | Increase by 5s (slower) |
+| `0` | Reset to default (1s) |
+| `G` | Set to minimum (0.5s, fastest) |
+
+### Layout & Navigation
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle layout (full/compact/minimal) |
+| `/` | Filter rules by name |
+| `n` / `N` | Next/previous filter match |
+| `Esc` | Clear filter, return to latest log |
+| `[` / `]` | View older/newer log (1 step) |
+| `{` / `}` | View older/newer log (5 steps) |
+| `s` | Cycle sort table |
+| `1-4` | Sort by column |
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## License
+
+[MIT License](LICENSE) - Copyright (c) 2024 Fulcrum Genomics LLC
+
+[language-badge]: https://img.shields.io/badge/language-Python-blue
+[language-link]: https://www.python.org/
+[python-badge]: https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue
+[python-link]: https://www.python.org/
+[code-style-badge]: https://img.shields.io/badge/code%20style-ruff-000000
+[code-style-link]: https://github.com/astral-sh/ruff
+[type-check-badge]: https://img.shields.io/badge/type%20checked-mypy-blue
+[type-check-link]: https://mypy.readthedocs.io/
+[license-badge]: https://img.shields.io/badge/license-MIT-blue
+[license-link]: https://github.com/fulcrumgenomics/snakesee/blob/main/LICENSE
+[tests-badge]: https://github.com/fulcrumgenomics/snakesee/actions/workflows/tests.yml/badge.svg
+[tests-link]: https://github.com/fulcrumgenomics/snakesee/actions/workflows/tests.yml
+[pypi-badge]: https://img.shields.io/pypi/v/snakesee
+[pypi-link]: https://pypi.org/project/snakesee/
+[pypi-downloads-badge]: https://img.shields.io/pypi/dm/snakesee
+[bioconda-badge]: https://img.shields.io/conda/vn/bioconda/snakesee
+[bioconda-link]: https://anaconda.org/bioconda/snakesee

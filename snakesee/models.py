@@ -1,0 +1,581 @@
+"""Data models for workflow monitoring."""
+
+import time
+from dataclasses import dataclass
+from dataclasses import field
+from enum import Enum
+from pathlib import Path
+from statistics import mean
+from statistics import stdev
+from typing import ClassVar
+
+
+class WorkflowStatus(Enum):
+    """Current status of a workflow."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class JobInfo:
+    """
+    Information about a single job execution.
+
+    Attributes:
+        rule: The name of the rule that was executed.
+        job_id: Optional job identifier.
+        start_time: Unix timestamp when the job started.
+        end_time: Unix timestamp when the job completed (None if still running).
+        output_file: The output file path this job produces.
+        wildcards: Dictionary of wildcard names to values (e.g., {"sample": "A", "batch": "1"}).
+        input_size: Total size of input files in bytes (None if unknown).
+    """
+
+    rule: str
+    job_id: str | None = None
+    start_time: float | None = None
+    end_time: float | None = None
+    output_file: Path | None = None
+    wildcards: dict[str, str] | None = None
+    input_size: int | None = None
+
+    @property
+    def elapsed(self) -> float | None:
+        """
+        Elapsed time in seconds.
+
+        Returns:
+            Seconds elapsed since start, or None if start_time not set.
+        """
+        if self.start_time is None:
+            return None
+        end = self.end_time or time.time()
+        return end - self.start_time
+
+    @property
+    def duration(self) -> float | None:
+        """
+        Total duration in seconds (only for completed jobs).
+
+        Returns:
+            Duration in seconds, or None if job not completed.
+        """
+        if self.start_time is not None and self.end_time is not None:
+            return self.end_time - self.start_time
+        return None
+
+
+@dataclass
+class RuleTimingStats:
+    """
+    Aggregated timing statistics for a rule.
+
+    Attributes:
+        rule: The name of the rule.
+        durations: List of observed durations in seconds.
+        timestamps: List of Unix timestamps when each run completed (parallel to durations).
+        input_sizes: List of input file sizes in bytes (parallel to durations, None for unknown).
+    """
+
+    rule: str
+    durations: list[float] = field(default_factory=list)
+    timestamps: list[float] = field(default_factory=list)
+    input_sizes: list[int | None] = field(default_factory=list)
+
+    HIGH_VARIANCE_CV: ClassVar[float] = 0.5  # Coefficient of variation threshold
+    DEFAULT_HALF_LIFE_DAYS: ClassVar[float] = 7.0  # Default half-life for temporal weighting
+
+    @property
+    def count(self) -> int:
+        """Number of executions observed."""
+        return len(self.durations)
+
+    @property
+    def mean_duration(self) -> float:
+        """
+        Mean duration in seconds.
+
+        Returns:
+            Mean of observed durations, or 0.0 if no data.
+        """
+        if not self.durations:
+            return 0.0
+        return mean(self.durations)
+
+    @property
+    def std_dev(self) -> float:
+        """
+        Standard deviation of durations.
+
+        Returns:
+            Standard deviation, or 0.0 if fewer than 2 observations.
+        """
+        if len(self.durations) < 2:
+            return 0.0
+        return stdev(self.durations)
+
+    @property
+    def min_duration(self) -> float:
+        """Minimum observed duration."""
+        return min(self.durations) if self.durations else 0.0
+
+    @property
+    def max_duration(self) -> float:
+        """Maximum observed duration."""
+        return max(self.durations) if self.durations else 0.0
+
+    @property
+    def coefficient_of_variation(self) -> float:
+        """
+        CV = stddev / mean, normalized measure of dispersion.
+
+        Returns:
+            Coefficient of variation, or 0.0 if mean is zero.
+        """
+        if self.mean_duration <= 0:
+            return 0.0
+        return self.std_dev / self.mean_duration
+
+    @property
+    def is_high_variance(self) -> bool:
+        """True if this rule has highly variable runtimes."""
+        return self.coefficient_of_variation > self.HIGH_VARIANCE_CV
+
+    def weighted_mean(self, half_life_days: float | None = None) -> float:
+        """
+        Weighted mean favoring recent executions using time-based decay.
+
+        When timestamps are available, uses exponential decay based on actual time
+        elapsed since each run. When timestamps are not available, falls back to
+        position-based weighting (assuming list order = chronological order).
+
+        Args:
+            half_life_days: After this many days, a run's weight is halved.
+                           Defaults to DEFAULT_HALF_LIFE_DAYS (7.0).
+                           Smaller values = faster decay, more emphasis on recent runs.
+                           Larger values = slower decay, more historical data influence.
+
+        Returns:
+            Weighted mean duration, or 0.0 if no data.
+        """
+        if not self.durations:
+            return 0.0
+
+        if half_life_days is None:
+            half_life_days = self.DEFAULT_HALF_LIFE_DAYS
+
+        # Use time-based weighting if timestamps are available
+        if self.timestamps and len(self.timestamps) == len(self.durations):
+            return self._time_weighted_mean(half_life_days)
+
+        # Fall back to position-based weighting (legacy behavior)
+        return self._position_weighted_mean()
+
+    def _time_weighted_mean(self, half_life_days: float) -> float:
+        """
+        Calculate weighted mean using actual timestamps.
+
+        Args:
+            half_life_days: Half-life for exponential decay in days.
+
+        Returns:
+            Time-weighted mean duration.
+        """
+        now = time.time()
+        half_life_seconds = half_life_days * 86400  # Convert days to seconds
+
+        weights: list[float] = []
+        for ts in self.timestamps:
+            age_seconds = max(0, now - ts)  # Ensure non-negative
+            weight = 0.5 ** (age_seconds / half_life_seconds)
+            weights.append(weight)
+
+        weighted_sum = sum(d * w for d, w in zip(self.durations, weights, strict=True))
+        weight_total = sum(weights)
+
+        if weight_total <= 0:
+            return self.mean_duration  # Fallback to simple mean
+
+        return weighted_sum / weight_total
+
+    def _position_weighted_mean(self) -> float:
+        """
+        Calculate weighted mean using position-based weights (legacy behavior).
+
+        Assumes durations list is ordered oldest-to-newest.
+
+        Returns:
+            Position-weighted mean duration.
+        """
+        # Apply exponential decay weights (most recent = highest weight)
+        weights: list[int] = [2**i for i in range(len(self.durations))]
+        weighted_sum: float = sum(t * w for t, w in zip(self.durations, weights, strict=True))
+        weight_total: int = sum(weights)
+        return weighted_sum / weight_total
+
+    @property
+    def median_input_size(self) -> int | None:
+        """
+        Median input size in bytes for jobs with known input sizes.
+
+        Returns:
+            Median size in bytes, or None if no size data available.
+        """
+        known_sizes = [s for s in self.input_sizes if s is not None]
+        if not known_sizes:
+            return None
+        sorted_sizes = sorted(known_sizes)
+        n = len(sorted_sizes)
+        if n % 2 == 1:
+            return sorted_sizes[n // 2]
+        return (sorted_sizes[n // 2 - 1] + sorted_sizes[n // 2]) // 2
+
+    def size_scaled_estimate(
+        self,
+        input_size: int,
+        half_life_days: float | None = None,
+    ) -> tuple[float, float]:
+        """
+        Estimate duration scaled by input file size.
+
+        Uses the ratio of the given input size to the median historical input size
+        to scale the expected duration. This helps when jobs with larger inputs
+        take proportionally longer.
+
+        Args:
+            input_size: Size of input files for the job in bytes.
+            half_life_days: Half-life for temporal weighting.
+
+        Returns:
+            Tuple of (scaled_estimate, scaling_confidence).
+            Confidence is higher when we have good size data correlation.
+        """
+        base_estimate = self.weighted_mean(half_life_days)
+        median_size = self.median_input_size
+
+        if median_size is None or median_size == 0:
+            return base_estimate, 0.0  # No size data available
+
+        # Count how many jobs have both duration and size data
+        pairs_with_size = sum(
+            1 for i, s in enumerate(self.input_sizes) if s is not None and i < len(self.durations)
+        )
+
+        if pairs_with_size < 3:
+            return base_estimate, 0.0  # Not enough data for size correlation
+
+        # Calculate scaling factor
+        size_ratio = input_size / median_size
+
+        # Apply scaling with dampening to avoid extreme extrapolation
+        # sqrt dampening: 2x size -> 1.4x time (assuming sublinear scaling)
+        dampened_ratio = size_ratio**0.5
+
+        # Clamp to avoid extreme values
+        dampened_ratio = max(0.5, min(2.0, dampened_ratio))
+
+        scaled_estimate = base_estimate * dampened_ratio
+
+        # Confidence based on sample size and variability
+        confidence = min(0.8, pairs_with_size / 10)
+
+        return scaled_estimate, confidence
+
+    def recency_factor(self, half_life_days: float | None = None) -> float:
+        """
+        Calculate a recency factor (0.0-1.0) based on data freshness.
+
+        This measures how recent the timing data is. A value of 1.0 means
+        most data is very recent; lower values indicate stale data.
+
+        Args:
+            half_life_days: Half-life for decay calculation.
+
+        Returns:
+            Recency factor between 0.0 and 1.0.
+        """
+        if not self.timestamps:
+            return 0.5  # Unknown recency, return neutral value
+
+        if half_life_days is None:
+            half_life_days = self.DEFAULT_HALF_LIFE_DAYS
+
+        now = time.time()
+        half_life_seconds = half_life_days * 86400
+
+        # Calculate average weight of data points
+        weights = [0.5 ** (max(0, now - ts) / half_life_seconds) for ts in self.timestamps]
+        avg_weight = sum(weights) / len(weights) if weights else 0.5
+
+        return min(1.0, avg_weight)
+
+    def recent_consistency(self, days: int = 7) -> float:
+        """
+        Calculate consistency of recent runs (low CV = high consistency).
+
+        Args:
+            days: Number of days to look back for "recent" runs.
+
+        Returns:
+            Consistency score between 0.3 and 1.0.
+            1.0 = very consistent recent runs, lower = more variable.
+        """
+        if not self.timestamps or not self.durations:
+            return 0.5  # Not enough data
+
+        now = time.time()
+        cutoff = now - (days * 86400)
+
+        # Get recent durations
+        recent = [d for d, ts in zip(self.durations, self.timestamps, strict=False) if ts >= cutoff]
+
+        if len(recent) < 2:
+            return 0.5  # Not enough recent data
+
+        mean_recent = sum(recent) / len(recent)
+        if mean_recent <= 0:
+            return 0.5
+
+        # Calculate coefficient of variation
+        variance = sum((d - mean_recent) ** 2 for d in recent) / len(recent)
+        std_recent = variance**0.5
+        cv = std_recent / mean_recent
+
+        # CV of 0 = consistency 1.0, CV of 0.5+ = consistency ~0.5
+        return float(max(0.3, 1.0 - cv))
+
+
+@dataclass
+class WildcardTimingStats:
+    """
+    Timing statistics for a rule conditioned on a specific wildcard value.
+
+    Tracks timing per (rule, wildcard_key, wildcard_value) tuple.
+    Example: align rule with sample=A takes 5min, sample=B takes 20min.
+
+    Attributes:
+        rule: The rule name.
+        wildcard_key: The wildcard dimension (e.g., "sample", "batch").
+        stats_by_value: Dictionary mapping wildcard values to their timing stats.
+    """
+
+    rule: str
+    wildcard_key: str
+    stats_by_value: dict[str, RuleTimingStats] = field(default_factory=dict)
+
+    MIN_SAMPLES_FOR_CONDITIONING: ClassVar[int] = 3  # Need at least 3 samples per value
+
+    def get_stats_for_value(self, value: str) -> RuleTimingStats | None:
+        """
+        Get timing stats for a specific wildcard value.
+
+        Args:
+            value: The wildcard value to look up.
+
+        Returns:
+            RuleTimingStats if available and has sufficient samples, None otherwise.
+        """
+        stats = self.stats_by_value.get(value)
+        if stats is not None and stats.count >= self.MIN_SAMPLES_FOR_CONDITIONING:
+            return stats
+        return None
+
+    @staticmethod
+    def get_most_predictive_key(
+        wildcard_stats: dict[str, "WildcardTimingStats"],
+    ) -> str | None:
+        """
+        Find the wildcard key that explains the most variance in timing.
+
+        Uses coefficient of variation to identify which wildcard dimension
+        is most predictive of execution time.
+
+        Args:
+            wildcard_stats: Dictionary of wildcard timing stats by key.
+
+        Returns:
+            The most predictive wildcard key, or None if no good predictor found.
+        """
+        if not wildcard_stats:
+            return None
+
+        best_key: str | None = None
+        best_variance_ratio = 0.0
+
+        for key, wts in wildcard_stats.items():
+            if len(wts.stats_by_value) < 2:
+                continue  # Need at least 2 different values to compare
+
+            # Calculate between-group variance (variance of means)
+            means = [s.mean_duration for s in wts.stats_by_value.values() if s.count > 0]
+            if len(means) < 2:
+                continue
+
+            overall_mean = sum(means) / len(means)
+            between_variance = sum((m - overall_mean) ** 2 for m in means) / len(means)
+
+            # Higher between-variance relative to mean = more predictive
+            if overall_mean > 0:
+                variance_ratio = between_variance / (overall_mean**2)
+                if variance_ratio > best_variance_ratio:
+                    best_variance_ratio = variance_ratio
+                    best_key = key
+
+        # Only return if variance ratio is meaningful (> 0.1)
+        return best_key if best_variance_ratio > 0.1 else None
+
+
+@dataclass(frozen=True)
+class TimeEstimate:
+    """
+    Time remaining estimate with uncertainty bounds.
+
+    Attributes:
+        seconds_remaining: Expected seconds remaining.
+        lower_bound: Optimistic estimate (95% CI lower).
+        upper_bound: Pessimistic estimate (95% CI upper).
+        confidence: Confidence level (0.0 to 1.0).
+        method: Estimation method used ("simple", "weighted", "throughput").
+    """
+
+    seconds_remaining: float
+    lower_bound: float
+    upper_bound: float
+    confidence: float
+    method: str
+
+    def format_eta(self) -> str:
+        """
+        Format as human-readable ETA string.
+
+        Returns:
+            Formatted ETA with confidence indication.
+            Examples: "~5m", "5-10m", "~15m (rough)", "unknown"
+        """
+        if self.seconds_remaining == float("inf"):
+            return "unknown"
+
+        expected_str = _format_duration(self.seconds_remaining)
+
+        # High confidence, narrow range: just show estimate
+        if (
+            self.confidence > 0.7
+            and self.seconds_remaining > 0
+            and (self.upper_bound - self.lower_bound) / self.seconds_remaining < 0.3
+        ):
+            return f"~{expected_str}"
+
+        # Medium confidence: show range
+        if self.confidence > 0.4:
+            lower_str = _format_duration(max(0, self.lower_bound))
+            upper_str = _format_duration(self.upper_bound)
+            return f"{lower_str} - {upper_str}"
+
+        # Low confidence: show with caveat
+        if self.confidence > 0.1:
+            return f"~{expected_str} (rough)"
+
+        return f"~{expected_str} (very rough)"
+
+
+@dataclass
+class WorkflowProgress:
+    """
+    Current state of workflow progress.
+
+    Attributes:
+        workflow_dir: Path to the workflow directory.
+        status: Current workflow status.
+        total_jobs: Total number of jobs in the workflow.
+        completed_jobs: Number of jobs completed.
+        failed_jobs: Number of jobs that failed.
+        failed_jobs_list: List of failed job details (for --keep-going).
+        running_jobs: List of currently running jobs.
+        recent_completions: List of recently completed jobs.
+        start_time: Unix timestamp when workflow started.
+        log_file: Path to the current snakemake log file.
+    """
+
+    workflow_dir: Path
+    status: WorkflowStatus
+    total_jobs: int
+    completed_jobs: int
+    failed_jobs: int = 0
+    failed_jobs_list: list[JobInfo] = field(default_factory=list)
+    running_jobs: list[JobInfo] = field(default_factory=list)
+    recent_completions: list[JobInfo] = field(default_factory=list)
+    start_time: float | None = None
+    log_file: Path | None = None
+
+    @property
+    def percent_complete(self) -> float:
+        """
+        Progress as a percentage.
+
+        Returns:
+            Percentage of jobs completed (0.0 to 100.0).
+        """
+        if self.total_jobs == 0:
+            return 0.0
+        return (self.completed_jobs / self.total_jobs) * 100
+
+    @property
+    def elapsed_seconds(self) -> float | None:
+        """
+        Seconds elapsed since workflow start.
+
+        Returns:
+            Elapsed time in seconds, or None if start_time not set.
+        """
+        if self.start_time is None:
+            return None
+        return time.time() - self.start_time
+
+    @property
+    def pending_jobs(self) -> int:
+        """Number of jobs not yet started (excludes failed and running)."""
+        return max(
+            0,
+            self.total_jobs - self.completed_jobs - self.failed_jobs - len(self.running_jobs),
+        )
+
+
+def _format_duration(seconds: float) -> str:
+    """
+    Format seconds as human-readable duration.
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
+    """
+    if seconds == float("inf"):
+        return "unknown"
+    if seconds < 0:
+        return "0s"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}m {secs}s" if secs > 0 else f"{minutes}m"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+
+
+def format_duration(seconds: float) -> str:
+    """
+    Format seconds as human-readable duration.
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
+    """
+    return _format_duration(seconds)
