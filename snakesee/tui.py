@@ -1151,6 +1151,10 @@ class WorkflowMonitorTUI:
         eta_style = FG_GREEN if self.use_estimation else "red"
         footer.append("ON" if self.use_estimation else "OFF", style=eta_style)
         footer.append("  │  ", style="dim")
+        footer.append("Wildcard: ", style="dim")
+        wc_style = FG_GREEN if self._use_wildcard_conditioning else "red"
+        footer.append("ON" if self._use_wildcard_conditioning else "OFF", style=wc_style)
+        footer.append("  │  ", style="dim")
         footer.append(f"Layout: {self._layout_mode.value}", style="dim")
 
         if self._filter_mode:
