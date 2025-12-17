@@ -667,10 +667,10 @@ def parse_workflow_state(
         filtered = _filter_completions_by_timeframe(all_completions, log_path, cutoff_time)
         if filtered:
             completions = filtered
-        elif cutoff_time is not None:
-            # Historical log with no metadata - parse completions from the log file
+        else:
+            # No matching metadata - parse completions from the log file
+            # This handles: no metadata dir, timing mismatches, historical logs
             completions = parse_completed_jobs_from_log(log_path)
-        # else: latest log with no completions yet - keep empty list (don't show stale data)
 
     completions.sort(key=lambda j: j.end_time or 0, reverse=True)
 
