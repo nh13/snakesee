@@ -28,7 +28,7 @@ class ToolProgress:
     def __post_init__(self) -> None:
         """Calculate percent_complete if not provided but total is known."""
         if self.percent_complete is None and self.items_total and self.items_total > 0:
-            self.percent_complete = (self.items_processed / self.items_total) * 100
+            self.percent_complete = min(100.0, (self.items_processed / self.items_total) * 100)
 
     @property
     def progress_str(self) -> str:
