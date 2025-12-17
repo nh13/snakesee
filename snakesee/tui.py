@@ -162,7 +162,9 @@ class WorkflowMonitorTUI:
 
         # Job log viewer state
         self._job_selection_mode: bool = False  # True when a job is selected
+        self._log_source: str | None = None  # "running" or "completions"
         self._selected_job_index: int = 0  # Index into running_jobs list
+        self._selected_completion_index: int = 0  # Index into completions list
         self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
         self._cached_log_path: Path | None = None
         self._cached_log_lines: list[str] = []
@@ -353,9 +355,14 @@ class WorkflowMonitorTUI:
         """Handle navigation keys (Tab, /, n, N, Esc, Enter). Returns True if handled."""
         if key == "\r" or key == "\n":  # Enter - toggle job selection mode
             self._job_selection_mode = not self._job_selection_mode
-            if not self._job_selection_mode:
+            if self._job_selection_mode:
+                # Entering selection mode - default to running jobs
+                self._log_source = "running"
+            else:
                 # Exiting selection mode - reset state
+                self._log_source = None
                 self._selected_job_index = 0
+                self._selected_completion_index = 0
                 self._log_scroll_offset = 0
                 self._cached_log_path = None
                 self._cached_log_lines = []
@@ -482,22 +489,41 @@ class WorkflowMonitorTUI:
         """Handle keypress in job selection mode. Returns True if should quit."""
         if key == "\x1b":  # Escape - exit selection mode
             self._job_selection_mode = False
+            self._log_source = None
             self._selected_job_index = 0
+            self._selected_completion_index = 0
             self._log_scroll_offset = 0
             self._cached_log_path = None
             self._cached_log_lines = []
             self._force_refresh = True
             return False
 
+        # Tab - cycle between running and completions log sources
+        if key == "\t":
+            if self._log_source == "running":
+                self._log_source = "completions"
+            else:
+                self._log_source = "running"
+            self._log_scroll_offset = 0  # Reset scroll on source change
+            self._force_refresh = True
+            return False
+
         # Job navigation: Ctrl+p (up) or Ctrl+n (down)
+        # Use appropriate index based on log source
         if key == "\x10":  # Ctrl+p - previous job
-            self._selected_job_index = max(0, self._selected_job_index - 1)
+            if self._log_source == "completions":
+                self._selected_completion_index = max(0, self._selected_completion_index - 1)
+            else:
+                self._selected_job_index = max(0, self._selected_job_index - 1)
             self._log_scroll_offset = 0  # Reset scroll on job change
             self._force_refresh = True
             return False
 
         if key == "\x0e":  # Ctrl+n - next job
-            self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
+            if self._log_source == "completions":
+                self._selected_completion_index = min(num_jobs - 1, self._selected_completion_index + 1)
+            else:
+                self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
             self._log_scroll_offset = 0
             self._force_refresh = True
             return False
@@ -904,8 +930,9 @@ class WorkflowMonitorTUI:
                     progress_str = f"{tool_progress.items_processed:,} {tool_progress.unit}"
 
             rule_style = "cyan"
-            # Highlight selected job in selection mode
-            if self._job_selection_mode and idx == self._selected_job_index:
+            # Highlight selected job in selection mode (only when viewing running jobs)
+            is_selecting_running = self._job_selection_mode and self._log_source == "running"
+            if is_selecting_running and idx == self._selected_job_index:
                 rule_style = "bold cyan on dark_blue"
             elif self._filter_matches and self._filter_index < len(self._filter_matches):
                 if job.rule == self._filter_matches[self._filter_index]:
@@ -924,14 +951,15 @@ class WorkflowMonitorTUI:
             msg = msg or "[dim]No jobs currently running[/dim]"
             table.add_row(msg, "", "", "", "")
 
+        is_selecting_running = self._job_selection_mode and self._log_source == "running"
         title = f"Currently Running ({len(progress.running_jobs)} jobs)"
-        if self._job_selection_mode:
+        if is_selecting_running:
             title += " [bold cyan]◀ select job[/bold cyan]"
         elif is_sorting:
             title += " [bold cyan]◀ sorting[/bold cyan]"
         if self._filter_text:
             title += f" [dim]filter: {self._filter_text}[/dim]"
-        border = "cyan" if self._job_selection_mode else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
+        border = "cyan" if is_selecting_running else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
         return Panel(table, title=title, border_style=border)
 
     def _make_completions_table(self, progress: WorkflowProgress) -> Panel:
@@ -964,7 +992,10 @@ class WorkflowMonitorTUI:
             key_fn = sort_keys.get(self._sort_column, sort_keys[2])
             jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
 
-        for job in jobs[:8]:  # Limit to 8 rows
+        # Check if we're in completions selection mode
+        is_selecting = self._job_selection_mode and self._log_source == "completions"
+
+        for idx, job in enumerate(jobs[:8]):  # Limit to 8 rows
             duration = job.duration
             duration_str = format_duration(duration) if duration is not None else "?"
 
@@ -977,8 +1008,12 @@ class WorkflowMonitorTUI:
             rule_style = "red" if is_failed else "cyan"
             time_style = "red" if is_failed else "green"
 
+            # Highlight selected job in selection mode
+            if is_selecting and idx == self._selected_completion_index:
+                rule_style = "bold cyan on dark_blue" if not is_failed else "bold red on dark_blue"
+
             table.add_row(
-                f"[{rule_style}]{job.rule}[/{rule_style}]",
+                Text(job.rule, style=rule_style),
                 duration_str,
                 f"[{time_style}]{completed_str}[/{time_style}]",
             )
@@ -989,9 +1024,11 @@ class WorkflowMonitorTUI:
             table.add_row(msg, "", "")
 
         title = "Recent Completions"
-        if is_sorting:
+        if is_selecting:
+            title += " [bold cyan]◀ select job[/bold cyan]"
+        elif is_sorting:
             title += " [bold cyan]◀ sorting[/bold cyan]"
-        border = f"bold {FG_BLUE}" if is_sorting else FG_BLUE
+        border = "cyan" if is_selecting else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
         return Panel(table, title=title, border_style=border)
 
     def _make_summary_footer(self, progress: WorkflowProgress) -> Panel:
@@ -1073,22 +1110,54 @@ class WorkflowMonitorTUI:
         except OSError:
             return ["[Error reading log file]"]
 
+    def _get_completions_list(
+        self, progress: WorkflowProgress
+    ) -> tuple[list[JobInfo], set[int]]:
+        """Get merged list of completed and failed jobs, sorted by end_time.
+
+        Returns:
+            Tuple of (jobs_list, failed_job_ids_set)
+        """
+        failed_job_ids = {id(job) for job in progress.failed_jobs_list}
+        all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
+        all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
+        return all_jobs, failed_job_ids
+
     def _make_job_log_panel(self, progress: WorkflowProgress) -> Panel:
         """Create the job log panel showing selected job's log content."""
-        # Validate selection - no running jobs
-        if not progress.running_jobs:
+        # Build job lists for both sources
+        running_jobs = progress.running_jobs
+        completions, failed_ids = self._get_completions_list(progress)
+
+        # Determine which source to use and get selected job
+        selected_job: JobInfo | None = None
+        job_status: str = ""  # "", "completed", or "failed"
+
+        if self._log_source == "running":
+            if running_jobs:
+                self._selected_job_index = min(
+                    self._selected_job_index,
+                    len(running_jobs) - 1,
+                )
+                selected_job = running_jobs[self._selected_job_index]
+        elif self._log_source == "completions":
+            if completions:
+                self._selected_completion_index = min(
+                    self._selected_completion_index,
+                    len(completions) - 1,
+                )
+                selected_job = completions[self._selected_completion_index]
+                job_status = "failed" if id(selected_job) in failed_ids else "completed"
+
+        # Handle no jobs available
+        if selected_job is None:
+            source_name = "running jobs" if self._log_source == "running" else "completed jobs"
             return Panel(
-                "[dim]No running jobs[/dim]",
+                f"[dim]No {source_name}[/dim]",
                 title="Job Log",
+                subtitle="[dim]Tab switch source | Esc exit[/dim]",
                 border_style=FG_BLUE,
             )
-
-        # Clamp selection index
-        self._selected_job_index = min(
-            self._selected_job_index,
-            len(progress.running_jobs) - 1,
-        )
-        selected_job = progress.running_jobs[self._selected_job_index]
 
         # Find log file using existing plugin infrastructure
         log_path = find_rule_log(
@@ -1098,9 +1167,11 @@ class WorkflowMonitorTUI:
         )
 
         if log_path is None:
+            status_suffix = f" [{job_status}]" if job_status else ""
             return Panel(
                 f"[dim]No log file found for {selected_job.rule}[/dim]",
-                title=f"Job Log: {selected_job.rule}",
+                title=f"Job Log: {selected_job.rule}{status_suffix}",
+                subtitle="[dim]Tab switch source | Esc exit[/dim]",
                 border_style=FG_BLUE,
             )
 
@@ -1108,9 +1179,11 @@ class WorkflowMonitorTUI:
         lines = self._read_log_tail(log_path, max_lines=500)
 
         if not lines:
+            status_suffix = f" [{job_status}]" if job_status else ""
             return Panel(
                 "[dim]Log file is empty[/dim]",
-                title=f"Job Log: {selected_job.rule}",
+                title=f"Job Log: {selected_job.rule}{status_suffix}",
+                subtitle="[dim]Tab switch source | Esc exit[/dim]",
                 border_style=FG_BLUE,
             )
 
@@ -1140,15 +1213,16 @@ class WorkflowMonitorTUI:
             style = "white" if i >= len(visible_content) - 3 else "dim"
             content.append(display_line + "\n", style=style)
 
-        # Build title with scroll indicator
+        # Build title with scroll indicator and status
         scroll_indicator = ""
         if self._log_scroll_offset > 0:
             scroll_indicator = f" [line {start_index + 1}-{end_index}/{total_lines}]"
         elif total_lines > visible_lines:
             scroll_indicator = f" [latest {visible_lines}/{total_lines}]"
 
-        title = f"Job Log: {selected_job.rule}{scroll_indicator}"
-        subtitle = "[dim]Ctrl+u/d scroll | g/G top/bottom | Esc exit[/dim]"
+        status_suffix = f" [{job_status}]" if job_status else ""
+        title = f"Job Log: {selected_job.rule}{status_suffix}{scroll_indicator}"
+        subtitle = "[dim]Ctrl+u/d scroll | g/G top/bottom | Tab switch | Esc exit[/dim]"
 
         return Panel(
             content,
@@ -1476,8 +1550,8 @@ class WorkflowMonitorTUI:
             layout["header"].update(self._make_header(progress))
             layout["progress"].update(self._make_progress_panel(progress, estimate))
             layout["running"].update(self._make_running_table(progress))
-            # Show log panel when job is selected, otherwise show pending jobs
-            if self._job_selection_mode and progress.running_jobs:
+            # Show log panel when in job selection mode, otherwise show pending jobs
+            if self._job_selection_mode:
                 layout["pending"].update(self._make_job_log_panel(progress))
             else:
                 layout["pending"].update(self._make_pending_jobs_panel(progress))
