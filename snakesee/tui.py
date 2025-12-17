@@ -160,6 +160,14 @@ class WorkflowMonitorTUI:
         # Cutoff time for historical view (updated in _poll_state)
         self._cutoff_time: float | None = None
 
+        # Job log viewer state
+        self._job_selection_mode: bool = False  # True when a job is selected
+        self._selected_job_index: int = 0  # Index into running_jobs list
+        self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
+        self._cached_log_path: Path | None = None
+        self._cached_log_lines: list[str] = []
+        self._cached_log_mtime: float = 0
+
         self._init_estimator()
 
     def _refresh_log_list(self) -> None:
@@ -244,6 +252,11 @@ class WorkflowMonitorTUI:
         Returns:
             True if should quit, False otherwise.
         """
+        # Handle job selection mode (before filter mode)
+        if self._job_selection_mode:
+            # Use large number; actual bounds checked in _make_job_log_panel
+            return self._handle_job_selection_key(key, 1000)
+
         # Handle filter input mode
         if self._filter_mode:
             return self._handle_filter_key(key)
@@ -337,7 +350,17 @@ class WorkflowMonitorTUI:
         return False
 
     def _handle_navigation_key(self, key: str) -> bool:
-        """Handle navigation keys (Tab, /, n, N, Esc). Returns True if handled."""
+        """Handle navigation keys (Tab, /, n, N, Esc, Enter). Returns True if handled."""
+        if key == "\r" or key == "\n":  # Enter - toggle job selection mode
+            self._job_selection_mode = not self._job_selection_mode
+            if not self._job_selection_mode:
+                # Exiting selection mode - reset state
+                self._selected_job_index = 0
+                self._log_scroll_offset = 0
+                self._cached_log_path = None
+                self._cached_log_lines = []
+            self._force_refresh = True
+            return True
         if key == "\t":  # Tab - cycle layout
             modes = list(LayoutMode)
             current_idx = modes.index(self._layout_mode)
@@ -455,6 +478,54 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
         return False
 
+    def _handle_job_selection_key(self, key: str, num_jobs: int) -> bool:
+        """Handle keypress in job selection mode. Returns True if should quit."""
+        if key == "\x1b":  # Escape - exit selection mode
+            self._job_selection_mode = False
+            self._selected_job_index = 0
+            self._log_scroll_offset = 0
+            self._cached_log_path = None
+            self._cached_log_lines = []
+            self._force_refresh = True
+            return False
+
+        # Job navigation: Ctrl+p (up) or Ctrl+n (down)
+        if key == "\x10":  # Ctrl+p - previous job
+            self._selected_job_index = max(0, self._selected_job_index - 1)
+            self._log_scroll_offset = 0  # Reset scroll on job change
+            self._force_refresh = True
+            return False
+
+        if key == "\x0e":  # Ctrl+n - next job
+            self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
+            self._log_scroll_offset = 0
+            self._force_refresh = True
+            return False
+
+        # Log scrolling: Ctrl+u (up) or Ctrl+d (down)
+        if key == "\x15":  # Ctrl+u - scroll log up (show older)
+            self._log_scroll_offset += 10
+            self._force_refresh = True
+            return False
+
+        if key == "\x04":  # Ctrl+d - scroll log down (show newer)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - 10)
+            self._force_refresh = True
+            return False
+
+        # Jump to top/bottom of log
+        if key == "g":  # Jump to top of log
+            self._log_scroll_offset = max(0, len(self._cached_log_lines) - 10)
+            self._force_refresh = True
+            return False
+
+        if key == "G":  # Jump to bottom (latest)
+            self._log_scroll_offset = 0
+            self._force_refresh = True
+            return False
+
+        return False
+
     def _make_easter_egg_panel(self) -> Panel:
         """Create the Fulcrum Genomics easter egg panel."""
         from rich.align import Align
@@ -562,6 +633,12 @@ class WorkflowMonitorTUI:
         help_text.add_row("", "[bold]Table Sorting[/bold]")
         help_text.add_row("s / S", "Cycle sort table (forward/backward)")
         help_text.add_row("1-4", "Sort by column (press again to reverse)")
+        help_text.add_row("", "")
+        help_text.add_row("", "[bold]Job Log Viewer[/bold]")
+        help_text.add_row("Enter", "Toggle job log view")
+        help_text.add_row("Ctrl+p / Ctrl+n", "Select prev/next job")
+        help_text.add_row("Ctrl+u / Ctrl+d", "Scroll log up/down")
+        help_text.add_row("g / G", "Jump to top/bottom of log")
 
         return Panel(
             help_text,
@@ -810,7 +887,7 @@ class WorkflowMonitorTUI:
         if is_sorting:
             job_data = self._sort_running_job_data(job_data)
 
-        for job, elapsed, remaining, _start, tool_progress in job_data[:10]:
+        for idx, (job, elapsed, remaining, _start, tool_progress) in enumerate(job_data[:10]):
             elapsed_str = format_duration(elapsed) if elapsed is not None else "?"
             remaining_str = f"~{format_duration(remaining)}" if remaining is not None else "?"
             started_str = "?"
@@ -827,7 +904,10 @@ class WorkflowMonitorTUI:
                     progress_str = f"{tool_progress.items_processed:,} {tool_progress.unit}"
 
             rule_style = "cyan"
-            if self._filter_matches and self._filter_index < len(self._filter_matches):
+            # Highlight selected job in selection mode
+            if self._job_selection_mode and idx == self._selected_job_index:
+                rule_style = "bold cyan on dark_blue"
+            elif self._filter_matches and self._filter_index < len(self._filter_matches):
                 if job.rule == self._filter_matches[self._filter_index]:
                     rule_style = "bold cyan on dark_blue"
 
@@ -845,11 +925,13 @@ class WorkflowMonitorTUI:
             table.add_row(msg, "", "", "", "")
 
         title = f"Currently Running ({len(progress.running_jobs)} jobs)"
-        if is_sorting:
+        if self._job_selection_mode:
+            title += " [bold cyan]◀ select job[/bold cyan]"
+        elif is_sorting:
             title += " [bold cyan]◀ sorting[/bold cyan]"
         if self._filter_text:
             title += f" [dim]filter: {self._filter_text}[/dim]"
-        border = f"bold {FG_BLUE}" if is_sorting else FG_BLUE
+        border = "cyan" if self._job_selection_mode else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
         return Panel(table, title=title, border_style=border)
 
     def _make_completions_table(self, progress: WorkflowProgress) -> Panel:
@@ -953,6 +1035,127 @@ class WorkflowMonitorTUI:
                     completed_by_rule[rule] = stats.count
 
         return self._estimator._infer_pending_rules(completed_by_rule, progress.pending_jobs)
+
+    def _read_log_tail(self, log_path: Path, max_lines: int = 500) -> list[str]:
+        """
+        Read the last N lines of a log file efficiently.
+
+        Args:
+            log_path: Path to the log file.
+            max_lines: Maximum number of lines to read.
+
+        Returns:
+            List of lines (most recent at end).
+        """
+        try:
+            # Check if cache is still valid
+            mtime = log_path.stat().st_mtime
+            if (
+                self._cached_log_path == log_path
+                and self._cached_log_mtime == mtime
+                and self._cached_log_lines
+            ):
+                return self._cached_log_lines
+
+            # Read file and take last N lines
+            content = log_path.read_text(errors="ignore")
+            lines = content.splitlines()
+
+            # Take last max_lines
+            result = lines[-max_lines:] if len(lines) > max_lines else lines
+
+            # Update cache
+            self._cached_log_path = log_path
+            self._cached_log_mtime = mtime
+            self._cached_log_lines = result
+
+            return result
+        except OSError:
+            return ["[Error reading log file]"]
+
+    def _make_job_log_panel(self, progress: WorkflowProgress) -> Panel:
+        """Create the job log panel showing selected job's log content."""
+        # Validate selection - no running jobs
+        if not progress.running_jobs:
+            return Panel(
+                "[dim]No running jobs[/dim]",
+                title="Job Log",
+                border_style=FG_BLUE,
+            )
+
+        # Clamp selection index
+        self._selected_job_index = min(
+            self._selected_job_index,
+            len(progress.running_jobs) - 1,
+        )
+        selected_job = progress.running_jobs[self._selected_job_index]
+
+        # Find log file using existing plugin infrastructure
+        log_path = find_rule_log(
+            selected_job.rule,
+            selected_job.job_id,
+            self.workflow_dir,
+        )
+
+        if log_path is None:
+            return Panel(
+                f"[dim]No log file found for {selected_job.rule}[/dim]",
+                title=f"Job Log: {selected_job.rule}",
+                border_style=FG_BLUE,
+            )
+
+        # Read log content
+        lines = self._read_log_tail(log_path, max_lines=500)
+
+        if not lines:
+            return Panel(
+                "[dim]Log file is empty[/dim]",
+                title=f"Job Log: {selected_job.rule}",
+                border_style=FG_BLUE,
+            )
+
+        # Calculate visible window based on console height
+        # Panel takes ~5 lines for border, title, and padding
+        panel_height = (self.console.height or 24) // 3 - 5
+        visible_lines = max(5, panel_height)
+
+        # Apply scroll offset (0 = show latest, positive = show older)
+        total_lines = len(lines)
+        end_index = total_lines - self._log_scroll_offset
+        start_index = max(0, end_index - visible_lines)
+        end_index = max(start_index + 1, end_index)
+
+        # Clamp scroll offset
+        max_offset = max(0, total_lines - visible_lines)
+        self._log_scroll_offset = min(self._log_scroll_offset, max_offset)
+
+        visible_content = lines[start_index:end_index]
+
+        # Build display
+        content = Text()
+        for i, line in enumerate(visible_content):
+            # Truncate long lines
+            display_line = line[:117] + "..." if len(line) > 120 else line
+            # Highlight recent lines
+            style = "white" if i >= len(visible_content) - 3 else "dim"
+            content.append(display_line + "\n", style=style)
+
+        # Build title with scroll indicator
+        scroll_indicator = ""
+        if self._log_scroll_offset > 0:
+            scroll_indicator = f" [line {start_index + 1}-{end_index}/{total_lines}]"
+        elif total_lines > visible_lines:
+            scroll_indicator = f" [latest {visible_lines}/{total_lines}]"
+
+        title = f"Job Log: {selected_job.rule}{scroll_indicator}"
+        subtitle = "[dim]Ctrl+u/d scroll | g/G top/bottom | Esc exit[/dim]"
+
+        return Panel(
+            content,
+            title=title,
+            subtitle=subtitle,
+            border_style="cyan",
+        )
 
     def _make_pending_jobs_panel(self, progress: WorkflowProgress) -> Panel:
         """Create the pending jobs panel showing estimated pending jobs by rule."""
@@ -1167,6 +1370,11 @@ class WorkflowMonitorTUI:
                 match_info = f" ({self._filter_index + 1}/{len(self._filter_matches)})"
                 footer.append(match_info, style="dim")
 
+        if self._job_selection_mode:
+            footer.append("  │  ", style="dim")
+            footer.append("Job Log", style="bold cyan")
+            footer.append(" (Esc exit)", style="dim")
+
         footer.append("  │  ")
         footer.append("snakesee", style=f"bold {FG_BLUE}")
         footer.append(" by ", style="dim")
@@ -1268,7 +1476,11 @@ class WorkflowMonitorTUI:
             layout["header"].update(self._make_header(progress))
             layout["progress"].update(self._make_progress_panel(progress, estimate))
             layout["running"].update(self._make_running_table(progress))
-            layout["pending"].update(self._make_pending_jobs_panel(progress))
+            # Show log panel when job is selected, otherwise show pending jobs
+            if self._job_selection_mode and progress.running_jobs:
+                layout["pending"].update(self._make_job_log_panel(progress))
+            else:
+                layout["pending"].update(self._make_pending_jobs_panel(progress))
             layout["completions"].update(self._make_completions_table(progress))
             layout["stats"].update(self._make_stats_panel())
             layout["summary_footer"].update(self._make_summary_footer(progress))
@@ -1357,6 +1569,18 @@ class WorkflowMonitorTUI:
                     # Check for keyboard input (non-blocking)
                     if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
                         key = sys.stdin.read(1)
+
+                        # Handle escape sequences (arrow keys, etc.)
+                        if key == "\x1b":
+                            # Check if this is an escape sequence or just Esc
+                            if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
+                                seq = sys.stdin.read(2)
+                                if seq == "[A":  # Up arrow
+                                    key = "\x10"  # Map to Ctrl+p
+                                elif seq == "[B":  # Down arrow
+                                    key = "\x0e"  # Map to Ctrl+n
+                                # Otherwise keep as Escape
+
                         if self._handle_key(key):
                             break
 
