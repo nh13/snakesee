@@ -289,6 +289,7 @@ def find_rule_log(
     rule_name: str,
     job_id: int | str | None,
     workflow_dir: Path,
+    wildcards: dict[str, str] | None = None,
 ) -> Path | None:
     """
     Attempt to find the log file for a running rule.
@@ -300,14 +301,32 @@ def find_rule_log(
         rule_name: Name of the rule.
         job_id: Snakemake job ID (if known).
         workflow_dir: Workflow root directory.
+        wildcards: Dictionary of wildcard names to values for the job.
 
     Returns:
         Path to the log file if found, None otherwise.
     """
+    import json
+
     snakemake_dir = workflow_dir / ".snakemake"
 
     # Common log locations to search
     search_paths: list[Path] = []
+
+    # First, try to find log path from .snakemake/metadata (most reliable)
+    metadata_dir = snakemake_dir / "metadata"
+    if metadata_dir.exists():
+        for meta_file in metadata_dir.iterdir():
+            try:
+                data = json.loads(meta_file.read_text())
+                if data.get("rule") == rule_name and data.get("log"):
+                    # Get the most recent log file for this rule
+                    for log_entry in data["log"]:
+                        log_path = workflow_dir / log_entry
+                        if log_path.exists():
+                            search_paths.append(log_path)
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
 
     # .snakemake/log/ directory for rule-specific logs
     log_dir = snakemake_dir / "log"
@@ -321,11 +340,29 @@ def find_rule_log(
     if logs_dir.exists():
         search_paths.extend(logs_dir.glob(f"**/{rule_name}*"))
         search_paths.extend(logs_dir.glob(f"**/*{rule_name}*"))
+        # Also search inside rule-named directories (logs/{rule}/*.log pattern)
+        rule_log_dir = logs_dir / rule_name
+        if rule_log_dir.exists():
+            search_paths.extend(rule_log_dir.glob("*"))
+        # Search for logs matching wildcard values
+        if wildcards:
+            for wc_value in wildcards.values():
+                if wc_value:  # Skip empty values
+                    search_paths.extend(logs_dir.glob(f"**/*{wc_value}*"))
 
     # log/ directory (another common convention)
     log_dir2 = workflow_dir / "log"
     if log_dir2.exists():
         search_paths.extend(log_dir2.glob(f"**/{rule_name}*"))
+        # Also search inside rule-named directories (log/{rule}/*.log pattern)
+        rule_log_dir2 = log_dir2 / rule_name
+        if rule_log_dir2.exists():
+            search_paths.extend(rule_log_dir2.glob("*"))
+        # Search for logs matching wildcard values
+        if wildcards:
+            for wc_value in wildcards.values():
+                if wc_value:
+                    search_paths.extend(log_dir2.glob(f"**/*{wc_value}*"))
 
     # Sort by modification time (newest first) and return first match
     existing_logs = [p for p in search_paths if p.is_file()]
