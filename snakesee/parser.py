@@ -610,7 +610,7 @@ def _filter_completions_by_timeframe(
         else:
             return [j for j in completions if j.end_time is not None and j.end_time >= log_start]
     except OSError:
-        return completions
+        return []  # Can't determine timeframe - return empty to avoid stale data
 
 
 def parse_workflow_state(
@@ -662,7 +662,7 @@ def parse_workflow_state(
     all_completions = list(parse_metadata_files(metadata_dir))
 
     # Filter completions to the relevant timeframe
-    completions = all_completions
+    completions: list[JobInfo] = []
     if log_path is not None:
         filtered = _filter_completions_by_timeframe(all_completions, log_path, cutoff_time)
         if filtered:
@@ -670,7 +670,7 @@ def parse_workflow_state(
         elif cutoff_time is not None:
             # Historical log with no metadata - parse completions from the log file
             completions = parse_completed_jobs_from_log(log_path)
-        # else: latest log with no filtered results - keep all_completions as fallback
+        # else: latest log with no completions yet - keep empty list (don't show stale data)
 
     completions.sort(key=lambda j: j.end_time or 0, reverse=True)
 
