@@ -834,7 +834,7 @@ class WorkflowMonitorTUI:
             ToolProgress if parseable, None otherwise.
         """
         # Find the log file for this job
-        log_path = find_rule_log(job.rule, job.job_id, self.workflow_dir)
+        log_path = find_rule_log(job.rule, job.job_id, self.workflow_dir, job.wildcards)
         if log_path is None:
             return None
 
@@ -1164,6 +1164,7 @@ class WorkflowMonitorTUI:
             selected_job.rule,
             selected_job.job_id,
             self.workflow_dir,
+            selected_job.wildcards,
         )
 
         if log_path is None:
