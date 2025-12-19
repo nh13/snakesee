@@ -28,6 +28,7 @@ from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
+from snakesee.parser import IncrementalLogReader
 from snakesee.parser import parse_workflow_state
 from snakesee.plugins import find_rule_log
 from snakesee.plugins import parse_tool_progress
@@ -182,6 +183,10 @@ class WorkflowMonitorTUI:
         self._events_enabled: bool = True
         self._init_event_reader()
 
+        # Incremental log reader for efficient polling
+        self._log_reader: IncrementalLogReader | None = None
+        self._init_log_reader()
+
         # Validation: compare event-based state with parsed state
         self._event_accumulator: EventAccumulator | None = None
         self._validation_logger: ValidationLogger | None = None
@@ -250,6 +255,24 @@ class WorkflowMonitorTUI:
             self._event_reader = EventReader(event_file)
         else:
             self._event_reader = None
+
+    def _init_log_reader(self) -> None:
+        """Initialize the incremental log reader.
+
+        Creates a reader for the current log file, enabling efficient
+        incremental parsing instead of re-reading the entire file on each poll.
+        """
+        from snakesee.parser import find_latest_log
+
+        snakemake_dir = self.workflow_dir / ".snakemake"
+        log_path = find_latest_log(snakemake_dir)
+        if log_path is not None:
+            self._log_reader = IncrementalLogReader(log_path)
+        else:
+            # Create with a placeholder path; will be updated when log appears
+            self._log_reader = IncrementalLogReader(
+                snakemake_dir / "log" / "placeholder.snakemake.log"
+            )
 
     def _init_validation(self) -> None:
         """Initialize validation if event file exists.
@@ -1828,8 +1851,14 @@ class WorkflowMonitorTUI:
         # Read new events from logger plugin (if available)
         events = self._read_new_events()
 
+        # Use incremental reader only for latest log (index 0)
+        reader = self._log_reader if self._current_log_index == 0 else None
+
         progress = parse_workflow_state(
-            self.workflow_dir, log_file=log_file, cutoff_time=self._cutoff_time
+            self.workflow_dir,
+            log_file=log_file,
+            cutoff_time=self._cutoff_time,
+            log_reader=reader,
         )
 
         # Validate: compare event-based state with parsed state (before applying)

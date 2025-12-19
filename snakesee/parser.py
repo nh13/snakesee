@@ -1,6 +1,9 @@
 """Parsers for Snakemake log files and metadata."""
 
+from __future__ import annotations
+
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -73,6 +76,265 @@ def find_latest_log(snakemake_dir: Path) -> Path | None:
         return None
     logs = sorted(log_dir.glob("*.snakemake.log"), key=lambda p: p.stat().st_mtime)
     return logs[-1] if logs else None
+
+
+class IncrementalLogReader:
+    """Streaming reader for Snakemake log files with position tracking.
+
+    Reads log lines incrementally, tracking the current file position to only
+    parse new content on subsequent calls. Maintains cumulative state for
+    running jobs, completed jobs, failed jobs, and progress.
+
+    Handles log file rotation by detecting inode changes or file truncation.
+
+    Attributes:
+        log_path: Path to the log file being monitored.
+    """
+
+    def __init__(self, log_path: Path) -> None:
+        """Initialize the incremental log reader.
+
+        Args:
+            log_path: Path to the Snakemake log file.
+        """
+        self.log_path = log_path
+        self._offset: int = 0
+        self._inode: int | None = None
+
+        # Progress state
+        self._completed: int = 0
+        self._total: int = 0
+
+        # Job tracking state
+        # started_jobs: jobid -> (rule, start_timestamp, wildcards)
+        self._started_jobs: dict[str, tuple[str, float | None, dict[str, str] | None]] = {}
+        self._finished_jobids: set[str] = set()
+        self._completed_jobs: list[JobInfo] = []
+
+        # Failed job tracking
+        self._failed_jobs: list[JobInfo] = []
+        self._seen_failures: set[tuple[str, str | None]] = set()
+
+        # Context tracking for parsing (reset per line, but persists across calls)
+        self._current_rule: str | None = None
+        self._current_jobid: str | None = None
+        self._current_wildcards: dict[str, str] | None = None
+        self._current_timestamp: float | None = None
+
+    def _check_rotation(self) -> bool:
+        """Check if the log file has been rotated or truncated.
+
+        Returns:
+            True if the file was rotated and state was reset.
+        """
+        if not self.log_path.exists():
+            return False
+
+        try:
+            stat = self.log_path.stat()
+            current_inode = stat.st_ino
+            current_size = stat.st_size
+
+            # Check for inode change (new file) or file truncation
+            if self._inode is not None and (
+                current_inode != self._inode or current_size < self._offset
+            ):
+                self.reset()
+                return True
+
+            self._inode = current_inode
+            return False
+        except OSError:
+            return False
+
+    def reset(self) -> None:
+        """Reset reader to start of file and clear all state.
+
+        Call this when switching to a different log file or to re-read
+        from the beginning.
+        """
+        self._offset = 0
+        self._inode = None
+        self._completed = 0
+        self._total = 0
+        self._started_jobs.clear()
+        self._finished_jobids.clear()
+        self._completed_jobs.clear()
+        self._failed_jobs.clear()
+        self._seen_failures.clear()
+        self._current_rule = None
+        self._current_jobid = None
+        self._current_wildcards = None
+        self._current_timestamp = None
+
+    def set_log_path(self, log_path: Path) -> None:
+        """Change the log file being monitored.
+
+        Resets all state if the path changes.
+
+        Args:
+            log_path: New log file path.
+        """
+        if log_path != self.log_path:
+            self.log_path = log_path
+            self.reset()
+
+    def read_new_lines(self) -> int:
+        """Read and parse new lines from the log file.
+
+        Updates internal state based on new log content. This method
+        should be called periodically to process new log entries.
+
+        Returns:
+            Number of new lines processed.
+        """
+        if not self.log_path.exists():
+            return 0
+
+        self._check_rotation()
+
+        lines_processed = 0
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._offset)
+                for line in f:
+                    self._parse_line(line)
+                    lines_processed += 1
+                self._offset = f.tell()
+        except OSError:
+            pass
+
+        return lines_processed
+
+    def _parse_line(self, line: str) -> None:
+        """Parse a single log line and update state.
+
+        Args:
+            line: Log line to parse.
+        """
+        line = line.rstrip("\n\r")
+
+        # Check for timestamp
+        if match := TIMESTAMP_PATTERN.match(line):
+            self._current_timestamp = _parse_timestamp(match.group(1))
+            return
+
+        # Check for progress
+        if match := PROGRESS_PATTERN.search(line):
+            self._completed = int(match.group(1))
+            self._total = int(match.group(2))
+            return
+
+        # Track current rule being executed
+        if match := RULE_START_PATTERN.match(line):
+            self._current_rule = match.group(1)
+            self._current_jobid = None
+            self._current_wildcards = None
+            return
+
+        # Capture wildcards within rule block
+        if match := WILDCARDS_PATTERN.match(line):
+            self._current_wildcards = _parse_wildcards(match.group(1))
+            return
+
+        # Capture jobid within rule block
+        if match := JOBID_PATTERN.match(line):
+            self._current_jobid = match.group(1)
+            if self._current_rule is not None and self._current_jobid not in self._started_jobs:
+                self._started_jobs[self._current_jobid] = (
+                    self._current_rule,
+                    self._current_timestamp,
+                    self._current_wildcards,
+                )
+            return
+
+        # Track finished jobs
+        if match := FINISHED_JOB_PATTERN.search(line):
+            jobid = match.group(1)
+            self._finished_jobids.add(jobid)
+
+            # Create completed job entry if we have start info
+            if jobid in self._started_jobs:
+                rule, start_time, wildcards = self._started_jobs[jobid]
+                self._completed_jobs.append(
+                    JobInfo(
+                        rule=rule,
+                        job_id=jobid,
+                        start_time=start_time,
+                        end_time=self._current_timestamp,
+                        wildcards=wildcards,
+                    )
+                )
+            return
+
+        # Detect errors
+        if match := ERROR_IN_RULE_PATTERN.search(line):
+            rule = match.group(1)
+            # Use context jobid/wildcards if the error rule matches current context
+            jobid = self._current_jobid if self._current_rule == rule else None
+            wildcards = self._current_wildcards if self._current_rule == rule else None
+            key = (rule, jobid)
+
+            if key not in self._seen_failures:
+                self._seen_failures.add(key)
+                self._failed_jobs.append(
+                    JobInfo(
+                        rule=rule,
+                        job_id=jobid,
+                        wildcards=wildcards,
+                    )
+                )
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """Get current workflow progress.
+
+        Returns:
+            Tuple of (completed_count, total_count).
+        """
+        return self._completed, self._total
+
+    @property
+    def running_jobs(self) -> list[JobInfo]:
+        """Get list of currently running jobs.
+
+        Returns:
+            List of JobInfo for jobs that started but haven't finished.
+        """
+        running: list[JobInfo] = []
+        for jobid, (rule, start_time, wildcards) in self._started_jobs.items():
+            if jobid not in self._finished_jobids:
+                running.append(
+                    JobInfo(
+                        rule=rule,
+                        job_id=jobid,
+                        start_time=start_time,
+                        wildcards=wildcards,
+                    )
+                )
+        return running
+
+    @property
+    def completed_jobs(self) -> list[JobInfo]:
+        """Get list of completed jobs with timing info.
+
+        Returns:
+            List of JobInfo for completed jobs, sorted by end time (newest first).
+        """
+        return sorted(
+            self._completed_jobs,
+            key=lambda j: j.end_time or 0,
+            reverse=True,
+        )
+
+    @property
+    def failed_jobs(self) -> list[JobInfo]:
+        """Get list of failed jobs.
+
+        Returns:
+            List of JobInfo for jobs that encountered errors.
+        """
+        return list(self._failed_jobs)
 
 
 def parse_progress_from_log(log_path: Path) -> tuple[int, int]:
@@ -619,6 +881,7 @@ def parse_workflow_state(
     workflow_dir: Path,
     log_file: Path | None = None,
     cutoff_time: float | None = None,
+    log_reader: IncrementalLogReader | None = None,
 ) -> WorkflowProgress:
     """
     Parse complete workflow state from .snakemake directory.
@@ -632,6 +895,9 @@ def parse_workflow_state(
         cutoff_time: Optional upper bound for filtering completions (e.g., when
                      the next log started). Used for "time machine" view of
                      historical logs.
+        log_reader: Optional incremental log reader for efficient polling.
+                    When provided, uses cached state instead of re-parsing
+                    the entire log file on each call.
 
     Returns:
         Current workflow state as a WorkflowProgress instance.
@@ -648,8 +914,16 @@ def parse_workflow_state(
     else:
         status = WorkflowStatus.COMPLETED
 
-    # Parse progress from log file
-    completed, total = (0, 0) if log_path is None else parse_progress_from_log(log_path)
+    # Update incremental reader if provided and log path matches/changes
+    if log_reader is not None and log_path is not None:
+        log_reader.set_log_path(log_path)
+        log_reader.read_new_lines()
+
+    # Parse progress from log file (or use reader state)
+    if log_reader is not None and log_path is not None:
+        completed, total = log_reader.progress
+    else:
+        completed, total = (0, 0) if log_path is None else parse_progress_from_log(log_path)
 
     # Get workflow start time from log file creation
     start_time: float | None = None
@@ -669,6 +943,9 @@ def parse_workflow_state(
         filtered = _filter_completions_by_timeframe(all_completions, log_path, cutoff_time)
         if filtered:
             completions = filtered
+        elif log_reader is not None:
+            # Use incremental reader's completed jobs
+            completions = log_reader.completed_jobs
         else:
             # No matching metadata - parse completions from the log file
             # This handles: no metadata dir, timing mismatches, historical logs
@@ -680,8 +957,12 @@ def parse_workflow_state(
     running: list[JobInfo] = []
     failed_list: list[JobInfo] = []
     if log_path is not None:
-        running = parse_running_jobs_from_log(log_path)
-        failed_list = parse_failed_jobs_from_log(log_path)
+        if log_reader is not None:
+            running = log_reader.running_jobs
+            failed_list = log_reader.failed_jobs
+        else:
+            running = parse_running_jobs_from_log(log_path)
+            failed_list = parse_failed_jobs_from_log(log_path)
 
     # If we have running jobs in the log, override status to RUNNING
     # (handles case where lock-based detection fails due to stale threshold)
