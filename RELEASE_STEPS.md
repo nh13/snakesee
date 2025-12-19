@@ -15,7 +15,7 @@ Before releasing, ensure:
 
 ## 1. Make GitHub Repository Public
 
-1. Go to https://github.com/fulcrumgenomics/snakesee/settings
+1. Go to https://github.com/nh13/snakesee/settings
 2. Scroll to "Danger Zone" section
 3. Click "Change visibility"
 4. Select "Make public"
@@ -34,7 +34,7 @@ Before releasing, ensure:
 
 ### 2.2 Add PyPI Token to GitHub Secrets
 
-1. Go to https://github.com/fulcrumgenomics/snakesee/settings/secrets/actions
+1. Go to https://github.com/nh13/snakesee/settings/secrets/actions
 2. Click "New repository secret"
 3. Name: `PYPI_API_TOKEN`
 4. Value: paste your PyPI token
@@ -122,7 +122,7 @@ This will trigger the `publish.yml` workflow which will:
 ### 3.4 Verify Release
 
 1. Check PyPI: https://pypi.org/project/snakesee/
-2. Check GitHub releases: https://github.com/fulcrumgenomics/snakesee/releases
+2. Check GitHub releases: https://github.com/nh13/snakesee/releases
 3. Test installation: `pip install snakesee`
 
 ---
@@ -187,7 +187,7 @@ This will trigger the `publish.yml` workflow which will:
        - snakesee --help
 
    about:
-     home: https://github.com/fulcrumgenomics/snakesee
+     home: https://github.com/nh13/snakesee
      license: MIT
      license_family: MIT
      license_file: LICENSE
@@ -196,7 +196,7 @@ This will trigger the `publish.yml` workflow which will:
        snakesee is a standalone terminal user interface (TUI) for monitoring
        Snakemake workflow progress. It provides real-time progress tracking,
        time estimation, and job status monitoring.
-     dev_url: https://github.com/fulcrumgenomics/snakesee
+     dev_url: https://github.com/nh13/snakesee
 
    extra:
      recipe-maintainers:
@@ -236,7 +236,7 @@ This will trigger the `publish.yml` workflow which will:
 1. Go to https://readthedocs.org/
 2. Sign in with GitHub
 3. Click "Import a Project"
-4. Select `fulcrumgenomics/snakesee`
+4. Select `nh13/snakesee`
 5. Configure:
    - Name: `snakesee`
    - Default branch: `main`
@@ -255,7 +255,7 @@ After enabling, documentation will be available at:
 
 1. Go to https://codecov.io/
 2. Sign in with GitHub
-3. Add the `fulcrumgenomics/snakesee` repository
+3. Add the `nh13/snakesee` repository
 4. Copy the Codecov token
 5. Add as GitHub secret named `CODECOV_TOKEN`
 

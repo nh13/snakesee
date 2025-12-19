@@ -328,9 +328,9 @@ This codebase was written with the assistance of AI (Claude). All code has been 
 [type-check-badge]: https://img.shields.io/badge/type%20checked-mypy-blue
 [type-check-link]: https://mypy.readthedocs.io/
 [license-badge]: https://img.shields.io/badge/license-MIT-blue
-[license-link]: https://github.com/fulcrumgenomics/snakesee/blob/main/LICENSE
-[tests-badge]: https://github.com/fulcrumgenomics/snakesee/actions/workflows/tests.yml/badge.svg
-[tests-link]: https://github.com/fulcrumgenomics/snakesee/actions/workflows/tests.yml
+[license-link]: https://github.com/nh13/snakesee/blob/main/LICENSE
+[tests-badge]: https://github.com/nh13/snakesee/actions/workflows/tests.yml/badge.svg
+[tests-link]: https://github.com/nh13/snakesee/actions/workflows/tests.yml
 [pypi-badge]: https://img.shields.io/pypi/v/snakesee
 [pypi-link]: https://pypi.org/project/snakesee/
 [pypi-downloads-badge]: https://img.shields.io/pypi/dm/snakesee

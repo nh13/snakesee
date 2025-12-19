@@ -34,6 +34,6 @@ snakesee status
 
 ## Links
 
-- [GitHub Repository](https://github.com/fulcrumgenomics/snakesee)
+- [GitHub Repository](https://github.com/nh13/snakesee)
 - [PyPI Package](https://pypi.org/project/snakesee/)
-- [Issue Tracker](https://github.com/fulcrumgenomics/snakesee/issues)
+- [Issue Tracker](https://github.com/nh13/snakesee/issues)
