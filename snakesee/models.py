@@ -8,6 +8,10 @@ from pathlib import Path
 from statistics import mean
 from statistics import stdev
 from typing import ClassVar
+from typing import Literal
+
+# Weighting strategy type for timing estimates
+WeightingStrategy = Literal["time", "index"]
 
 
 class WorkflowStatus(Enum):
@@ -86,7 +90,9 @@ class RuleTimingStats:
     input_sizes: list[int | None] = field(default_factory=list)
 
     HIGH_VARIANCE_CV: ClassVar[float] = 0.5  # Coefficient of variation threshold
-    DEFAULT_HALF_LIFE_DAYS: ClassVar[float] = 7.0  # Default half-life for temporal weighting
+    DEFAULT_HALF_LIFE_DAYS: ClassVar[float] = 7.0  # Default half-life for time-based weighting
+    DEFAULT_HALF_LIFE_LOGS: ClassVar[int] = 10  # Default half-life for index-based weighting
+    DEFAULT_WEIGHTING_STRATEGY: ClassVar[WeightingStrategy] = "index"  # Default strategy
 
     @property
     def count(self) -> int:
@@ -144,19 +150,30 @@ class RuleTimingStats:
         """True if this rule has highly variable runtimes."""
         return self.coefficient_of_variation > self.HIGH_VARIANCE_CV
 
-    def weighted_mean(self, half_life_days: float | None = None) -> float:
+    def weighted_mean(
+        self,
+        half_life_days: float | None = None,
+        strategy: WeightingStrategy | None = None,
+        half_life_logs: int | None = None,
+    ) -> float:
         """
-        Weighted mean favoring recent executions using time-based decay.
+        Weighted mean favoring recent executions.
 
-        When timestamps are available, uses exponential decay based on actual time
-        elapsed since each run. When timestamps are not available, falls back to
-        position-based weighting (assuming list order = chronological order).
+        Supports two weighting strategies:
+        - "time": Exponential decay based on wall-clock time since each run.
+                  Good for stable pipelines where data naturally ages out.
+        - "index": Exponential decay based on log index (number of runs ago).
+                   Good for active development where each run may fix issues.
 
         Args:
             half_life_days: After this many days, a run's weight is halved.
+                           Only used when strategy="time".
                            Defaults to DEFAULT_HALF_LIFE_DAYS (7.0).
-                           Smaller values = faster decay, more emphasis on recent runs.
-                           Larger values = slower decay, more historical data influence.
+            strategy: Weighting strategy to use ("time" or "index").
+                     Defaults to DEFAULT_WEIGHTING_STRATEGY ("index").
+            half_life_logs: After this many runs, a run's weight is halved.
+                           Only used when strategy="index".
+                           Defaults to DEFAULT_HALF_LIFE_LOGS (10).
 
         Returns:
             Weighted mean duration, or 0.0 if no data.
@@ -164,6 +181,15 @@ class RuleTimingStats:
         if not self.durations:
             return 0.0
 
+        if strategy is None:
+            strategy = self.DEFAULT_WEIGHTING_STRATEGY
+
+        if strategy == "index":
+            if half_life_logs is None:
+                half_life_logs = self.DEFAULT_HALF_LIFE_LOGS
+            return self._index_weighted_mean(half_life_logs)
+
+        # strategy == "time"
         if half_life_days is None:
             half_life_days = self.DEFAULT_HALF_LIFE_DAYS
 
@@ -171,8 +197,10 @@ class RuleTimingStats:
         if self.timestamps and len(self.timestamps) == len(self.durations):
             return self._time_weighted_mean(half_life_days)
 
-        # Fall back to position-based weighting (legacy behavior)
-        return self._position_weighted_mean()
+        # Fall back to index-based weighting if no timestamps
+        if half_life_logs is None:
+            half_life_logs = self.DEFAULT_HALF_LIFE_LOGS
+        return self._index_weighted_mean(half_life_logs)
 
     def _time_weighted_mean(self, half_life_days: float) -> float:
         """
@@ -201,11 +229,49 @@ class RuleTimingStats:
 
         return weighted_sum / weight_total
 
+    def _index_weighted_mean(self, half_life_logs: int) -> float:
+        """
+        Calculate weighted mean using index-based weights.
+
+        Applies exponential decay based on how many runs ago each entry was,
+        not based on wall-clock time. This is useful when each pipeline run
+        potentially fixes issues, making older runs less valid regardless of
+        actual time elapsed.
+
+        Assumes durations list is ordered oldest-to-newest.
+
+        Args:
+            half_life_logs: After this many runs, weight is halved.
+                           E.g., half_life_logs=10 means a run from 10 runs ago
+                           has 50% weight, 20 runs ago has 25% weight, etc.
+
+        Returns:
+            Index-weighted mean duration.
+        """
+        n = len(self.durations)
+        weights: list[float] = []
+
+        for i in range(n):
+            # i=0 is oldest, i=n-1 is most recent
+            # runs_ago = n - 1 - i (0 for most recent, n-1 for oldest)
+            runs_ago = n - 1 - i
+            weight = 0.5 ** (runs_ago / half_life_logs)
+            weights.append(weight)
+
+        weighted_sum = sum(d * w for d, w in zip(self.durations, weights, strict=True))
+        weight_total = sum(weights)
+
+        if weight_total <= 0:
+            return self.mean_duration  # Fallback to simple mean
+
+        return weighted_sum / weight_total
+
     def _position_weighted_mean(self) -> float:
         """
         Calculate weighted mean using position-based weights (legacy behavior).
 
         Assumes durations list is ordered oldest-to-newest.
+        Deprecated: Use _index_weighted_mean with configurable half_life_logs instead.
 
         Returns:
             Position-weighted mean duration.
@@ -237,6 +303,8 @@ class RuleTimingStats:
         self,
         input_size: int,
         half_life_days: float | None = None,
+        strategy: WeightingStrategy | None = None,
+        half_life_logs: int | None = None,
     ) -> tuple[float, float]:
         """
         Estimate duration scaled by input file size.
@@ -247,13 +315,15 @@ class RuleTimingStats:
 
         Args:
             input_size: Size of input files for the job in bytes.
-            half_life_days: Half-life for temporal weighting.
+            half_life_days: Half-life for time-based weighting.
+            strategy: Weighting strategy ("time" or "index").
+            half_life_logs: Half-life for index-based weighting.
 
         Returns:
             Tuple of (scaled_estimate, scaling_confidence).
             Confidence is higher when we have good size data correlation.
         """
-        base_estimate = self.weighted_mean(half_life_days)
+        base_estimate = self.weighted_mean(half_life_days, strategy, half_life_logs)
         median_size = self.median_input_size
 
         if median_size is None or median_size == 0:
@@ -284,19 +354,41 @@ class RuleTimingStats:
 
         return scaled_estimate, confidence
 
-    def recency_factor(self, half_life_days: float | None = None) -> float:
+    def recency_factor(
+        self,
+        half_life_days: float | None = None,
+        strategy: WeightingStrategy | None = None,
+        half_life_logs: int | None = None,
+    ) -> float:
         """
         Calculate a recency factor (0.0-1.0) based on data freshness.
 
         This measures how recent the timing data is. A value of 1.0 means
         most data is very recent; lower values indicate stale data.
 
+        For strategy="time": Based on wall-clock time since runs.
+        For strategy="index": Based on number of runs (always 1.0 for index strategy
+                              since recency is inherent in the weighting).
+
         Args:
-            half_life_days: Half-life for decay calculation.
+            half_life_days: Half-life for time-based decay calculation.
+            strategy: Weighting strategy ("time" or "index").
+            half_life_logs: Half-life for index-based weighting (unused for recency).
 
         Returns:
             Recency factor between 0.0 and 1.0.
         """
+        if strategy is None:
+            strategy = self.DEFAULT_WEIGHTING_STRATEGY
+
+        # For index-based strategy, recency is always "fresh" since we weight by index
+        # The recency concept doesn't apply in the same way - data is never "stale"
+        # just less weighted based on position
+        if strategy == "index":
+            # Return high recency if we have data, neutral otherwise
+            return 0.9 if self.durations else 0.5
+
+        # Time-based recency calculation
         if not self.timestamps:
             return 0.5  # Unknown recency, return neutral value
 

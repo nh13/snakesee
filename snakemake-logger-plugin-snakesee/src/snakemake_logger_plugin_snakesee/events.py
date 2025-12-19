@@ -1,12 +1,9 @@
 """Event types and dataclasses for snakesee logger plugin."""
 
-from dataclasses import asdict
-from dataclasses import dataclass
-from dataclasses import field
+import json
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
-
-import json
 
 
 class EventType(str, Enum):

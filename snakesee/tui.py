@@ -20,9 +20,6 @@ from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
-from snakesee.validation import EventAccumulator
-from snakesee.validation import ValidationLogger
-from snakesee.validation import compare_states
 from snakesee.models import RuleTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
@@ -33,6 +30,9 @@ from snakesee.parser import parse_workflow_state
 from snakesee.plugins import find_rule_log
 from snakesee.plugins import parse_tool_progress
 from snakesee.plugins.base import ToolProgress
+from snakesee.validation import EventAccumulator
+from snakesee.validation import ValidationLogger
+from snakesee.validation import compare_states
 
 # Refresh rate bounds
 MIN_REFRESH_RATE = 0.5
@@ -287,9 +287,7 @@ class WorkflowMonitorTUI:
             self._validation_logger = ValidationLogger(self.workflow_dir)
             self._validation_logger.log_session_start()
 
-    def _validate_state(
-        self, events: list[SnakeseeEvent], parsed: WorkflowProgress
-    ) -> None:
+    def _validate_state(self, events: list[SnakeseeEvent], parsed: WorkflowProgress) -> None:
         """Compare event-based state with parsed state and log discrepancies.
 
         Args:
@@ -740,7 +738,9 @@ class WorkflowMonitorTUI:
 
         if key == "\x0e":  # Ctrl+n - next job
             if self._log_source == "completions":
-                self._selected_completion_index = min(num_jobs - 1, self._selected_completion_index + 1)
+                self._selected_completion_index = min(
+                    num_jobs - 1, self._selected_completion_index + 1
+                )
             else:
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
             self._log_scroll_offset = 0
@@ -1329,9 +1329,7 @@ class WorkflowMonitorTUI:
         except OSError:
             return ["[Error reading log file]"]
 
-    def _get_completions_list(
-        self, progress: WorkflowProgress
-    ) -> tuple[list[JobInfo], set[int]]:
+    def _get_completions_list(self, progress: WorkflowProgress) -> tuple[list[JobInfo], set[int]]:
         """Get merged list of completed and failed jobs with same order as table.
 
         Applies the same filtering and sorting as _make_completions_table() to ensure

@@ -49,6 +49,9 @@ target-version = "py311"
 select = ["C901", "B", "E", "F", "I", "W", "Q"]
 ignore = ["E203", "E701"]
 
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
 [tool.mypy]
 files = ["src/"]
 strict_optional = false

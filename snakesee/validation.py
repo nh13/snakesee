@@ -5,17 +5,14 @@ the logger plugin events and log/metadata parsing, enabling bug detection
 in either approach.
 """
 
-import json
 import logging
 from dataclasses import dataclass
 from dataclasses import field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
-from snakesee.models import JobInfo
 from snakesee.models import WorkflowProgress
 
 # Validation log file name
@@ -199,9 +196,7 @@ class ValidationLogger:
     def _setup_logger(self) -> None:
         """Set up file logging."""
         self._handler = logging.FileHandler(self.log_path, mode="a")
-        self._handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-        )
+        self._handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         self._logger.addHandler(self._handler)
         self._logger.setLevel(logging.DEBUG)
 
@@ -241,9 +236,7 @@ class ValidationLogger:
         for d in discrepancies:
             self.log_discrepancy(d)
 
-    def log_summary(
-        self, event_state: EventAccumulator, parsed: WorkflowProgress
-    ) -> None:
+    def log_summary(self, event_state: EventAccumulator, parsed: WorkflowProgress) -> None:
         """Log a summary of current state from both sources."""
         self._logger.debug(
             f"EVENT STATE: total={event_state.total_jobs}, "
@@ -265,9 +258,7 @@ class ValidationLogger:
             self._handler.close()
 
 
-def compare_states(
-    event_state: EventAccumulator, parsed: WorkflowProgress
-) -> list[Discrepancy]:
+def compare_states(event_state: EventAccumulator, parsed: WorkflowProgress) -> list[Discrepancy]:
     """Compare event-accumulated state with parsed state.
 
     Args:
@@ -292,10 +283,7 @@ def compare_states(
         )
 
     # Compare completed jobs
-    if (
-        event_state.completed_jobs != parsed.completed_jobs
-        and event_state.completed_jobs > 0
-    ):
+    if event_state.completed_jobs != parsed.completed_jobs and event_state.completed_jobs > 0:
         discrepancies.append(
             Discrepancy(
                 category="completed_jobs",
@@ -381,10 +369,7 @@ def compare_states(
         for parsed_job in parsed.running_jobs:
             if parsed_job.job_id == job_id_str:
                 # Compare start times
-                if (
-                    event_job.start_time is not None
-                    and parsed_job.start_time is not None
-                ):
+                if event_job.start_time is not None and parsed_job.start_time is not None:
                     time_diff = abs(event_job.start_time - parsed_job.start_time)
                     if time_diff > 5.0:  # More than 5 seconds difference
                         discrepancies.append(

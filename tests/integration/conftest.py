@@ -14,7 +14,6 @@ from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.parser import parse_workflow_state
 from snakesee.validation import EventAccumulator
-from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
 
 # Path to the workflows directory
@@ -61,7 +60,7 @@ def logger_plugin_available() -> bool:
     """Check if the snakesee logger plugin is installed."""
     try:
         # Try to import the plugin
-        import snakemake_logger_plugin_snakesee  # noqa: F401
+        import snakemake_logger_plugin_snakesee  # noqa: F401  # type: ignore[import-untyped]
 
         return True
     except ImportError:
@@ -326,10 +325,7 @@ class EventValidationResult:
     @property
     def all_jobs_finished(self) -> bool:
         """Check if all jobs are in finished state."""
-        return (
-            len(self.accumulator.running_jobs) == 0
-            and len(self.accumulator.submitted_jobs) == 0
-        )
+        return len(self.accumulator.running_jobs) == 0 and len(self.accumulator.submitted_jobs) == 0
 
     @property
     def job_count(self) -> int:

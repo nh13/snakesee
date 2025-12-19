@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
 from snakesee.models import JobInfo

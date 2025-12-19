@@ -1,16 +1,11 @@
 """Tests for LogHandler."""
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
-from snakemake_logger_plugin_snakesee.events import EventType
-from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
-from snakemake_logger_plugin_snakesee.handler import LogHandler
-from snakemake_logger_plugin_snakesee.handler import LogEvent
+from snakemake_logger_plugin_snakesee.events import EventType, SnakeseeEvent
+from snakemake_logger_plugin_snakesee.handler import LogEvent, LogHandler
 from snakemake_logger_plugin_snakesee.settings import LogHandlerSettings
 
 

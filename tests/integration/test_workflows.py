@@ -188,9 +188,7 @@ class TestFailingWorkflows:
     def test_multiple_failures(self, workflow_runner: WorkflowRunner) -> None:
         """Test workflow with multiple failing jobs."""
         workflow_runner.setup_workflow("multiple_failures")
-        run_result = workflow_runner.run(
-            expect_failure=True, extra_args=["--keep-going"]
-        )
+        run_result = workflow_runner.run(expect_failure=True, extra_args=["--keep-going"])
 
         # Workflow should fail (multiple failures)
         assert run_result.returncode != 0
@@ -225,7 +223,7 @@ class TestEdgeCases:
         assert run_result.returncode == 0
 
         # Event count should be 0 or minimal (workflow_started only)
-        event_count = workflow_runner.get_event_count()
+        _event_count = workflow_runner.get_event_count()
         # Dry run may or may not produce events depending on plugin behavior
         # Just verify it doesn't crash
 
@@ -492,11 +490,7 @@ class TestKeepGoing:
     def test_keep_going_mixed(self, workflow_runner: WorkflowRunner) -> None:
         """Test --keep-going with mixed success/failure branches."""
         workflow_runner.setup_workflow("keep_going_mixed")
-        run_result = workflow_runner.run(
-            expect_failure=True,
-            cores=4,
-            extra_args=["--keep-going"]
-        )
+        run_result = workflow_runner.run(expect_failure=True, cores=4, extra_args=["--keep-going"])
 
         # Should fail overall
         assert run_result.returncode != 0
