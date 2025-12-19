@@ -142,3 +142,42 @@ snakesee reads from the `.snakemake/` directory that Snakemake creates:
 - `.snakemake/incomplete/` - In-progress job markers
 
 No special flags are needed when running Snakemake - snakesee works with any existing workflow.
+
+## Enhanced Monitoring with Logger Plugin
+
+For more accurate real-time monitoring, you can optionally use the Snakemake logger plugin. This provides direct event streaming from Snakemake instead of log parsing.
+
+### Installation
+
+```bash
+pip install snakemake-logger-plugin-snakesee
+```
+
+### Usage
+
+Run Snakemake with the logger plugin enabled:
+
+```bash
+snakemake --logger snakesee --cores 4
+```
+
+Then monitor with snakesee as usual:
+
+```bash
+snakesee watch
+```
+
+### Benefits
+
+| Feature | Without Plugin | With Plugin |
+|---------|---------------|-------------|
+| Job detection | Log parsing (polling) | Real-time events |
+| Start times | Approximate (log modification time) | Exact timestamp |
+| Job durations | Calculated from log patterns | Precise from events |
+| Failed jobs | Pattern matching in logs | Direct notification |
+
+### How It Works
+
+When the logger plugin is active, Snakemake writes events to `.snakesee_events.jsonl` in the workflow directory. Snakesee automatically detects this file and uses the events to enhance its monitoring accuracy.
+
+The plugin is completely optional - snakesee works without it using log parsing, and automatically switches to using events when available.

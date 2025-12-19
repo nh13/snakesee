@@ -15,6 +15,10 @@ from rich.table import Table
 from rich.text import Text
 
 from snakesee.estimator import TimeEstimator
+from snakesee.events import EventReader
+from snakesee.events import EventType
+from snakesee.events import SnakeseeEvent
+from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
 from snakesee.models import TimeEstimate
@@ -170,6 +174,11 @@ class WorkflowMonitorTUI:
         self._cached_log_lines: list[str] = []
         self._cached_log_mtime: float = 0
 
+        # Event reader for real-time events from logger plugin
+        self._event_reader: EventReader | None = None
+        self._events_enabled: bool = True
+        self._init_event_reader()
+
         self._init_estimator()
 
     def _refresh_log_list(self) -> None:
@@ -222,6 +231,140 @@ class WorkflowMonitorTUI:
                 self._estimator.load_from_metadata(metadata_dir)
         else:
             self._estimator = None
+
+    def _init_event_reader(self) -> None:
+        """Initialize the event reader if event file exists."""
+        if not self._events_enabled:
+            return
+
+        event_file = get_event_file_path(self.workflow_dir)
+        if event_file.exists():
+            self._event_reader = EventReader(event_file)
+        else:
+            self._event_reader = None
+
+    def _read_new_events(self) -> list[SnakeseeEvent]:
+        """Read new events from the event file if available.
+
+        Returns:
+            List of new events, or empty list if no events or event reading disabled.
+        """
+        if not self._events_enabled or self._event_reader is None:
+            # Try to initialize if event file now exists
+            if self._events_enabled and self._event_reader is None:
+                event_file = get_event_file_path(self.workflow_dir)
+                if event_file.exists():
+                    self._event_reader = EventReader(event_file)
+
+            if self._event_reader is None:
+                return []
+
+        return self._event_reader.read_new_events()
+
+    def _apply_events_to_progress(
+        self, progress: WorkflowProgress, events: list[SnakeseeEvent]
+    ) -> WorkflowProgress:
+        """Apply event updates to enhance progress accuracy.
+
+        Events from the logger plugin provide more accurate timing and
+        status information than log parsing.
+
+        Args:
+            progress: The current workflow progress from parsing.
+            events: New events from the logger plugin.
+
+        Returns:
+            Updated WorkflowProgress with event data applied.
+        """
+        if not events:
+            return progress
+
+        # Track updates from events
+        new_total = progress.total_jobs
+        new_completed = progress.completed_jobs
+        new_running_jobs = list(progress.running_jobs)
+        new_completions = list(progress.recent_completions)
+        new_failed = progress.failed_jobs
+        new_failed_list = list(progress.failed_jobs_list)
+
+        # Process events to update state
+        for event in events:
+            if event.event_type == EventType.PROGRESS:
+                # Use authoritative progress from snakemake
+                if event.total_jobs is not None:
+                    new_total = event.total_jobs
+                if event.completed_jobs is not None:
+                    new_completed = event.completed_jobs
+
+            elif event.event_type == EventType.JOB_STARTED:
+                # Update running job start time if we have a matching job
+                if event.job_id is not None:
+                    for i, job in enumerate(new_running_jobs):
+                        if job.job_id == str(event.job_id):
+                            # Create updated JobInfo with accurate start time
+                            new_running_jobs[i] = JobInfo(
+                                rule=job.rule,
+                                job_id=job.job_id,
+                                start_time=event.timestamp,
+                                end_time=job.end_time,
+                                output_file=job.output_file,
+                                wildcards=job.wildcards,
+                                input_size=job.input_size,
+                            )
+                            break
+
+            elif event.event_type == EventType.JOB_FINISHED:
+                # Update completion with accurate duration
+                if event.job_id is not None and event.duration is not None:
+                    # Check if this job is in our recent completions
+                    # and update its duration
+                    for i, job in enumerate(new_completions):
+                        if job.job_id == str(event.job_id):
+                            new_completions[i] = JobInfo(
+                                rule=job.rule,
+                                job_id=job.job_id,
+                                start_time=event.timestamp - event.duration
+                                if event.duration
+                                else job.start_time,
+                                end_time=event.timestamp,
+                                output_file=job.output_file,
+                                wildcards=job.wildcards,
+                                input_size=job.input_size,
+                            )
+                            break
+
+            elif event.event_type == EventType.JOB_ERROR:
+                # Track failed job from event
+                if event.job_id is not None:
+                    # Check if we already have this failure
+                    job_id_str = str(event.job_id)
+                    if not any(j.job_id == job_id_str for j in new_failed_list):
+                        new_failed_list.append(
+                            JobInfo(
+                                rule=event.rule_name or "unknown",
+                                job_id=job_id_str,
+                                start_time=event.timestamp - event.duration
+                                if event.duration
+                                else None,
+                                end_time=event.timestamp,
+                                wildcards=event.wildcards_dict,
+                            )
+                        )
+                        new_failed = len(new_failed_list)
+
+        # Return updated progress
+        return WorkflowProgress(
+            workflow_dir=progress.workflow_dir,
+            status=progress.status,
+            total_jobs=new_total,
+            completed_jobs=new_completed,
+            failed_jobs=new_failed,
+            failed_jobs_list=new_failed_list,
+            running_jobs=new_running_jobs,
+            recent_completions=new_completions,
+            start_time=progress.start_time,
+            log_file=progress.log_file,
+        )
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""
@@ -1629,9 +1772,17 @@ class WorkflowMonitorTUI:
         log_file = self._get_current_log() if self._current_log_index > 0 else None
         self._cutoff_time = self._get_cutoff_time()
 
+        # Read new events from logger plugin (if available)
+        events = self._read_new_events()
+
         progress = parse_workflow_state(
             self.workflow_dir, log_file=log_file, cutoff_time=self._cutoff_time
         )
+
+        # Apply events to enhance progress accuracy
+        if events:
+            progress = self._apply_events_to_progress(progress, events)
+            self._force_refresh = True
 
         estimate = None
         if self._estimator is not None:

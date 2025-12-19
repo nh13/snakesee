@@ -224,6 +224,37 @@ my_tool = "my_package.plugins:MyToolPlugin"
 
 Entry-point plugins are discovered automatically when the package is installed.
 
+### Enhanced Monitoring with Logger Plugin
+
+For real-time event streaming (instead of log polling), install the optional Snakemake logger plugin:
+
+```bash
+pip install snakemake-logger-plugin-snakesee
+```
+
+Then run Snakemake with the logger:
+
+```bash
+snakemake --logger snakesee --cores 4
+```
+
+In another terminal, monitor with snakesee:
+
+```bash
+snakesee watch
+```
+
+**Benefits of the logger plugin:**
+
+| Feature | Without Plugin | With Plugin |
+|---------|---------------|-------------|
+| Job detection | Log parsing (polling) | Real-time events |
+| Start times | Approximate (log mtime) | Exact timestamp |
+| Durations | Calculated from logs | Precise from events |
+| Failed jobs | Pattern matching | Direct notification |
+
+The plugin is optional - snakesee works without it using log parsing, and automatically uses events when available.
+
 ## TUI Keyboard Shortcuts
 
 | Key | Action |
