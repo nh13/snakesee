@@ -1113,15 +1113,35 @@ class WorkflowMonitorTUI:
     def _get_completions_list(
         self, progress: WorkflowProgress
     ) -> tuple[list[JobInfo], set[int]]:
-        """Get merged list of completed and failed jobs, sorted by end_time.
+        """Get merged list of completed and failed jobs with same order as table.
+
+        Applies the same filtering and sorting as _make_completions_table() to ensure
+        the selected index matches between the table display and log panel.
 
         Returns:
             Tuple of (jobs_list, failed_job_ids_set)
         """
         failed_job_ids = {id(job) for job in progress.failed_jobs_list}
         all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
+
+        # Sort by end_time (most recent first) by default - matches table
         all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
-        return all_jobs, failed_job_ids
+
+        # Apply filtering - must match _make_completions_table
+        jobs = self._filter_jobs(all_jobs)
+
+        # Apply custom sorting if completions table is being sorted
+        is_sorting = self._sort_table == "completions"
+        if is_sorting and jobs:
+            sort_keys = {
+                0: lambda j: j.rule.lower(),
+                1: lambda j: j.duration or 0,
+                2: lambda j: j.end_time or 0,
+            }
+            key_fn = sort_keys.get(self._sort_column, sort_keys[2])
+            jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
+
+        return jobs, failed_job_ids
 
     def _make_job_log_panel(self, progress: WorkflowProgress) -> Panel:
         """Create the job log panel showing selected job's log content."""
