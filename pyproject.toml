@@ -29,10 +29,10 @@ dependencies = ["rich>=13.0.0", "defopt>=6.4.0", "snakemake>=8.0.0"]
 logo = ["rich-pixels>=3.0.1", "pillow>=10.0.0"]
 
 [project.urls]
-Homepage = "https://github.com/fulcrumgenomics/snakesee"
-Repository = "https://github.com/fulcrumgenomics/snakesee"
+Homepage = "https://github.com/nh13/snakesee"
+Repository = "https://github.com/nh13/snakesee"
 Documentation = "https://snakesee.readthedocs.io"
-"Bug Tracker" = "https://github.com/fulcrumgenomics/snakesee/issues"
+"Bug Tracker" = "https://github.com/nh13/snakesee/issues"
 
 [project.scripts]
 snakesee = "snakesee.cli:main"
