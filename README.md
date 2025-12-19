@@ -295,6 +295,10 @@ The plugin is optional - snakesee works without it using log parsing, and automa
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
+## Disclaimer
+
+This codebase was written with the assistance of AI (Claude). All code has been reviewed and tested, but users should evaluate fitness for their use case.
+
 ## License
 
 [MIT License](LICENSE) - Copyright (c) 2024 Fulcrum Genomics LLC
