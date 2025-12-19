@@ -1143,10 +1143,32 @@ class WorkflowMonitorTUI:
 
         return jobs, failed_job_ids
 
+    def _get_running_jobs_list(self, progress: WorkflowProgress) -> list[JobInfo]:
+        """Get running jobs list with same order as table.
+
+        Applies the same filtering and sorting as _make_running_table() to ensure
+        the selected index matches between the table display and log panel.
+
+        Returns:
+            List of running jobs in display order.
+        """
+        jobs = self._filter_jobs(progress.running_jobs)
+
+        # Apply custom sorting if running table is being sorted
+        is_sorting = self._sort_table == "running"
+        if is_sorting and jobs:
+            # Build job data tuples for sorting (same as _make_running_table)
+            job_data = self._build_running_job_data(jobs)
+            job_data = self._sort_running_job_data(job_data)
+            # Extract just the jobs from the sorted tuples
+            jobs = [jd[0] for jd in job_data]
+
+        return jobs
+
     def _make_job_log_panel(self, progress: WorkflowProgress) -> Panel:
         """Create the job log panel showing selected job's log content."""
-        # Build job lists for both sources
-        running_jobs = progress.running_jobs
+        # Build job lists for both sources - use same ordering as tables
+        running_jobs = self._get_running_jobs_list(progress)
         completions, failed_ids = self._get_completions_list(progress)
 
         # Determine which source to use and get selected job
