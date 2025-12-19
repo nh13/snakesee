@@ -20,6 +20,9 @@ from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
+from snakesee.validation import EventAccumulator
+from snakesee.validation import ValidationLogger
+from snakesee.validation import compare_states
 from snakesee.models import RuleTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
@@ -179,6 +182,11 @@ class WorkflowMonitorTUI:
         self._events_enabled: bool = True
         self._init_event_reader()
 
+        # Validation: compare event-based state with parsed state
+        self._event_accumulator: EventAccumulator | None = None
+        self._validation_logger: ValidationLogger | None = None
+        self._init_validation()
+
         self._init_estimator()
 
     def _refresh_log_list(self) -> None:
@@ -242,6 +250,51 @@ class WorkflowMonitorTUI:
             self._event_reader = EventReader(event_file)
         else:
             self._event_reader = None
+
+    def _init_validation(self) -> None:
+        """Initialize validation if event file exists.
+
+        Validation is automatically enabled when the logger plugin's event
+        file is detected, allowing comparison between event-based and
+        parsed state to find bugs in either approach.
+        """
+        event_file = get_event_file_path(self.workflow_dir)
+        if event_file.exists():
+            self._event_accumulator = EventAccumulator()
+            self._validation_logger = ValidationLogger(self.workflow_dir)
+            self._validation_logger.log_session_start()
+
+    def _validate_state(
+        self, events: list[SnakeseeEvent], parsed: WorkflowProgress
+    ) -> None:
+        """Compare event-based state with parsed state and log discrepancies.
+
+        Args:
+            events: New events to process.
+            parsed: Current parsed workflow progress.
+        """
+        # Initialize validation if not yet done (event file may have appeared)
+        if self._event_accumulator is None:
+            self._init_validation()
+
+        if self._event_accumulator is None or self._validation_logger is None:
+            return
+
+        # Accumulate new events
+        self._event_accumulator.process_events(events)
+
+        # Only compare if we have meaningful state from events
+        if not self._event_accumulator.workflow_started:
+            return
+
+        # Compare states and log discrepancies
+        discrepancies = compare_states(self._event_accumulator, parsed)
+
+        if discrepancies:
+            self._validation_logger.log_discrepancies(discrepancies)
+
+        # Log summary periodically (every comparison for now)
+        self._validation_logger.log_summary(self._event_accumulator, parsed)
 
     def _read_new_events(self) -> list[SnakeseeEvent]:
         """Read new events from the event file if available.
@@ -1778,6 +1831,11 @@ class WorkflowMonitorTUI:
         progress = parse_workflow_state(
             self.workflow_dir, log_file=log_file, cutoff_time=self._cutoff_time
         )
+
+        # Validate: compare event-based state with parsed state (before applying)
+        # This logs discrepancies to help find bugs in either approach
+        if events:
+            self._validate_state(events, progress)
 
         # Apply events to enhance progress accuracy
         if events:

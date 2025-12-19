@@ -66,7 +66,7 @@ class SnakeseeEvent:
         data["event_type"] = self.event_type.value
         # Remove None values to reduce file size
         data = {k: v for k, v in data.items() if v is not None}
-        return json.dumps(data, separators=(",", ":"))
+        return json.dumps(data, separators=(",", ":"), default=str)
 
     @classmethod
     def from_json(cls, json_str: str) -> "SnakeseeEvent":
