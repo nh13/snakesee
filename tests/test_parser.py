@@ -8,6 +8,7 @@ from snakesee.parser import _parse_wildcards
 from snakesee.parser import collect_rule_timing_stats
 from snakesee.parser import collect_wildcard_timing_stats
 from snakesee.parser import find_latest_log
+from snakesee.parser import IncrementalLogReader
 from snakesee.parser import is_workflow_running
 from snakesee.parser import parse_failed_jobs_from_log
 from snakesee.parser import parse_metadata_files
@@ -547,3 +548,247 @@ class TestCollectWildcardTimingStats:
         assert "B" in wts.stats_by_value
         assert wts.stats_by_value["A"].count == 2
         assert wts.stats_by_value["B"].count == 1
+
+
+class TestIncrementalLogReader:
+    """Tests for IncrementalLogReader class."""
+
+    def test_empty_file(self, tmp_path: Path) -> None:
+        """Test reading an empty log file."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("")
+
+        reader = IncrementalLogReader(log_file)
+        lines = reader.read_new_lines()
+
+        assert lines == 0
+        assert reader.progress == (0, 0)
+        assert reader.running_jobs == []
+        assert reader.completed_jobs == []
+        assert reader.failed_jobs == []
+
+    def test_nonexistent_file(self, tmp_path: Path) -> None:
+        """Test reading from nonexistent file."""
+        log_file = tmp_path / "nonexistent.log"
+        reader = IncrementalLogReader(log_file)
+
+        lines = reader.read_new_lines()
+        assert lines == 0
+
+    def test_progress_parsing(self, tmp_path: Path) -> None:
+        """Test parsing progress lines."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("5 of 10 steps (50%) done\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        assert reader.progress == (5, 10)
+
+    def test_progress_updates(self, tmp_path: Path) -> None:
+        """Test that progress updates with new lines."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("1 of 10 steps (10%) done\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+        assert reader.progress == (1, 10)
+
+        # Append more content
+        with open(log_file, "a") as f:
+            f.write("5 of 10 steps (50%) done\n")
+
+        reader.read_new_lines()
+        assert reader.progress == (5, 10)
+
+    def test_running_jobs(self, tmp_path: Path) -> None:
+        """Test detecting running jobs."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule align:
+    wildcards: sample=A
+    jobid: 1
+rule sort:
+    jobid: 2
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        running = reader.running_jobs
+        assert len(running) == 2
+        rules = {j.rule for j in running}
+        assert rules == {"align", "sort"}
+
+        # Check wildcards captured
+        align_job = next(j for j in running if j.rule == "align")
+        assert align_job.wildcards == {"sample": "A"}
+
+    def test_completed_jobs(self, tmp_path: Path) -> None:
+        """Test detecting completed jobs."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""[Mon Dec 16 10:00:00 2024]
+rule align:
+    wildcards: sample=A
+    jobid: 1
+[Mon Dec 16 10:01:00 2024]
+Finished job 1.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Job is completed, not running
+        assert len(reader.running_jobs) == 0
+        assert len(reader.completed_jobs) == 1
+
+        completed = reader.completed_jobs[0]
+        assert completed.rule == "align"
+        assert completed.job_id == "1"
+        assert completed.wildcards == {"sample": "A"}
+
+    def test_failed_jobs(self, tmp_path: Path) -> None:
+        """Test detecting failed jobs."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule align:
+    jobid: 1
+Error in rule align:
+    Some error
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        failed = reader.failed_jobs
+        assert len(failed) == 1
+        assert failed[0].rule == "align"
+        assert failed[0].job_id == "1"
+
+    def test_incremental_reading(self, tmp_path: Path) -> None:
+        """Test that only new lines are parsed on subsequent calls."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("rule align:\n    jobid: 1\n")
+
+        reader = IncrementalLogReader(log_file)
+        lines1 = reader.read_new_lines()
+        assert lines1 == 2
+        assert len(reader.running_jobs) == 1
+
+        # Append more content
+        with open(log_file, "a") as f:
+            f.write("Finished job 1.\n")
+
+        lines2 = reader.read_new_lines()
+        assert lines2 == 1  # Only the new line
+
+        # Job should now be completed, not running
+        assert len(reader.running_jobs) == 0
+        assert len(reader.completed_jobs) == 1
+
+    def test_reset(self, tmp_path: Path) -> None:
+        """Test reset clears all state."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule align:
+    jobid: 1
+5 of 10 steps (50%) done
+Error in rule align:
+    Error
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        assert reader.progress == (5, 10)
+        assert len(reader.running_jobs) == 1
+        assert len(reader.failed_jobs) == 1
+
+        reader.reset()
+
+        assert reader.progress == (0, 0)
+        assert reader.running_jobs == []
+        assert reader.failed_jobs == []
+
+    def test_set_log_path_different_file(self, tmp_path: Path) -> None:
+        """Test that changing log path resets state."""
+        log1 = tmp_path / "log1.log"
+        log2 = tmp_path / "log2.log"
+        log1.write_text("5 of 10 steps (50%) done\n")
+        log2.write_text("3 of 20 steps (15%) done\n")
+
+        reader = IncrementalLogReader(log1)
+        reader.read_new_lines()
+        assert reader.progress == (5, 10)
+
+        reader.set_log_path(log2)
+        reader.read_new_lines()
+        assert reader.progress == (3, 20)
+
+    def test_set_log_path_same_file(self, tmp_path: Path) -> None:
+        """Test that setting same path doesn't reset state."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("rule align:\n    jobid: 1\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+        assert len(reader.running_jobs) == 1
+
+        # Set same path - should not reset
+        reader.set_log_path(log_file)
+        assert len(reader.running_jobs) == 1
+
+    def test_file_rotation_detection(self, tmp_path: Path) -> None:
+        """Test that file rotation (truncation) resets state."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("rule align:\n    jobid: 1\n5 of 10 steps (50%) done\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+        assert reader.progress == (5, 10)
+
+        # Simulate rotation by truncating and writing new content
+        log_file.write_text("1 of 5 steps (20%) done\n")
+
+        reader.read_new_lines()
+        # State should be reset and new content parsed
+        assert reader.progress == (1, 5)
+        assert len(reader.running_jobs) == 0
+
+    def test_deduplicates_failed_jobs(self, tmp_path: Path) -> None:
+        """Test that duplicate error messages don't create duplicate entries."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule align:
+    jobid: 1
+Error in rule align:
+    First error
+Error in rule align:
+    Second error (same rule, same job)
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Should only have one failed job entry
+        assert len(reader.failed_jobs) == 1
+
+    def test_completed_jobs_sorted_newest_first(self, tmp_path: Path) -> None:
+        """Test that completed jobs are sorted by end time, newest first."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""[Mon Dec 16 10:00:00 2024]
+rule first:
+    jobid: 1
+[Mon Dec 16 10:01:00 2024]
+Finished job 1.
+[Mon Dec 16 10:02:00 2024]
+rule second:
+    jobid: 2
+[Mon Dec 16 10:03:00 2024]
+Finished job 2.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        completed = reader.completed_jobs
+        assert len(completed) == 2
+        # Newest first
+        assert completed[0].rule == "second"
+        assert completed[1].rule == "first"
