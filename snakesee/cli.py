@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from typing import Literal
 
 import defopt  # type: ignore[import-untyped]
 from rich.console import Console
@@ -46,7 +47,9 @@ def watch(
     no_estimate: bool = False,
     profile: Path | None = None,
     wildcard_timing: bool = False,
-    timing_halflife: float = 7.0,
+    weighting_strategy: Literal["index", "time"] = "index",
+    half_life_logs: int = 10,
+    half_life_days: float = 7.0,
 ) -> None:
     """
     Watch a Snakemake workflow in real-time with a TUI dashboard.
@@ -62,10 +65,16 @@ def watch(
                  for bootstrapping estimates. If not specified, will auto-discover.
         wildcard_timing: Enable wildcard conditioning for estimates (estimate per
                          sample/batch). Can also be toggled with 'w' key in TUI.
-        timing_halflife: Half-life in days for temporal weighting of historical runs.
-                         After this many days, a run's weight is halved. Smaller values
-                         emphasize recent runs; larger values use more historical data.
-                         Default: 7.0 days.
+        weighting_strategy: Strategy for weighting historical timing data.
+                           "index" (default) - weight by run index, ideal for active
+                           development where each run may fix issues.
+                           "time" - weight by wall-clock time, better for stable pipelines.
+        half_life_logs: Half-life in number of runs for index-based weighting.
+                       After this many runs, a run's weight is halved. Default: 10.
+                       Only used when weighting_strategy="index".
+        half_life_days: Half-life in days for time-based weighting.
+                       After this many days, a run's weight is halved. Default: 7.0.
+                       Only used when weighting_strategy="time".
     """
     workflow_dir = _validate_workflow_dir(workflow_dir)
 
@@ -75,10 +84,15 @@ def watch(
         console.print("[red]Error:[/red] Refresh rate must be between 0.5 and 60.0 seconds")
         sys.exit(1)
 
-    # Validate timing halflife
-    if timing_halflife <= 0:
+    # Validate half-life parameters
+    if half_life_logs <= 0:
         console = Console(stderr=True)
-        console.print("[red]Error:[/red] Timing halflife must be positive")
+        console.print("[red]Error:[/red] half-life-logs must be positive")
+        sys.exit(1)
+
+    if half_life_days <= 0:
+        console = Console(stderr=True)
+        console.print("[red]Error:[/red] half-life-days must be positive")
         sys.exit(1)
 
     # Load profile if specified or auto-discover
@@ -92,7 +106,9 @@ def watch(
         use_estimation=not no_estimate,
         profile_path=profile_path,
         use_wildcard_conditioning=wildcard_timing,
-        timing_halflife=timing_halflife,
+        weighting_strategy=weighting_strategy,
+        half_life_logs=half_life_logs,
+        half_life_days=half_life_days,
     )
     tui.run()
 

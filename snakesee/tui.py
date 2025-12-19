@@ -22,6 +22,7 @@ from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
 from snakesee.models import TimeEstimate
+from snakesee.models import WeightingStrategy
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
@@ -115,7 +116,9 @@ class WorkflowMonitorTUI:
         use_estimation: bool = True,
         profile_path: Path | None = None,
         use_wildcard_conditioning: bool = False,
-        timing_halflife: float = 7.0,
+        weighting_strategy: WeightingStrategy = "index",
+        half_life_logs: int = 10,
+        half_life_days: float = 7.0,
     ) -> None:
         """
         Initialize the TUI.
@@ -126,13 +129,17 @@ class WorkflowMonitorTUI:
             use_estimation: Whether to enable time estimation.
             profile_path: Optional path to a timing profile for bootstrapping estimates.
             use_wildcard_conditioning: Whether to enable wildcard-conditioned estimates.
-            timing_halflife: Half-life in days for temporal weighting (default 7.0).
+            weighting_strategy: Strategy for weighting historical data ("index" or "time").
+            half_life_logs: Half-life in run count for index-based weighting.
+            half_life_days: Half-life in days for time-based weighting.
         """
         self.workflow_dir = workflow_dir
         self.refresh_rate = refresh_rate
         self.use_estimation = use_estimation
         self.profile_path = profile_path
-        self.timing_halflife = timing_halflife
+        self.weighting_strategy = weighting_strategy
+        self.half_life_logs = half_life_logs
+        self.half_life_days = half_life_days
         self.console = Console()
         self._running = True
         self._estimator: TimeEstimator | None = None
@@ -225,7 +232,9 @@ class WorkflowMonitorTUI:
         if self.use_estimation:
             self._estimator = TimeEstimator(
                 use_wildcard_conditioning=self._use_wildcard_conditioning,
-                half_life_days=self.timing_halflife,
+                weighting_strategy=self.weighting_strategy,
+                half_life_logs=self.half_life_logs,
+                half_life_days=self.half_life_days,
             )
 
             # Load from profile first if available
@@ -1077,7 +1086,7 @@ class WorkflowMonitorTUI:
                 and job.rule in self._estimator.rule_stats
                 and elapsed is not None
             ):
-                expected = self._estimator.rule_stats[job.rule].weighted_mean(self.timing_halflife)
+                expected = self._estimator._get_weighted_mean(self._estimator.rule_stats[job.rule])
                 remaining = max(0, expected - elapsed)
 
             # Try to get tool-specific progress
