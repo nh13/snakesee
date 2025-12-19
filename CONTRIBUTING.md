@@ -128,6 +128,29 @@ fix: handle missing log files gracefully
 docs: update keyboard shortcuts table
 ```
 
+## Logger Plugin Development
+
+The repository includes an optional Snakemake logger plugin in `snakemake-logger-plugin-snakesee/`.
+
+### Plugin Setup
+
+```bash
+# Install the plugin in development mode
+cd snakemake-logger-plugin-snakesee
+pip install -e .
+
+# Run plugin tests
+pytest tests/
+```
+
+### Plugin Structure
+
+- `src/snakemake_logger_plugin_snakesee/handler.py` - Main LogHandler implementation
+- `src/snakemake_logger_plugin_snakesee/events.py` - Event types and serialization
+- `src/snakemake_logger_plugin_snakesee/writer.py` - JSONL event file writer
+
+The plugin writes events to `.snakesee_events.jsonl` which snakesee reads via `snakesee/events.py`.
+
 ## Questions?
 
 Open an issue at https://github.com/fulcrumgenomics/snakesee/issues

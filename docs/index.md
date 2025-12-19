@@ -11,6 +11,7 @@ snakesee provides a rich TUI dashboard for passively monitoring Snakemake workfl
 - **Time estimation** - Predicts remaining time from historical data
 - **Rich TUI** - Vim-style keyboard controls, filtering, and sorting
 - **Multiple layouts** - Full, compact, and minimal display modes
+- **Optional logger plugin** - Real-time event streaming for enhanced accuracy
 
 ## Quick Start
 

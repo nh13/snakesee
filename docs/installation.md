@@ -66,3 +66,13 @@ positional arguments:
 options:
   -h, --help      show this help message and exit
 ```
+
+## Optional: Logger Plugin
+
+For enhanced real-time monitoring with more accurate job timing, install the optional Snakemake logger plugin:
+
+```bash
+pip install snakemake-logger-plugin-snakesee
+```
+
+This plugin provides direct event streaming from Snakemake instead of log parsing. See [Usage](usage.md#enhanced-monitoring-with-logger-plugin) for details.
