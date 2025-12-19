@@ -23,7 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 requires-python = ">=3.11.0,<4.0"
-dependencies = ["rich>=13.0.0", "defopt>=6.4.0"]
+dependencies = ["rich>=13.0.0", "defopt>=6.4.0", "snakemake>=8.0.0"]
 
 [project.optional-dependencies]
 logo = ["rich-pixels>=3.0.1", "pillow>=10.0.0"]
@@ -109,6 +109,10 @@ addopts    = [
     "--import-mode=importlib",
     "--cov=snakesee",
     "--cov-report=xml",
+    "--ignore=tests/integration",
+]
+markers = [
+    "integration: mark test as integration test (requires Snakemake 8+ and logger plugin)",
 ]
 
 [tool.poe.tasks]
@@ -121,6 +125,7 @@ fix-all.sequence    = ["fix-format", "fix-lint"]
 check-format = "ruff format --check --diff"
 check-lint   = "ruff check"
 check-tests  = "pytest"
+check-integration = "pytest tests/integration -v --no-cov"
 check-typing = "mypy"
 
 check-all.ignore_fail = "return_non_zero"

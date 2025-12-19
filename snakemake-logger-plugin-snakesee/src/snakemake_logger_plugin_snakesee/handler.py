@@ -1,12 +1,14 @@
 """Log handler for snakesee logger plugin."""
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import Optional
 
 import time
 
 from snakemake_interface_logger_plugins.base import LogHandlerBase
+from snakemake_interface_logger_plugins.settings import LogHandlerSettingsBase
+from snakemake_interface_logger_plugins.settings import OutputSettingsLoggerInterface
 
 from snakemake_logger_plugin_snakesee.events import EventType
 from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
@@ -38,7 +40,6 @@ except ImportError:
         PROGRESS = "progress"
 
 
-@dataclass
 class LogHandler(LogHandlerBase):
     """Snakesee logger plugin that writes events to a JSONL file.
 
@@ -56,11 +57,19 @@ class LogHandler(LogHandlerBase):
         elif not isinstance(workflow_dir, Path):
             workflow_dir = Path(workflow_dir)
 
-        event_path = workflow_dir / self.settings.event_file
-        self._writer = EventWriter(event_path, buffer_size=self.settings.buffer_size)
+        # Get settings with defaults if None
+        settings = self.settings
+        if settings is None:
+            settings = LogHandlerSettings()
+
+        event_path = workflow_dir / settings.event_file
+        self._writer = EventWriter(event_path, buffer_size=settings.buffer_size)
         self._job_start_times: dict[int, float] = {}
         self._job_rules: dict[int, str] = {}
         self._job_wildcards: dict[int, dict[str, str]] = {}
+
+        # Set baseFilename for compatibility with Snakemake's logger manager
+        self.baseFilename = str(event_path)
 
     @property
     def writes_to_stream(self) -> bool:
@@ -154,12 +163,39 @@ class LogHandler(LogHandlerBase):
         if res is None:
             return None
 
-        if hasattr(res, "__dict__"):
-            return {k: v for k, v in vars(res).items() if not k.startswith("_")}
-        elif isinstance(res, dict):
-            return dict(res)
+        def is_serializable(v: Any) -> bool:
+            """Check if a value is JSON serializable."""
+            return isinstance(v, (str, int, float, bool, type(None)))
 
-        return None
+        def extract_value(v: Any) -> Any:
+            """Try to extract a serializable value."""
+            if is_serializable(v):
+                return v
+            # Try to convert to string if it's a simple type
+            try:
+                s = str(v)
+                # Skip object representations like "<snakemake.io.AttributeGuard...>"
+                if s.startswith("<") and "object at" in s:
+                    return None
+                return s
+            except Exception:
+                return None
+
+        result: dict[str, Any] = {}
+
+        if hasattr(res, "__dict__"):
+            for k, v in vars(res).items():
+                if not k.startswith("_"):
+                    extracted = extract_value(v)
+                    if extracted is not None:
+                        result[k] = extracted
+        elif isinstance(res, dict):
+            for k, v in res.items():
+                extracted = extract_value(v)
+                if extracted is not None:
+                    result[k] = extracted
+
+        return result if result else None
 
     def _handle_job_info(self, record: Any, timestamp: float) -> None:
         """Handle job submission event.
@@ -169,7 +205,10 @@ class LogHandler(LogHandlerBase):
             timestamp: Event timestamp.
         """
         jobid = getattr(record, "jobid", None)
-        rule_name = getattr(record, "name", getattr(record, "rule_name", "unknown"))
+        # rule_name attribute, not name (which is the logger name)
+        rule_name = getattr(record, "rule_name", None)
+        if rule_name is None:
+            rule_name = getattr(record, "rule", "unknown")
         wildcards = self._extract_wildcards(record)
         threads = getattr(record, "threads", None)
         resources = self._extract_resources(record)
@@ -209,16 +248,25 @@ class LogHandler(LogHandlerBase):
             record: The log record.
             timestamp: Event timestamp.
         """
-        # JOB_STARTED may have job_ids (list) or jobid
-        job_ids = getattr(record, "job_ids", None)
-        if job_ids is None:
-            jobid = getattr(record, "jobid", None)
-            if jobid is not None:
-                job_ids = [jobid]
+        # JOB_STARTED uses 'jobs' attribute (list of job IDs)
+        jobs = getattr(record, "jobs", None)
+        if jobs is None:
+            # Fallback to jobid or job_ids
+            job_ids = getattr(record, "job_ids", None)
+            if job_ids is None:
+                jobid = getattr(record, "jobid", None)
+                if jobid is not None:
+                    jobs = [jobid]
+                else:
+                    return
             else:
-                return
+                jobs = job_ids
 
-        for jid in job_ids:
+        # Ensure we have a list
+        if isinstance(jobs, int):
+            jobs = [jobs]
+
+        for jid in jobs:
             self._job_start_times[jid] = timestamp
             event = SnakeseeEvent(
                 event_type=EventType.JOB_STARTED,
@@ -236,7 +284,10 @@ class LogHandler(LogHandlerBase):
             record: The log record.
             timestamp: Event timestamp.
         """
-        jobid = getattr(record, "jobid", getattr(record, "job_id", None))
+        # JOB_FINISHED uses 'job_id' attribute
+        jobid = getattr(record, "job_id", None)
+        if jobid is None:
+            jobid = getattr(record, "jobid", None)
         if jobid is None:
             return
 
@@ -261,7 +312,10 @@ class LogHandler(LogHandlerBase):
             timestamp: Event timestamp.
         """
         jobid = getattr(record, "jobid", None)
-        rule_name = getattr(record, "name", getattr(record, "rule_name", None))
+        # rule_name attribute, not name (which is the logger name)
+        rule_name = getattr(record, "rule_name", None)
+        if rule_name is None:
+            rule_name = getattr(record, "rule", None)
 
         # Fall back to stored rule name if not in record
         if rule_name is None and jobid is not None:

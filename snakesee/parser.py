@@ -20,8 +20,10 @@ RULE_START_PATTERN = re.compile(r"(?:local)?rule (\w+):")
 # Pattern for job ID in log: "    jobid: 5"
 JOBID_PATTERN = re.compile(r"\s+jobid:\s*(\d+)")
 
-# Pattern for finished job: "Finished job 5." or "[date] Finished job 5."
-FINISHED_JOB_PATTERN = re.compile(r"Finished job (\d+)\.")
+# Pattern for finished job:
+# - Old format: "Finished job 5." or "[date] Finished job 5."
+# - Snakemake 9.x format: "Finished jobid: 5" or "Finished jobid: 5 (Rule: name)"
+FINISHED_JOB_PATTERN = re.compile(r"Finished (?:job |jobid:\s*)(\d+)")
 
 # Pattern for error in job: "Error in rule X" or job failure indicators
 ERROR_PATTERN = re.compile(r"Error in rule (\w+):|Error executing rule|RuleException")
