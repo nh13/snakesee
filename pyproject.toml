@@ -44,6 +44,7 @@ dev = [
     "pytest-cov>=2.8.1",
     "ruff>=0.6.0",
     "poethepoet~=0.37",
+    "pre-commit>=4.5.1",
 ]
 docs = [
     "mkdocs-autorefs>=0.5.0",
@@ -77,6 +78,9 @@ unfixable = ["B"]
 [tool.ruff.lint.isort]
 force-single-line = true
 
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
 [tool.mypy]
 files                       = ["./"]
 strict_optional             = false
@@ -93,7 +97,11 @@ warn_unreachable            = true
 warn_unused_configs         = true
 warn_unused_ignores         = true
 enable_error_code           = "ignore-without-code"
-exclude                     = ["site/", "docs/"]
+exclude                     = ["site/", "docs/", "snakemake-logger-plugin-snakesee/"]
+
+[[tool.mypy.overrides]]
+module = "snakemake_logger_plugin_snakesee.*"
+ignore_missing_imports = true
 
 [tool.coverage.report]
 exclude_lines = ["pragma: not covered", "@overload"]

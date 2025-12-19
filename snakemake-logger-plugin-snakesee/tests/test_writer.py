@@ -1,12 +1,8 @@
 """Tests for EventWriter."""
 
-import json
 from pathlib import Path
 
-import pytest
-
-from snakemake_logger_plugin_snakesee.events import EventType
-from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
+from snakemake_logger_plugin_snakesee.events import EventType, SnakeseeEvent
 from snakemake_logger_plugin_snakesee.writer import EventWriter
 
 
@@ -69,21 +65,15 @@ class TestEventWriter:
         writer = EventWriter(event_file, buffer_size=3)
 
         # Write 2 events - should not be flushed yet
-        writer.write(
-            SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10)
-        )
-        writer.write(
-            SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=2.0, total_jobs=10)
-        )
+        writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
+        writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=2.0, total_jobs=10))
 
         # File should not exist yet or be empty
         if event_file.exists():
             assert event_file.read_text() == ""
 
         # Write 3rd event - should trigger flush
-        writer.write(
-            SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=3.0, total_jobs=10)
-        )
+        writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=3.0, total_jobs=10))
 
         # Now all 3 events should be written
         lines = event_file.read_text().strip().split("\n")
@@ -96,9 +86,7 @@ class TestEventWriter:
         event_file = tmp_path / "events.jsonl"
 
         writer = EventWriter(event_file, buffer_size=10)
-        writer.write(
-            SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10)
-        )
+        writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
 
         # Before close, file might not have content
         writer.close()
@@ -112,11 +100,7 @@ class TestEventWriter:
         event_file = tmp_path / "events.jsonl"
 
         with EventWriter(event_file) as writer:
-            writer.write(
-                SnakeseeEvent(
-                    event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10
-                )
-            )
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
 
         # After exiting context, file should have content
         assert event_file.exists()
@@ -128,11 +112,7 @@ class TestEventWriter:
         event_file = tmp_path / "nested" / "path" / "events.jsonl"
 
         with EventWriter(event_file) as writer:
-            writer.write(
-                SnakeseeEvent(
-                    event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10
-                )
-            )
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
 
         assert event_file.exists()
 
@@ -142,19 +122,11 @@ class TestEventWriter:
 
         # Write first event
         with EventWriter(event_file) as writer:
-            writer.write(
-                SnakeseeEvent(
-                    event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10
-                )
-            )
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
 
         # Append second event
         with EventWriter(event_file) as writer:
-            writer.write(
-                SnakeseeEvent(
-                    event_type=EventType.PROGRESS, timestamp=2.0, total_jobs=10
-                )
-            )
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=2.0, total_jobs=10))
 
         # Both events should be present
         lines = event_file.read_text().strip().split("\n")
@@ -165,9 +137,7 @@ class TestEventWriter:
         event_file = tmp_path / "events.jsonl"
 
         writer = EventWriter(event_file)  # Default buffer_size=1
-        writer.write(
-            SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10)
-        )
+        writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
 
         # Should be immediately written
         lines = event_file.read_text().strip().split("\n")

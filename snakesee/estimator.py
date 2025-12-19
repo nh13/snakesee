@@ -6,6 +6,7 @@ from statistics import mean
 
 from snakesee.models import RuleTimingStats
 from snakesee.models import TimeEstimate
+from snakesee.models import WeightingStrategy
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.parser import collect_rule_timing_stats
@@ -24,7 +25,9 @@ class TimeEstimator:
         rule_stats: Dictionary mapping rule names to their timing statistics.
         wildcard_stats: Nested dict of wildcard-conditioned timing stats.
         use_wildcard_conditioning: Whether to use wildcard-specific estimates.
-        half_life_days: Half-life in days for temporal weighting.
+        weighting_strategy: Strategy for weighting historical data ("time" or "index").
+        half_life_days: Half-life in days for time-based weighting.
+        half_life_logs: Half-life in log count for index-based weighting.
     """
 
     def __init__(
@@ -32,6 +35,8 @@ class TimeEstimator:
         rule_stats: dict[str, RuleTimingStats] | None = None,
         use_wildcard_conditioning: bool = False,
         half_life_days: float = 7.0,
+        weighting_strategy: WeightingStrategy = "index",
+        half_life_logs: int = 10,
     ) -> None:
         """
         Initialize the estimator.
@@ -40,13 +45,22 @@ class TimeEstimator:
             rule_stats: Pre-loaded rule timing statistics. If None, must call
                 load_from_metadata() before estimating.
             use_wildcard_conditioning: Whether to use wildcard-specific timing.
-            half_life_days: Half-life in days for temporal weighting.
+            half_life_days: Half-life in days for time-based weighting.
                            After this many days, a run's weight is halved.
+                           Only used when weighting_strategy="time".
+            weighting_strategy: Strategy for weighting historical data.
+                              "time" - decay based on wall-clock time (good for stable pipelines)
+                              "index" - decay based on run count (good for active development)
+            half_life_logs: Half-life in log count for index-based weighting.
+                           After this many runs, a run's weight is halved.
+                           Only used when weighting_strategy="index".
         """
         self.rule_stats: dict[str, RuleTimingStats] = rule_stats or {}
         self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
         self.use_wildcard_conditioning = use_wildcard_conditioning
+        self.weighting_strategy = weighting_strategy
         self.half_life_days = half_life_days
+        self.half_life_logs = half_life_logs
 
     def load_from_metadata(self, metadata_dir: Path) -> None:
         """
@@ -60,6 +74,33 @@ class TimeEstimator:
         # Also load wildcard stats if conditioning is enabled
         if self.use_wildcard_conditioning:
             self.wildcard_stats = collect_wildcard_timing_stats(metadata_dir)
+
+    def _get_weighted_mean(self, stats: RuleTimingStats) -> float:
+        """Get weighted mean using configured strategy."""
+        return stats.weighted_mean(
+            half_life_days=self.half_life_days,
+            strategy=self.weighting_strategy,
+            half_life_logs=self.half_life_logs,
+        )
+
+    def _get_size_scaled_estimate(
+        self, stats: RuleTimingStats, input_size: int
+    ) -> tuple[float, float]:
+        """Get size-scaled estimate using configured strategy."""
+        return stats.size_scaled_estimate(
+            input_size=input_size,
+            half_life_days=self.half_life_days,
+            strategy=self.weighting_strategy,
+            half_life_logs=self.half_life_logs,
+        )
+
+    def _get_recency_factor(self, stats: RuleTimingStats) -> float:
+        """Get recency factor using configured strategy."""
+        return stats.recency_factor(
+            half_life_days=self.half_life_days,
+            strategy=self.weighting_strategy,
+            half_life_logs=self.half_life_logs,
+        )
 
     def get_estimate_for_job(
         self,
@@ -97,7 +138,7 @@ class TimeEstimator:
 
                 if value_stats is not None:
                     # Use wildcard-specific statistics
-                    rule_mean = value_stats.weighted_mean(self.half_life_days)
+                    rule_mean = self._get_weighted_mean(value_stats)
                     rule_var = (
                         value_stats.std_dev**2
                         if value_stats.count > 1
@@ -111,7 +152,7 @@ class TimeEstimator:
 
             # Try size-scaled estimate if input size is available
             if input_size is not None and input_size > 0:
-                scaled_est, confidence = stats.size_scaled_estimate(input_size, self.half_life_days)
+                scaled_est, confidence = self._get_size_scaled_estimate(stats, input_size)
                 if confidence > 0.3:  # Only use if we have reasonable confidence
                     # Reduce variance for size-scaled estimates
                     rule_var = (
@@ -122,7 +163,7 @@ class TimeEstimator:
                     return scaled_est, rule_var
 
             # Standard rule-level estimate
-            rule_mean = stats.weighted_mean(self.half_life_days)
+            rule_mean = self._get_weighted_mean(stats)
             rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.3) ** 2
             return rule_mean, rule_var
 
@@ -285,7 +326,7 @@ class TimeEstimator:
         for rule, count in pending_rules.items():
             if rule in self.rule_stats:
                 stats = self.rule_stats[rule]
-                rule_mean = stats.weighted_mean(self.half_life_days)
+                rule_mean = self._get_weighted_mean(stats)
                 rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.3) ** 2
             else:
                 # Unknown rule: use global mean with higher uncertainty
@@ -298,7 +339,7 @@ class TimeEstimator:
         # Add time for running jobs (subtract elapsed time)
         for rule, elapsed in running_elapsed.items():
             if rule in self.rule_stats:
-                expected = self.rule_stats[rule].weighted_mean(self.half_life_days)
+                expected = self._get_weighted_mean(self.rule_stats[rule])
             else:
                 expected = global_mean
             remaining = max(0, expected - elapsed)
@@ -346,7 +387,7 @@ class TimeEstimator:
         for rule in rule_completed:
             if rule in self.rule_stats:
                 stats = self.rule_stats[rule]
-                recency_scores.append(stats.recency_factor(self.half_life_days))
+                recency_scores.append(self._get_recency_factor(stats))
                 consistency_scores.append(stats.recent_consistency())
 
         avg_recency = sum(recency_scores) / len(recency_scores) if recency_scores else 0.5

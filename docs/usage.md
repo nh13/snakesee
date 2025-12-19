@@ -123,6 +123,19 @@ snakesee estimates remaining workflow time using historical data from `.snakemak
 - **simple**: Linear extrapolation based on average time per job
 - **bootstrap**: Initial estimate when no jobs have completed
 
+### Weighting Strategies
+
+snakesee supports two strategies for weighting historical timing data:
+
+| Strategy | Description | Best For |
+|----------|-------------|----------|
+| `index` (default) | Weights by run index (number of runs ago) | Active development, frequent changes |
+| `time` | Weights by wall-clock time since run | Stable pipelines, infrequent runs |
+
+**Index-based weighting** treats each run as a potential improvement, discounting older runs regardless of actual time elapsed. Use `--weighting-strategy index --half-life-logs 10`.
+
+**Time-based weighting** discounts data based on calendar time, naturally aging out old runs. Use `--weighting-strategy time --half-life-days 7`.
+
 The ETA display shows confidence levels:
 
 - `~5m` - High confidence estimate

@@ -89,14 +89,24 @@ class TestRuleTimingStats:
         assert stats.mean_duration == 20.0
         assert stats.std_dev > 0
 
-    def test_weighted_mean_position_based(self) -> None:
-        """Test weighted mean with position-based weighting (no timestamps)."""
+    def test_weighted_mean_index_based(self) -> None:
+        """Test weighted mean with index-based weighting (default strategy)."""
         stats = RuleTimingStats(rule="test", durations=[10.0, 20.0, 30.0])
-        # Weights: 1, 2, 4 (exponential)
-        # Weighted sum: 10*1 + 20*2 + 30*4 = 170
-        # Sum of weights: 1 + 2 + 4 = 7
-        # Weighted mean: 170/7 ≈ 24.29
-        assert 24 < stats.weighted_mean() < 25
+        # Default half_life_logs=10
+        # runs_ago: 2, 1, 0 for positions 0, 1, 2
+        # weights: 0.5^(2/10), 0.5^(1/10), 0.5^0 ≈ 0.87, 0.93, 1.0
+        # Most recent value (30) should have highest weight
+        weighted = stats.weighted_mean(strategy="index")
+        assert weighted > 20.0  # More than simple mean (20)
+        assert weighted < 30.0  # Less than max
+
+    def test_weighted_mean_index_based_custom_half_life(self) -> None:
+        """Test index-based weighted mean with custom half_life_logs."""
+        stats = RuleTimingStats(rule="test", durations=[10.0, 30.0])
+        # With half_life_logs=1, oldest entry (1 run ago) has 50% weight
+        weighted = stats.weighted_mean(strategy="index", half_life_logs=1)
+        # Expected: (10 * 0.5 + 30 * 1.0) / 1.5 ≈ 23.33
+        assert 23 < weighted < 24
 
     def test_weighted_mean_time_based(self) -> None:
         """Test weighted mean with time-based weighting using timestamps."""
@@ -111,12 +121,12 @@ class TestRuleTimingStats:
         )
         # With 7-day half-life, 14-day old data has weight ~0.25, today's has weight ~1.0
         # Should be closer to 30 than to 20 (the simple mean)
-        weighted = stats.weighted_mean(half_life_days=7.0)
+        weighted = stats.weighted_mean(strategy="time", half_life_days=7.0)
         assert weighted > 20.0  # More than simple mean
         assert weighted > 25.0  # Significantly weighted toward recent
 
-    def test_weighted_mean_custom_half_life(self) -> None:
-        """Test weighted mean respects custom half-life parameter."""
+    def test_weighted_mean_time_based_custom_half_life(self) -> None:
+        """Test time-based weighted mean respects custom half-life parameter."""
         now = time.time()
         day = 86400
         stats = RuleTimingStats(
@@ -126,27 +136,28 @@ class TestRuleTimingStats:
         )
         # With 7-day half-life, 7-day old data has weight 0.5, today's has weight 1.0
         # Weighted mean = (10 * 0.5 + 30 * 1.0) / 1.5 = 35/1.5 ≈ 23.33
-        weighted_7d = stats.weighted_mean(half_life_days=7.0)
+        weighted_7d = stats.weighted_mean(strategy="time", half_life_days=7.0)
         assert 23 < weighted_7d < 24
 
         # With 1-day half-life, old data is heavily discounted
-        weighted_1d = stats.weighted_mean(half_life_days=1.0)
+        weighted_1d = stats.weighted_mean(strategy="time", half_life_days=1.0)
         assert weighted_1d > weighted_7d  # Even more weighted toward recent
 
         # With 30-day half-life, old data retains more weight
-        weighted_30d = stats.weighted_mean(half_life_days=30.0)
+        weighted_30d = stats.weighted_mean(strategy="time", half_life_days=30.0)
         assert weighted_30d < weighted_7d  # Closer to simple mean
 
-    def test_weighted_mean_falls_back_without_timestamps(self) -> None:
-        """Test weighted mean falls back to position-based when timestamps missing."""
+    def test_weighted_mean_time_fallback_to_index(self) -> None:
+        """Test time strategy falls back to index-based when no timestamps."""
         stats = RuleTimingStats(
             rule="test",
             durations=[10.0, 20.0, 30.0],
             timestamps=[],  # No timestamps
         )
-        # Should use position-based weighting
-        weighted = stats.weighted_mean()
-        assert 24 < weighted < 25  # Same as position-based test
+        # With time strategy but no timestamps, should fall back to index-based
+        weighted = stats.weighted_mean(strategy="time")
+        # Should weight recent values higher
+        assert weighted > 20.0  # More than simple mean
 
     def test_high_variance(self) -> None:
         """Test high variance detection."""
@@ -156,23 +167,33 @@ class TestRuleTimingStats:
         assert not low_var.is_high_variance
         assert high_var.is_high_variance
 
-    def test_recency_factor_no_timestamps(self) -> None:
-        """Test recency factor returns 0.5 when no timestamps."""
+    def test_recency_factor_no_timestamps_time_strategy(self) -> None:
+        """Test recency factor returns 0.5 when no timestamps with time strategy."""
         stats = RuleTimingStats(rule="test", durations=[10.0, 20.0])
-        assert stats.recency_factor() == 0.5
+        assert stats.recency_factor(strategy="time") == 0.5
+
+    def test_recency_factor_no_data_index_strategy(self) -> None:
+        """Test recency factor returns 0.5 when no data with index strategy."""
+        stats = RuleTimingStats(rule="test", durations=[])
+        assert stats.recency_factor(strategy="index") == 0.5
+
+    def test_recency_factor_with_data_index_strategy(self) -> None:
+        """Test recency factor returns 0.9 when data exists with index strategy."""
+        stats = RuleTimingStats(rule="test", durations=[10.0, 20.0])
+        assert stats.recency_factor(strategy="index") == 0.9
 
     def test_recency_factor_recent_data(self) -> None:
-        """Test recency factor is high for recent data."""
+        """Test recency factor is high for recent data with time strategy."""
         now = time.time()
         stats = RuleTimingStats(
             rule="test",
             durations=[10.0, 20.0],
             timestamps=[now - 3600, now],  # 1 hour ago, now
         )
-        assert stats.recency_factor() > 0.9  # Very recent
+        assert stats.recency_factor(strategy="time") > 0.9  # Very recent
 
     def test_recency_factor_old_data(self) -> None:
-        """Test recency factor is low for old data."""
+        """Test recency factor is low for old data with time strategy."""
         now = time.time()
         day = 86400
         stats = RuleTimingStats(
@@ -180,7 +201,7 @@ class TestRuleTimingStats:
             durations=[10.0, 20.0],
             timestamps=[now - 30 * day, now - 28 * day],  # 30 and 28 days ago
         )
-        assert stats.recency_factor() < 0.3  # Old data
+        assert stats.recency_factor(strategy="time") < 0.3  # Old data
 
     def test_recent_consistency_no_data(self) -> None:
         """Test recent consistency returns 0.5 when no data."""

@@ -96,7 +96,7 @@ snakesee predicts remaining workflow time using historical execution data from `
 ### How It Works
 
 1. **Per-rule timing**: Historical execution times are tracked for each rule (e.g., `align`, `sort`, `index`)
-2. **Temporal weighting**: Recent runs are weighted more heavily using exponential decay (7-day half-life by default)
+2. **Recency weighting**: Recent runs are weighted more heavily using exponential decay
 3. **Pending rule inference**: Assumes remaining jobs follow the same rule distribution as completed jobs
 4. **Parallelism adjustment**: Estimates concurrent job execution from historical completion rates
 
@@ -110,23 +110,39 @@ snakesee predicts remaining workflow time using historical execution data from `
 | `~15m (very rough)` | Very low confidence |
 | `unknown` | Insufficient data |
 
-### Temporal Weighting
+### Weighting Strategies
 
-snakesee uses time-based exponential decay to weight historical runs:
-- **Recent runs** (within the last week) have the highest influence
-- **Older runs** progressively contribute less to estimates
-- **Default half-life**: 7 days (after 7 days, a run's weight is halved)
+snakesee supports two strategies for weighting historical timing data:
 
-This helps adapt to:
-- Hardware changes (new machine, more cores)
-- Software updates (faster tool versions)
-- Resource contention (shared clusters)
+#### Index-Based Weighting (Default)
+
+Weights runs by how many runs ago they occurred, regardless of actual time elapsed:
+- **Most recent run** has the highest weight
+- **Older runs** (by log index) progressively contribute less
+- **Default half-life**: 10 logs (after 10 runs, weight is halved)
+
+This is ideal for **active development** where each pipeline run may fix issues:
 
 ```bash
-# Configure half-life (in days)
-snakesee watch --timing-halflife 3    # Fast-changing pipelines
-snakesee watch --timing-halflife 30   # Stable pipelines
+snakesee watch --weighting-strategy index --half-life-logs 10
 ```
+
+#### Time-Based Weighting
+
+Weights runs by wall-clock time since each run:
+- **Recent runs** (within the last week) have the highest influence
+- **Default half-life**: 7 days (after 7 days, a run's weight is halved)
+
+This is better for **stable pipelines** where old data should naturally age out:
+
+```bash
+snakesee watch --weighting-strategy time --half-life-days 7
+```
+
+Both strategies help adapt to:
+- Hardware changes (new machine, more cores)
+- Software updates (faster tool versions)
+- Pipeline improvements and bug fixes
 
 ### Wildcard Conditioning
 

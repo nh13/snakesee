@@ -1,20 +1,14 @@
 """Log handler for snakesee logger plugin."""
 
+import time
 from pathlib import Path
 from typing import Any
-from typing import Optional
-
-import time
 
 from snakemake_interface_logger_plugins.base import LogHandlerBase
-from snakemake_interface_logger_plugins.settings import LogHandlerSettingsBase
-from snakemake_interface_logger_plugins.settings import OutputSettingsLoggerInterface
 
-from snakemake_logger_plugin_snakesee.events import EventType
-from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
+from snakemake_logger_plugin_snakesee.events import EventType, SnakeseeEvent
 from snakemake_logger_plugin_snakesee.settings import LogHandlerSettings
 from snakemake_logger_plugin_snakesee.writer import EventWriter
-
 
 # Import LogEvent enum - handle both old and new interface versions
 try:

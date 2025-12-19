@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 
 from snakesee.models import WorkflowStatus
+from snakesee.parser import IncrementalLogReader
 from snakesee.parser import _parse_wildcards
 from snakesee.parser import collect_rule_timing_stats
 from snakesee.parser import collect_wildcard_timing_stats
 from snakesee.parser import find_latest_log
-from snakesee.parser import IncrementalLogReader
 from snakesee.parser import is_workflow_running
 from snakesee.parser import parse_failed_jobs_from_log
 from snakesee.parser import parse_metadata_files

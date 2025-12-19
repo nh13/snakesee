@@ -1,6 +1,5 @@
 """Tests for snakesee event reading."""
 
-import json
 from pathlib import Path
 
 import pytest
@@ -50,7 +49,7 @@ class TestSnakeseeEvent:
             timestamp=1234567890.123,
         )
         with pytest.raises(AttributeError):
-            event.timestamp = 0.0  # type: ignore
+            event.timestamp = 0.0  # type: ignore[misc]
 
     def test_from_json_minimal(self) -> None:
         """Test JSON deserialization with minimal fields."""

@@ -1,7 +1,6 @@
 """Settings for snakesee logger plugin."""
 
-from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from snakemake_interface_logger_plugins.settings import LogHandlerSettingsBase

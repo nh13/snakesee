@@ -1,10 +1,9 @@
 """Event writer for snakesee logger plugin."""
 
-from pathlib import Path
-from typing import TextIO
-
 import fcntl
 import os
+from pathlib import Path
+from typing import TextIO
 
 from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
 

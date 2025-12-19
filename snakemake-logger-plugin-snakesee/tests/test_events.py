@@ -4,8 +4,7 @@ import json
 
 import pytest
 
-from snakemake_logger_plugin_snakesee.events import EventType
-from snakemake_logger_plugin_snakesee.events import SnakeseeEvent
+from snakemake_logger_plugin_snakesee.events import EventType, SnakeseeEvent
 
 
 class TestEventType:
