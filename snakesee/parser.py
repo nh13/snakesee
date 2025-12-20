@@ -806,17 +806,16 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
 
     Uses multiple signals:
     1. Lock files exist in .snakemake/locks/
-    2. Incomplete markers exist in .snakemake/incomplete/ (jobs in progress)
-    3. Log file was recently modified (within stale_threshold seconds)
+    2. Log file was recently modified (within stale_threshold seconds)
 
-    If locks + incomplete markers exist, the workflow is considered running
-    even if the log is stale (handles very long-running jobs).
+    Note: Incomplete markers in .snakemake/incomplete/ are NOT used to determine
+    if a workflow is running, as they can persist after a workflow is killed.
+    Log freshness is the primary indicator of active execution.
 
     Args:
         snakemake_dir: Path to the .snakemake directory.
         stale_threshold: Seconds since last log modification before considering
-            the workflow stale/dead (only used if no incomplete markers).
-            Default 1800 seconds (30 minutes).
+            the workflow stale/dead. Default 1800 seconds (30 minutes).
 
     Returns:
         True if workflow appears to be actively running, False otherwise.
@@ -835,21 +834,7 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
     if not has_locks:
         return False
 
-    # Lock files exist - check for incomplete markers (jobs in progress)
-    incomplete_dir = snakemake_dir / "incomplete"
-    has_incomplete = False
-    try:
-        if incomplete_dir.exists():
-            has_incomplete = any(incomplete_dir.iterdir())
-    except OSError:
-        pass
-
-    # If locks + incomplete markers exist, workflow is running
-    # (handles very long-running jobs that don't update the log)
-    if has_incomplete:
-        return True
-
-    # No incomplete markers - fall back to log freshness check
+    # Check log freshness to determine if workflow is actually running
     log_file = find_latest_log(snakemake_dir)
     if log_file is None:
         # No log file but locks exist - assume running (early startup)
@@ -1141,33 +1126,34 @@ def parse_workflow_state(
             running = parse_running_jobs_from_log(log_path)
             failed_list = parse_failed_jobs_from_log(log_path)
 
-    # If we have running jobs in the log AND the workflow is actually running,
-    # ensure status is RUNNING (handles race conditions in lock detection)
-    # Note: We only trust log-parsed running jobs if is_workflow_running() agrees,
-    # otherwise those jobs are orphaned/incomplete from a killed workflow.
-    if running and is_latest_log and workflow_is_running:
-        status = WorkflowStatus.RUNNING
-
     # Check for incomplete markers (jobs that were in progress when workflow was interrupted)
     incomplete_dir = snakemake_dir / "incomplete"
     incomplete_list = list(parse_incomplete_jobs(incomplete_dir)) if is_latest_log else []
 
-    # Determine final status based on failures and incomplete markers
-    failed_jobs = len(failed_list)
-    if failed_jobs > 0:
-        status = WorkflowStatus.FAILED if status != WorkflowStatus.RUNNING else status
-    elif status != WorkflowStatus.RUNNING and incomplete_list:
-        # Workflow is not running but has incomplete markers = interrupted
-        status = WorkflowStatus.INCOMPLETE
-    elif status == WorkflowStatus.COMPLETED and completed < total and not workflow_is_running:
-        # Fallback: if workflow stopped but not all jobs completed, it was interrupted
-        # Only apply if workflow is not actually running (based on lock files)
-        status = WorkflowStatus.INCOMPLETE
+    # Remove failed jobs from the running list - a job can't be both running and failed
+    failed_job_ids = {job.job_id for job in failed_list if job.job_id is not None}
+    if failed_job_ids:
+        running = [job for job in running if job.job_id not in failed_job_ids]
 
     # If workflow is not actually running, clear "running" jobs from log parsing
     # (those are orphaned jobs, not truly running - they're reflected in incomplete_list)
     if not workflow_is_running:
         running = []
+
+    # Determine final status based on running jobs, failures, and incomplete markers
+    failed_jobs = len(failed_list)
+    if running and is_latest_log and workflow_is_running:
+        # Workflow is actively running jobs
+        status = WorkflowStatus.RUNNING
+    elif failed_jobs > 0:
+        # No running jobs but has failures
+        status = WorkflowStatus.FAILED
+    elif incomplete_list:
+        # Workflow has incomplete markers = interrupted
+        status = WorkflowStatus.INCOMPLETE
+    elif completed < total and not workflow_is_running:
+        # Fallback: if workflow stopped but not all jobs completed, it was interrupted
+        status = WorkflowStatus.INCOMPLETE
 
     return WorkflowProgress(
         workflow_dir=workflow_dir,
