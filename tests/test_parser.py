@@ -519,6 +519,95 @@ class TestParseWorkflowState:
         assert state.failed_jobs == 0  # No explicit failures, just interrupted
 
 
+class TestAugmentCompletionsWithThreads:
+    """Tests for _augment_completions_with_threads function."""
+
+    def test_augments_missing_threads(self, tmp_path: Path) -> None:
+        """Test that threads are added to completions from log data."""
+        from snakesee.models import JobInfo
+        from snakesee.parser import _augment_completions_with_threads
+
+        # Create log file with thread info
+        log_dir = tmp_path / ".snakemake" / "log"
+        log_dir.mkdir(parents=True)
+        log_file = log_dir / "2024-01-01T120000.snakemake.log"
+        log_file.write_text(
+            "[Fri Jan  1 12:00:00 2024]\n"
+            "rule align:\n"
+            "    output: out.bam\n"
+            "    jobid: 1\n"
+            "    threads: 4\n"
+            "[Fri Jan  1 12:01:00 2024]\n"
+            "Finished job 1.\n"
+        )
+
+        # Create completion without threads - end_time matches log finish timestamp
+        # Jan 1 2024 12:01:00 UTC = 1704135660.0
+        completions = [
+            JobInfo(
+                rule="align",
+                job_id=1,
+                start_time=1704135600.0,  # 2024-01-01 12:00:00 UTC
+                end_time=1704135660.0,  # 2024-01-01 12:01:00 UTC
+            )
+        ]
+
+        result = _augment_completions_with_threads(completions, log_file)
+        assert len(result) == 1
+        assert result[0].threads == 4
+
+    def test_preserves_existing_threads(self, tmp_path: Path) -> None:
+        """Test that existing thread values are not overwritten."""
+        from snakesee.models import JobInfo
+        from snakesee.parser import _augment_completions_with_threads
+
+        # Create log file with different thread info
+        log_dir = tmp_path / ".snakemake" / "log"
+        log_dir.mkdir(parents=True)
+        log_file = log_dir / "2024-01-01T120000.snakemake.log"
+        log_file.write_text(
+            "[Fri Jan  1 12:00:00 2024]\n"
+            "rule align:\n"
+            "    output: out.bam\n"
+            "    jobid: 1\n"
+            "    threads: 8\n"  # Different from existing
+            "[Fri Jan  1 12:01:00 2024]\n"
+            "Finished job 1.\n"
+        )
+
+        # Create completion WITH existing threads
+        completions = [
+            JobInfo(
+                rule="align",
+                job_id=1,
+                start_time=1704135600.0,
+                end_time=1704135660.0,
+                threads=4,  # Already has threads
+            )
+        ]
+
+        result = _augment_completions_with_threads(completions, log_file)
+        assert len(result) == 1
+        assert result[0].threads == 4  # Should preserve original, not overwrite with 8
+
+    def test_no_match_returns_original(self, tmp_path: Path) -> None:
+        """Test that unmatched completions are returned unchanged."""
+        from snakesee.models import JobInfo
+        from snakesee.parser import _augment_completions_with_threads
+
+        # Create empty log file
+        log_dir = tmp_path / ".snakemake" / "log"
+        log_dir.mkdir(parents=True)
+        log_file = log_dir / "2024-01-01T120000.snakemake.log"
+        log_file.write_text("")
+
+        completions = [JobInfo(rule="align", job_id=1, end_time=1704110460.0)]
+
+        result = _augment_completions_with_threads(completions, log_file)
+        assert len(result) == 1
+        assert result[0].threads is None
+
+
 class TestCollectWildcardTimingStats:
     """Tests for collect_wildcard_timing_stats function."""
 

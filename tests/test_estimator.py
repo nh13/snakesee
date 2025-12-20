@@ -312,3 +312,41 @@ class TestThreadAwareETA:
             "align", wildcards={"sample": "sample1"}, threads=4
         )
         assert 25 < mean < 35  # Should be around 30s, not 200s
+
+    def test_single_sample_thread_variance(self) -> None:
+        """Test variance calculation for single-sample thread stats."""
+        from snakesee.models import ThreadTimingStats
+
+        estimator = TimeEstimator()
+
+        # Single sample with exact thread match
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(
+            rule="align",
+            durations=[100.0],  # Single sample
+        )
+        estimator.thread_stats["align"] = thread_stats
+
+        mean, var = estimator.get_estimate_for_job("align", threads=4)
+        assert 95 < mean < 105
+        # With single sample, variance should be (mean * 0.2)^2 = (100 * 0.2)^2 = 400
+        assert 380 < var < 420
+
+    def test_aggregate_fallback_variance(self) -> None:
+        """Test variance calculation for aggregate fallback (no exact thread match)."""
+        from snakesee.models import ThreadTimingStats
+
+        estimator = TimeEstimator()
+
+        # Single sample with NO exact thread match (will aggregate)
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[8] = RuleTimingStats(
+            rule="align",
+            durations=[100.0],  # Single sample, different thread count
+        )
+        estimator.thread_stats["align"] = thread_stats
+
+        mean, var = estimator.get_estimate_for_job("align", threads=4)  # No match for 4
+        assert 95 < mean < 105
+        # With aggregate fallback single sample, variance should be (mean * 0.3)^2 = 900
+        assert 880 < var < 920

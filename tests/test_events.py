@@ -86,6 +86,16 @@ class TestSnakeseeEvent:
         assert event.input_files == ("a.txt", "b.txt")
         assert event.output_files == ("c.txt",)
 
+    def test_from_json_with_resources(self) -> None:
+        """Test JSON deserialization with resources."""
+        json_str = (
+            '{"event_type":"job_submitted","timestamp":1234567890.123,'
+            '"resources":{"threads":4,"mem_mb":8000}}'
+        )
+        event = SnakeseeEvent.from_json(json_str)
+
+        assert event.resources == (("mem_mb", 8000), ("threads", 4))
+
     def test_from_json_invalid_event_type(self) -> None:
         """Test that invalid event type raises ValueError."""
         json_str = '{"event_type":"invalid","timestamp":1234567890.123}'
