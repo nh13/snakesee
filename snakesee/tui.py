@@ -907,6 +907,7 @@ class WorkflowMonitorTUI:
             WorkflowStatus.RUNNING: "bold green",
             WorkflowStatus.COMPLETED: "bold blue",
             WorkflowStatus.FAILED: "bold red",
+            WorkflowStatus.INCOMPLETE: "bold yellow",
             WorkflowStatus.UNKNOWN: "bold yellow",
         }
         style = status_styles.get(progress.status, "bold white")
@@ -980,6 +981,12 @@ class WorkflowMonitorTUI:
             eta_parts.append("[bold red]FAILED[/bold red]")
             if progress.failed_jobs > 0:
                 eta_parts.append(f"[dim]({progress.failed_jobs} job(s) failed)[/dim]")
+        elif progress.status == WorkflowStatus.INCOMPLETE:
+            eta_parts.append("[bold yellow]INCOMPLETE[/bold yellow]")
+            if progress.incomplete_jobs_list:
+                eta_parts.append(
+                    f"[dim]({len(progress.incomplete_jobs_list)} job(s) were in progress)[/dim]"
+                )
         elif progress.status == WorkflowStatus.COMPLETED:
             eta_parts.append("[bold blue]Complete[/bold blue]")
         elif estimate is not None:
@@ -1012,6 +1019,7 @@ class WorkflowMonitorTUI:
             WorkflowStatus.RUNNING: FG_BLUE,
             WorkflowStatus.COMPLETED: FG_GREEN,
             WorkflowStatus.FAILED: "red",
+            WorkflowStatus.INCOMPLETE: "yellow",
             WorkflowStatus.UNKNOWN: "yellow",
         }
         border_style = border_colors.get(progress.status, FG_BLUE)
@@ -1571,6 +1579,39 @@ class WorkflowMonitorTUI:
             border_style="red",
         )
 
+    def _make_incomplete_jobs_panel(self, progress: WorkflowProgress) -> Panel:
+        """Create the incomplete jobs list panel showing files that were in progress."""
+        if not progress.incomplete_jobs_list:
+            return Panel(
+                "[dim]No incomplete jobs[/dim]",
+                title="Incomplete Jobs",
+                border_style="dim",
+            )
+
+        table = Table(expand=True, show_header=True, header_style="bold yellow")
+        table.add_column("Output File", style="yellow", no_wrap=False)
+
+        for job in progress.incomplete_jobs_list[:8]:  # Limit to 8 rows
+            if job.output_file:
+                # Show relative path if possible, otherwise full path
+                try:
+                    rel_path = job.output_file.relative_to(progress.workflow_dir)
+                    table.add_row(str(rel_path))
+                except ValueError:
+                    table.add_row(str(job.output_file))
+            else:
+                table.add_row("[dim]unknown[/dim]")
+
+        more_count = len(progress.incomplete_jobs_list) - 8
+        if more_count > 0:
+            table.add_row(f"[dim]... and {more_count} more[/dim]")
+
+        return Panel(
+            table,
+            title=f"Incomplete Jobs ({len(progress.incomplete_jobs_list)})",
+            border_style="yellow",
+        )
+
     def _parse_stats_from_logs(self, cutoff: float) -> dict[str, RuleTimingStats]:
         """Parse rule stats from log files created before the cutoff time."""
         from snakesee.parser import parse_completed_jobs_from_log
@@ -1803,7 +1844,12 @@ class WorkflowMonitorTUI:
             )
 
             # Right column: completions, failed jobs (if any), stats
-            if progress.failed_jobs_list:
+            # Note: incomplete jobs are shown in the left column (replacing running jobs)
+            # when status is INCOMPLETE
+            has_failed = bool(progress.failed_jobs_list)
+            is_incomplete = progress.status == WorkflowStatus.INCOMPLETE
+
+            if has_failed:
                 layout["right"].split_column(
                     Layout(name="completions", ratio=1, minimum_size=5),
                     Layout(name="failed", ratio=1, minimum_size=5),
@@ -1818,7 +1864,12 @@ class WorkflowMonitorTUI:
 
             layout["header"].update(self._make_header(progress))
             layout["progress"].update(self._make_progress_panel(progress, estimate))
-            layout["running"].update(self._make_running_table(progress))
+
+            # Show incomplete jobs panel in place of running jobs when workflow is incomplete
+            if is_incomplete:
+                layout["running"].update(self._make_incomplete_jobs_panel(progress))
+            else:
+                layout["running"].update(self._make_running_table(progress))
             # Show log panel when in job selection mode, otherwise show pending jobs
             if self._job_selection_mode:
                 layout["pending"].update(self._make_job_log_panel(progress))
@@ -1963,6 +2014,7 @@ class WorkflowMonitorTUI:
                         if progress.status in (
                             WorkflowStatus.COMPLETED,
                             WorkflowStatus.FAILED,
+                            WorkflowStatus.INCOMPLETE,
                         ):
                             # Show final state for a moment before potentially exiting
                             time.sleep(1)
@@ -1993,7 +2045,11 @@ class WorkflowMonitorTUI:
                 time.sleep(self.refresh_rate)
 
                 # Auto-exit when workflow completes
-                if progress.status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED):
+                if progress.status in (
+                    WorkflowStatus.COMPLETED,
+                    WorkflowStatus.FAILED,
+                    WorkflowStatus.INCOMPLETE,
+                ):
                     self.console.print("\n[bold]Workflow finished.[/bold]")
                     break
 

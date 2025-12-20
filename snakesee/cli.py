@@ -140,6 +140,7 @@ def status(
         WorkflowStatus.RUNNING: "green",
         WorkflowStatus.COMPLETED: "blue",
         WorkflowStatus.FAILED: "red",
+        WorkflowStatus.INCOMPLETE: "yellow",
         WorkflowStatus.UNKNOWN: "yellow",
     }
     status_color = status_colors.get(progress.status, "white")
@@ -158,6 +159,20 @@ def status(
     # Running jobs
     if progress.running_jobs:
         console.print(f"Running: {len(progress.running_jobs)} jobs")
+
+    # Incomplete jobs (jobs that were in progress when workflow was interrupted)
+    if progress.incomplete_jobs_list:
+        count = len(progress.incomplete_jobs_list)
+        console.print(f"[yellow]Incomplete: {count} job(s) were in progress[/yellow]")
+        for job in progress.incomplete_jobs_list[:5]:  # Show up to 5
+            if job.output_file:
+                try:
+                    rel_path = job.output_file.relative_to(workflow_dir)
+                    console.print(f"  [dim]- {rel_path}[/dim]")
+                except ValueError:
+                    console.print(f"  [dim]- {job.output_file}[/dim]")
+        if len(progress.incomplete_jobs_list) > 5:
+            console.print(f"  [dim]... and {len(progress.incomplete_jobs_list) - 5} more[/dim]")
 
     # Time estimation
     if not no_estimate:

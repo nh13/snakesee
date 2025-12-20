@@ -578,7 +578,8 @@ def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
     Parse currently running jobs from incomplete markers.
 
     Snakemake creates marker files in .snakemake/incomplete/ for jobs that
-    are in progress. The file modification time indicates when the job started.
+    are in progress. The marker filename is base64-encoded output file path.
+    The file modification time indicates when the job started.
 
     Note: This is a fallback method. Prefer parse_running_jobs_from_log()
     which provides rule names.
@@ -589,16 +590,27 @@ def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
     Yields:
         JobInfo instances for each in-progress job.
     """
+    import base64
+
     if not incomplete_dir.exists():
         return
 
     for marker in incomplete_dir.rglob("*"):
         if marker.is_file() and marker.name != "migration_underway":
             try:
+                # Decode the base64 filename to get the output file path
+                output_file: Path | None = None
+                try:
+                    decoded = base64.b64decode(marker.name).decode("utf-8")
+                    output_file = Path(decoded)
+                except (ValueError, UnicodeDecodeError):
+                    pass  # Keep output_file as None if decoding fails
+
                 # The marker's mtime is approximately when the job started
                 yield JobInfo(
                     rule="unknown",  # Cannot determine rule from marker filename
                     start_time=marker.stat().st_mtime,
+                    output_file=output_file,
                 )
             except OSError:
                 continue
@@ -908,7 +920,8 @@ def parse_workflow_state(
     is_latest_log = log_file is None or log_file == find_latest_log(snakemake_dir)
 
     # Determine status from lock files (only relevant for latest log)
-    if is_latest_log and is_workflow_running(snakemake_dir):
+    workflow_is_running = is_latest_log and is_workflow_running(snakemake_dir)
+    if workflow_is_running:
         status = WorkflowStatus.RUNNING
     else:
         status = WorkflowStatus.COMPLETED
@@ -963,20 +976,34 @@ def parse_workflow_state(
             running = parse_running_jobs_from_log(log_path)
             failed_list = parse_failed_jobs_from_log(log_path)
 
-    # If we have running jobs in the log, override status to RUNNING
-    # (handles case where lock-based detection fails due to stale threshold)
-    if running and is_latest_log:
+    # If we have running jobs in the log AND the workflow is actually running,
+    # ensure status is RUNNING (handles race conditions in lock detection)
+    # Note: We only trust log-parsed running jobs if is_workflow_running() agrees,
+    # otherwise those jobs are orphaned/incomplete from a killed workflow.
+    if running and is_latest_log and workflow_is_running:
         status = WorkflowStatus.RUNNING
 
-    # Check for failures: either from parsed errors or from incomplete progress
+    # Check for incomplete markers (jobs that were in progress when workflow was interrupted)
+    incomplete_dir = snakemake_dir / "incomplete"
+    incomplete_list = list(parse_incomplete_jobs(incomplete_dir)) if is_latest_log else []
+
+    # Determine final status based on failures and incomplete markers
     failed_jobs = len(failed_list)
     if failed_jobs > 0:
         status = WorkflowStatus.FAILED if status != WorkflowStatus.RUNNING else status
+    elif status != WorkflowStatus.RUNNING and incomplete_list:
+        # Workflow is not running but has incomplete markers = interrupted
+        status = WorkflowStatus.INCOMPLETE
     elif status == WorkflowStatus.COMPLETED and completed < total and not running:
         # Fallback: if workflow stopped but not all jobs completed, assume failure
         # Only apply if there are no running jobs (avoids false positives)
         status = WorkflowStatus.FAILED
         failed_jobs = total - completed
+
+    # If workflow is not actually running, clear "running" jobs from log parsing
+    # (those are orphaned jobs, not truly running - they're reflected in incomplete_list)
+    if not workflow_is_running:
+        running = []
 
     return WorkflowProgress(
         workflow_dir=workflow_dir,
@@ -985,6 +1012,7 @@ def parse_workflow_state(
         completed_jobs=completed,
         failed_jobs=failed_jobs,
         failed_jobs_list=failed_list,
+        incomplete_jobs_list=incomplete_list,
         running_jobs=running,
         recent_completions=completions[:10],
         start_time=start_time,
