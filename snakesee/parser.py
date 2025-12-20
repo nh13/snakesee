@@ -994,11 +994,10 @@ def parse_workflow_state(
     elif status != WorkflowStatus.RUNNING and incomplete_list:
         # Workflow is not running but has incomplete markers = interrupted
         status = WorkflowStatus.INCOMPLETE
-    elif status == WorkflowStatus.COMPLETED and completed < total and not running:
-        # Fallback: if workflow stopped but not all jobs completed, assume failure
-        # Only apply if there are no running jobs (avoids false positives)
-        status = WorkflowStatus.FAILED
-        failed_jobs = total - completed
+    elif status == WorkflowStatus.COMPLETED and completed < total and not workflow_is_running:
+        # Fallback: if workflow stopped but not all jobs completed, it was interrupted
+        # Only apply if workflow is not actually running (based on lock files)
+        status = WorkflowStatus.INCOMPLETE
 
     # If workflow is not actually running, clear "running" jobs from log parsing
     # (those are orphaned jobs, not truly running - they're reflected in incomplete_list)
