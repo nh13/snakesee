@@ -199,6 +199,9 @@ class WorkflowMonitorTUI:
         self._validation_logger: ValidationLogger | None = None
         self._init_validation()
 
+        # Track job_ids already added to rule_stats (to avoid duplicates)
+        self._rule_stats_job_ids: set[str] = set()
+
         self._init_estimator()
 
     def _refresh_log_list(self) -> None:
@@ -448,6 +451,39 @@ class WorkflowMonitorTUI:
             start_time=progress.start_time,
             log_file=progress.log_file,
         )
+
+    def _update_rule_stats_from_completions(self, progress: WorkflowProgress) -> None:
+        """Update rule_stats with newly completed jobs from recent_completions.
+
+        This ensures the Rule Statistics panel shows data from jobs that completed
+        during this monitoring session, not just historical data from startup.
+        """
+        if self._estimator is None:
+            return
+
+        for job in progress.recent_completions:
+            # Skip if job_id is None or already processed
+            if job.job_id is None or job.job_id in self._rule_stats_job_ids:
+                continue
+
+            # Skip if we don't have a valid duration
+            duration = job.duration
+            if duration is None:
+                continue
+
+            # Add to rule_stats
+            if job.rule not in self._estimator.rule_stats:
+                self._estimator.rule_stats[job.rule] = RuleTimingStats(rule=job.rule)
+
+            stats = self._estimator.rule_stats[job.rule]
+            stats.durations.append(duration)
+            if job.end_time is not None:
+                stats.timestamps.append(job.end_time)
+            if job.input_size is not None:
+                stats.input_sizes.append(job.input_size)
+
+            # Mark this job as processed
+            self._rule_stats_job_ids.add(job.job_id)
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""
@@ -1934,6 +1970,9 @@ class WorkflowMonitorTUI:
         if events:
             progress = self._apply_events_to_progress(progress, events)
             self._force_refresh = True
+
+        # Update rule_stats with newly completed jobs (for Rule Statistics panel)
+        self._update_rule_stats_from_completions(progress)
 
         estimate = None
         if self._estimator is not None:
