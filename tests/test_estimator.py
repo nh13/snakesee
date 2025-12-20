@@ -206,3 +206,109 @@ class TestTimeEstimator:
         """Test wildcard conditioning can be enabled."""
         estimator = TimeEstimator(use_wildcard_conditioning=True)
         assert estimator.use_wildcard_conditioning is True
+
+
+class TestThreadAwareETA:
+    """Tests for thread-aware ETA estimation."""
+
+    def test_thread_stats_initialized_empty(self) -> None:
+        """Test thread_stats is initialized as empty dict."""
+        estimator = TimeEstimator()
+        assert estimator.thread_stats == {}
+
+    def test_get_estimate_with_exact_thread_match(self) -> None:
+        """Test get_estimate_for_job uses exact thread match."""
+        from snakesee.models import ThreadTimingStats
+
+        estimator = TimeEstimator()
+
+        # Set up thread stats: align with 4 threads takes 50s
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(
+            rule="align", durations=[50.0, 52.0, 48.0]
+        )
+        estimator.thread_stats["align"] = thread_stats
+
+        # Also set up rule stats with different timing (100s)
+        estimator.rule_stats["align"] = RuleTimingStats(
+            rule="align", durations=[100.0, 100.0, 100.0]
+        )
+
+        # With threads=4, should use thread-specific stats (~50s)
+        mean, var = estimator.get_estimate_for_job("align", threads=4)
+        assert 45 < mean < 55  # Should be around 50s, not 100s
+        assert var > 0
+
+    def test_get_estimate_with_thread_fallback(self) -> None:
+        """Test get_estimate_for_job falls back to aggregate when no exact match."""
+        from snakesee.models import ThreadTimingStats
+
+        estimator = TimeEstimator()
+
+        # Set up thread stats: align has 1-thread (100s) and 8-thread (20s) data
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[1] = RuleTimingStats(rule="align", durations=[100.0])
+        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[20.0])
+        estimator.thread_stats["align"] = thread_stats
+
+        # Request 4 threads - should fall back to aggregate (~60s average)
+        mean, var = estimator.get_estimate_for_job("align", threads=4)
+        # Should be aggregate of 100 and 20 = 60
+        assert 55 < mean < 65
+        assert var > 0
+
+    def test_get_estimate_no_thread_data_falls_to_rule_stats(self) -> None:
+        """Test get_estimate_for_job falls back to rule_stats when no thread data."""
+        estimator = TimeEstimator()
+
+        # Only rule stats, no thread stats (with varying durations for non-zero variance)
+        estimator.rule_stats["align"] = RuleTimingStats(
+            rule="align", durations=[95.0, 100.0, 105.0]
+        )
+
+        # With threads=4 but no thread data, should use rule stats
+        mean, var = estimator.get_estimate_for_job("align", threads=4)
+        assert 95 < mean < 105  # Should be around 100s
+        assert var > 0
+
+    def test_get_estimate_no_threads_param_uses_rule_stats(self) -> None:
+        """Test get_estimate_for_job without threads uses rule_stats."""
+        from snakesee.models import ThreadTimingStats
+
+        estimator = TimeEstimator()
+
+        # Set up thread stats with different timing
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[50.0])
+        estimator.thread_stats["align"] = thread_stats
+
+        # Set up rule stats
+        estimator.rule_stats["align"] = RuleTimingStats(rule="align", durations=[100.0])
+
+        # Without threads param, should use rule stats
+        mean, var = estimator.get_estimate_for_job("align")
+        assert 95 < mean < 105  # Should be around 100s
+        assert var > 0
+
+    def test_thread_stats_takes_priority_over_wildcards(self) -> None:
+        """Test thread-specific stats take priority over wildcard conditioning."""
+        from snakesee.models import ThreadTimingStats
+        from snakesee.models import WildcardTimingStats
+
+        estimator = TimeEstimator(use_wildcard_conditioning=True)
+
+        # Set up thread stats: 30s with 4 threads
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[30.0])
+        estimator.thread_stats["align"] = thread_stats
+
+        # Set up wildcard stats: sample1 takes 200s
+        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
+        wc_stats.stats_by_value["sample1"] = RuleTimingStats(rule="align", durations=[200.0])
+        estimator.wildcard_stats["align"] = {"sample": wc_stats}
+
+        # Thread stats should take priority
+        mean, var = estimator.get_estimate_for_job(
+            "align", wildcards={"sample": "sample1"}, threads=4
+        )
+        assert 25 < mean < 35  # Should be around 30s, not 200s

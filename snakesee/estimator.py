@@ -5,6 +5,7 @@ from pathlib import Path
 from statistics import mean
 
 from snakesee.models import RuleTimingStats
+from snakesee.models import ThreadTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WildcardTimingStats
@@ -23,6 +24,7 @@ class TimeEstimator:
 
     Attributes:
         rule_stats: Dictionary mapping rule names to their timing statistics.
+        thread_stats: Dictionary mapping rule names to thread-conditioned timing stats.
         wildcard_stats: Nested dict of wildcard-conditioned timing stats.
         use_wildcard_conditioning: Whether to use wildcard-specific estimates.
         weighting_strategy: Strategy for weighting historical data ("time" or "index").
@@ -56,6 +58,7 @@ class TimeEstimator:
                            Only used when weighting_strategy="index".
         """
         self.rule_stats: dict[str, RuleTimingStats] = rule_stats or {}
+        self.thread_stats: dict[str, ThreadTimingStats] = {}
         self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
         self.use_wildcard_conditioning = use_wildcard_conditioning
         self.weighting_strategy = weighting_strategy
@@ -107,22 +110,46 @@ class TimeEstimator:
         rule: str,
         wildcards: dict[str, str] | None = None,
         input_size: int | None = None,
+        threads: int | None = None,
     ) -> tuple[float, float]:
         """
         Get expected duration and variance for a specific job.
 
-        Uses wildcard-specific timing if available and enabled, otherwise
-        falls back to rule-level statistics. Optionally scales by input file size.
+        Uses thread-specific timing if available, then wildcard-specific timing
+        if enabled, otherwise falls back to rule-level statistics.
+        Optionally scales by input file size.
 
         Args:
             rule: The rule name.
             wildcards: Optional wildcard values for the job.
             input_size: Optional input file size in bytes for size-scaled estimates.
+            threads: Optional thread count for thread-specific estimates.
 
         Returns:
             Tuple of (expected_duration, variance).
         """
         global_mean = self.global_mean_duration()
+
+        # Try thread-specific stats first (highest priority for running job ETA)
+        if threads is not None and rule in self.thread_stats:
+            thread_stats, matched_threads = self.thread_stats[rule].get_best_match(threads)
+            if thread_stats is not None:
+                thread_mean = self._get_weighted_mean(thread_stats)
+                # Tighter variance for exact thread match, wider for aggregate fallback
+                if matched_threads is not None:
+                    thread_var = (
+                        thread_stats.std_dev**2
+                        if thread_stats.count > 1
+                        else (thread_mean * 0.2) ** 2
+                    )
+                else:
+                    # Aggregate fallback - use standard variance
+                    thread_var = (
+                        thread_stats.std_dev**2
+                        if thread_stats.count > 1
+                        else (thread_mean * 0.3) ** 2
+                    )
+                return thread_mean, thread_var
 
         # Try wildcard-specific stats if enabled
         if self.use_wildcard_conditioning and wildcards and rule in self.wildcard_stats:
