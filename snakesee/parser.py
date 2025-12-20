@@ -1019,7 +1019,7 @@ def _augment_completions_with_threads(completions: list[JobInfo], log_path: Path
         if threads is None and job.end_time is not None:
             key = (job.rule, int(job.end_time))
             threads = threads_lookup.get(key)
-        if threads is not None and threads != job.threads:
+        if threads is not None and job.threads is None:
             job = JobInfo(
                 rule=job.rule,
                 job_id=job.job_id,

@@ -292,6 +292,8 @@ class WorkflowMonitorTUI:
             ts.durations.append(job.duration)
             if job.end_time is not None:
                 ts.timestamps.append(job.end_time)
+            if job.input_size is not None:
+                ts.input_sizes.append(job.input_size)
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
@@ -1865,14 +1867,20 @@ class WorkflowMonitorTUI:
 
         # Build hierarchical display: rule is primary, threads is secondary
         # Each row is (rule_display, threads_display, stats)
+        # Limit total rows to 8 (not rules) to handle thread expansion
+        max_rows = 8
         rows: list[tuple[str, str, RuleTimingStats]] = []
-        for stats in stats_list[:8]:
+        for stats in stats_list:
+            if len(rows) >= max_rows:
+                break
             rule = stats.rule
             if rule in self._thread_stats and self._thread_stats[rule].stats_by_threads:
                 # Has thread-specific data - show each thread count
                 thread_stats = self._thread_stats[rule]
                 sorted_threads = sorted(thread_stats.stats_by_threads.keys())
                 for i, threads in enumerate(sorted_threads):
+                    if len(rows) >= max_rows:
+                        break
                     ts = thread_stats.stats_by_threads[threads]
                     # First row shows rule name, subsequent rows show blank
                     rule_display = rule if i == 0 else ""
