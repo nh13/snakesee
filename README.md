@@ -276,11 +276,12 @@ The plugin is optional - snakesee works without it using log parsing, and automa
 snakesee determines if a workflow is actively running by checking:
 
 1. **Lock files** exist in `.snakemake/locks/`
-2. **Log file** was recently modified (within the stale threshold)
+2. **Incomplete markers** exist in `.snakemake/incomplete/` (jobs in progress)
+3. **Log file** was recently modified (within the stale threshold)
 
-The **stale threshold** defaults to **30 minutes** (1800 seconds). This allows for long-running jobs that don't produce log output for extended periods. If the log hasn't been updated within the threshold while lock files exist, the workflow is considered interrupted (INCOMPLETE status).
+If lock files AND incomplete markers exist, the workflow is considered **RUNNING** regardless of log age. This handles very long-running jobs that don't update the log file.
 
-For workflows with very long-running jobs, snakesee may show INCOMPLETE status even while Snakemake is running. The status will update to RUNNING once any job completes and updates the log file.
+If lock files exist but no incomplete markers, snakesee falls back to checking log freshness. The **stale threshold** defaults to **30 minutes** (1800 seconds). If the log hasn't been updated within this threshold, the workflow is considered interrupted (INCOMPLETE status).
 
 ## TUI Keyboard Shortcuts
 

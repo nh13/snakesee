@@ -804,17 +804,19 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
     """
     Check if a workflow is currently running.
 
-    Uses two signals:
+    Uses multiple signals:
     1. Lock files exist in .snakemake/locks/
-    2. Log file was recently modified (within stale_threshold seconds)
+    2. Incomplete markers exist in .snakemake/incomplete/ (jobs in progress)
+    3. Log file was recently modified (within stale_threshold seconds)
 
-    This handles the case where snakemake is killed without cleaning up locks.
+    If locks + incomplete markers exist, the workflow is considered running
+    even if the log is stale (handles very long-running jobs).
 
     Args:
         snakemake_dir: Path to the .snakemake directory.
         stale_threshold: Seconds since last log modification before considering
-            the workflow stale/dead. Default 1800 seconds (30 minutes) to handle
-            long-running jobs that don't produce log output.
+            the workflow stale/dead (only used if no incomplete markers).
+            Default 1800 seconds (30 minutes).
 
     Returns:
         True if workflow appears to be actively running, False otherwise.
@@ -833,7 +835,21 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
     if not has_locks:
         return False
 
-    # Lock files exist - check if the log is still being updated
+    # Lock files exist - check for incomplete markers (jobs in progress)
+    incomplete_dir = snakemake_dir / "incomplete"
+    has_incomplete = False
+    try:
+        if incomplete_dir.exists():
+            has_incomplete = any(incomplete_dir.iterdir())
+    except OSError:
+        pass
+
+    # If locks + incomplete markers exist, workflow is running
+    # (handles very long-running jobs that don't update the log)
+    if has_incomplete:
+        return True
+
+    # No incomplete markers - fall back to log freshness check
     log_file = find_latest_log(snakemake_dir)
     if log_file is None:
         # No log file but locks exist - assume running (early startup)
