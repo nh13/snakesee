@@ -484,15 +484,15 @@ class TestParseWorkflowState:
         assert state.total_jobs == 10
         assert state.completed_jobs == 10
 
-    def test_failed_workflow(self, snakemake_dir: Path, tmp_path: Path) -> None:
-        """Test detecting a failed workflow."""
-        # No lock files, but progress incomplete
+    def test_incomplete_workflow(self, snakemake_dir: Path, tmp_path: Path) -> None:
+        """Test detecting an incomplete (interrupted) workflow."""
+        # No lock files, but progress incomplete - workflow was interrupted
         log_file = snakemake_dir / "log" / "2024-01-01T120000.snakemake.log"
         log_file.write_text("5 of 10 steps (50%) done")
 
         state = parse_workflow_state(tmp_path)
-        assert state.status == WorkflowStatus.FAILED
-        assert state.failed_jobs == 5
+        assert state.status == WorkflowStatus.INCOMPLETE
+        assert state.failed_jobs == 0  # No explicit failures, just interrupted
 
 
 class TestCollectWildcardTimingStats:

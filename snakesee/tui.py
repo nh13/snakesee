@@ -946,7 +946,10 @@ class WorkflowMonitorTUI:
         bar = Text()
         bar.append("█" * succeeded_width, style="green")
         bar.append("█" * failed_width, style="red")
-        bar.append("░" * remaining_width, style="dim")
+        if progress.status == WorkflowStatus.INCOMPLETE:
+            bar.append("░" * remaining_width, style="yellow")  # Incomplete = yellow
+        else:
+            bar.append("░" * remaining_width, style="dim")
 
         return bar
 
@@ -1286,7 +1289,10 @@ class WorkflowMonitorTUI:
         summary.append(" running", style="dim")
         summary.append("  │  ", style="dim")
         summary.append(f"{pending}", style="yellow" if pending > 0 else "dim")
-        summary.append(" pending", style="dim")
+        if progress.status == WorkflowStatus.INCOMPLETE:
+            summary.append(" incomplete", style="dim")
+        else:
+            summary.append(" pending", style="dim")
 
         border_style = "red" if failed > 0 else FG_BLUE
         return Panel(summary, border_style=border_style, padding=(0, 1))
