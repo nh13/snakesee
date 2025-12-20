@@ -523,6 +523,63 @@ class WildcardTimingStats:
         return best_key if best_variance_ratio > 0.1 else None
 
 
+@dataclass
+class ThreadTimingStats:
+    """
+    Timing statistics for a rule conditioned on thread count.
+
+    Tracks timing per (rule, threads) tuple.
+    Example: align rule with 1 thread takes 10min, with 8 threads takes 2min.
+
+    Attributes:
+        rule: The rule name.
+        stats_by_threads: Dictionary mapping thread count to their timing stats.
+    """
+
+    rule: str
+    stats_by_threads: dict[int, RuleTimingStats] = field(default_factory=dict)
+
+    def get_stats_for_threads(self, threads: int) -> RuleTimingStats | None:
+        """Get timing stats for a specific thread count."""
+        return self.stats_by_threads.get(threads)
+
+    def get_best_match(self, threads: int) -> tuple[RuleTimingStats | None, int | None]:
+        """
+        Get best matching stats with fallback strategy.
+
+        Returns:
+            Tuple of (stats, matched_threads) where:
+            - If exact match exists: (exact_stats, threads)
+            - If no exact match but other thread data exists: (aggregate_stats, None)
+            - If no data at all: (None, None)
+        """
+        # Exact match first
+        if threads in self.stats_by_threads:
+            return self.stats_by_threads[threads], threads
+
+        # Fallback: return aggregate across all thread counts
+        if self.stats_by_threads:
+            return self._aggregate_all_threads(), None
+
+        return None, None
+
+    def _aggregate_all_threads(self) -> RuleTimingStats:
+        """Aggregate stats across all thread counts."""
+        all_durations: list[float] = []
+        all_timestamps: list[float] = []
+        all_input_sizes: list[int | None] = []
+        for stats in self.stats_by_threads.values():
+            all_durations.extend(stats.durations)
+            all_timestamps.extend(stats.timestamps)
+            all_input_sizes.extend(stats.input_sizes)
+        return RuleTimingStats(
+            rule=self.rule,
+            durations=all_durations,
+            timestamps=all_timestamps,
+            input_sizes=all_input_sizes,
+        )
+
+
 @dataclass(frozen=True)
 class TimeEstimate:
     """
