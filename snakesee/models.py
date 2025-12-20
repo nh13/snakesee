@@ -20,6 +20,7 @@ class WorkflowStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    INCOMPLETE = "incomplete"
     UNKNOWN = "unknown"
 
 
@@ -585,6 +586,7 @@ class WorkflowProgress:
         completed_jobs: Number of jobs completed.
         failed_jobs: Number of jobs that failed.
         failed_jobs_list: List of failed job details (for --keep-going).
+        incomplete_jobs_list: List of jobs that were in progress when workflow was interrupted.
         running_jobs: List of currently running jobs.
         recent_completions: List of recently completed jobs.
         start_time: Unix timestamp when workflow started.
@@ -597,6 +599,7 @@ class WorkflowProgress:
     completed_jobs: int
     failed_jobs: int = 0
     failed_jobs_list: list[JobInfo] = field(default_factory=list)
+    incomplete_jobs_list: list[JobInfo] = field(default_factory=list)
     running_jobs: list[JobInfo] = field(default_factory=list)
     recent_completions: list[JobInfo] = field(default_factory=list)
     start_time: float | None = None
