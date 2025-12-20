@@ -572,6 +572,17 @@ class ThreadTimingStats:
             all_durations.extend(stats.durations)
             all_timestamps.extend(stats.timestamps)
             all_input_sizes.extend(stats.input_sizes)
+
+        # Sort by timestamp to maintain chronological order for weighted_mean
+        if all_timestamps and len(all_timestamps) == len(all_durations) == len(all_input_sizes):
+            sorted_data = sorted(
+                zip(all_timestamps, all_durations, all_input_sizes, strict=True),
+                key=lambda x: x[0],
+            )
+            all_timestamps = [x[0] for x in sorted_data]
+            all_durations = [x[1] for x in sorted_data]
+            all_input_sizes = [x[2] for x in sorted_data]
+
         return RuleTimingStats(
             rule=self.rule,
             durations=all_durations,
