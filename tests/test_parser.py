@@ -192,7 +192,7 @@ class TestIsWorkflowRunning:
         assert is_workflow_running(snakemake_dir) is True
 
     def test_with_lock_and_stale_log(self, snakemake_dir: Path) -> None:
-        """Test when lock exists but log is stale (workflow killed)."""
+        """Test when lock exists but log is stale and no incomplete markers."""
         import os
         import time
 
@@ -205,11 +205,34 @@ class TestIsWorkflowRunning:
         old_time = time.time() - 1860
         os.utime(log_file, (old_time, old_time))
 
-        # With default 1800s threshold, workflow should appear dead
+        # With default 1800s threshold and no incomplete markers, workflow should appear dead
         assert is_workflow_running(snakemake_dir) is False
 
         # With 2400s threshold, should still appear running
         assert is_workflow_running(snakemake_dir, stale_threshold=2400.0) is True
+
+    def test_with_lock_stale_log_but_incomplete_markers(self, snakemake_dir: Path) -> None:
+        """Test when lock exists, log is stale, but incomplete markers exist."""
+        import os
+        import time
+
+        lock_file = snakemake_dir / "locks" / "0.input.lock"
+        lock_file.write_text("/some/file\n")
+        log_file = snakemake_dir / "log" / "2024-01-01T120000.000000.snakemake.log"
+        log_file.write_text("test")
+
+        # Make log file appear old by setting mtime to 2 hours ago
+        old_time = time.time() - 7200
+        os.utime(log_file, (old_time, old_time))
+
+        # Create incomplete marker (job in progress)
+        incomplete_dir = snakemake_dir / "incomplete"
+        incomplete_dir.mkdir(exist_ok=True)
+        incomplete_marker = incomplete_dir / "c29tZV9vdXRwdXRfZmlsZQ=="  # base64 encoded
+        incomplete_marker.write_text("")
+
+        # With incomplete markers, workflow should be considered running despite stale log
+        assert is_workflow_running(snakemake_dir) is True
 
 
 class TestCollectRuleTimingStats:
