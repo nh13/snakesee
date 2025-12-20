@@ -64,6 +64,19 @@ class TestJobInfo:
         job = JobInfo(rule="test", start_time=100.0)
         assert job.duration is None
 
+    def test_duration_no_start(self) -> None:
+        """Test duration when no start time."""
+        job = JobInfo(rule="test", end_time=200.0)
+        assert job.duration is None
+
+    def test_threads_field(self) -> None:
+        """Test threads field on JobInfo."""
+        job = JobInfo(rule="test", threads=4)
+        assert job.threads == 4
+
+        job_no_threads = JobInfo(rule="test")
+        assert job_no_threads.threads is None
+
 
 class TestRuleTimingStats:
     """Tests for the RuleTimingStats dataclass."""
@@ -166,6 +179,23 @@ class TestRuleTimingStats:
 
         assert not low_var.is_high_variance
         assert high_var.is_high_variance
+
+    def test_coefficient_of_variation_zero_mean(self) -> None:
+        """Test coefficient_of_variation returns 0 when mean is zero."""
+        stats = RuleTimingStats(rule="test", durations=[])
+        assert stats.coefficient_of_variation == 0.0
+
+    def test_weighted_mean_empty(self) -> None:
+        """Test weighted_mean returns 0.0 for empty durations."""
+        stats = RuleTimingStats(rule="test", durations=[])
+        assert stats.weighted_mean() == 0.0
+
+    def test_weighted_mean_uses_default_strategy(self) -> None:
+        """Test weighted_mean uses default strategy when none specified."""
+        stats = RuleTimingStats(rule="test", durations=[10.0, 20.0, 30.0])
+        # Should use index strategy by default
+        result = stats.weighted_mean()
+        assert result > 0
 
     def test_recency_factor_no_timestamps_time_strategy(self) -> None:
         """Test recency factor returns 0.5 when no timestamps with time strategy."""
@@ -428,3 +458,110 @@ class TestWorkflowProgress:
         elapsed = progress.elapsed_seconds
         assert elapsed is not None
         assert 59 < elapsed < 62
+
+
+class TestThreadTimingStats:
+    """Tests for the ThreadTimingStats dataclass."""
+
+    def test_get_stats_for_threads_exact_match(self) -> None:
+        """Test get_stats_for_threads returns exact match."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[50.0])
+
+        result = thread_stats.get_stats_for_threads(4)
+        assert result is not None
+        assert result.mean_duration == 50.0
+
+    def test_get_stats_for_threads_no_match(self) -> None:
+        """Test get_stats_for_threads returns None for no match."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[50.0])
+
+        result = thread_stats.get_stats_for_threads(8)
+        assert result is None
+
+    def test_get_best_match_exact(self) -> None:
+        """Test get_best_match returns exact match with thread count."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[50.0])
+
+        stats, matched = thread_stats.get_best_match(4)
+        assert stats is not None
+        assert matched == 4
+        assert stats.mean_duration == 50.0
+
+    def test_get_best_match_fallback_aggregate(self) -> None:
+        """Test get_best_match falls back to aggregate."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[1] = RuleTimingStats(rule="align", durations=[100.0])
+        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[20.0])
+
+        stats, matched = thread_stats.get_best_match(4)
+        assert stats is not None
+        assert matched is None  # No exact match
+        assert stats.mean_duration == 60.0  # Average of 100 and 20
+
+    def test_get_best_match_no_data(self) -> None:
+        """Test get_best_match returns None when no data."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+
+        stats, matched = thread_stats.get_best_match(4)
+        assert stats is None
+        assert matched is None
+
+    def test_aggregate_all_threads_sorts_chronologically(self) -> None:
+        """Test _aggregate_all_threads sorts by timestamp."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        # Add data out of order
+        thread_stats.stats_by_threads[8] = RuleTimingStats(
+            rule="align",
+            durations=[20.0],
+            timestamps=[200.0],
+            input_sizes=[1000],
+        )
+        thread_stats.stats_by_threads[1] = RuleTimingStats(
+            rule="align",
+            durations=[100.0],
+            timestamps=[100.0],
+            input_sizes=[500],
+        )
+
+        # Get aggregate (via get_best_match with non-matching thread)
+        stats, matched = thread_stats.get_best_match(4)
+        assert stats is not None
+        assert matched is None
+
+        # Verify data is sorted by timestamp
+        assert stats.timestamps == [100.0, 200.0]
+        assert stats.durations == [100.0, 20.0]
+        assert stats.input_sizes == [500, 1000]
+
+    def test_aggregate_handles_mismatched_lengths(self) -> None:
+        """Test _aggregate_all_threads handles mismatched array lengths."""
+        from snakesee.models import ThreadTimingStats
+
+        thread_stats = ThreadTimingStats(rule="align")
+        # Add data with mismatched lengths (no timestamps)
+        thread_stats.stats_by_threads[4] = RuleTimingStats(
+            rule="align",
+            durations=[50.0, 60.0],
+            timestamps=[],  # No timestamps
+            input_sizes=[1000, 2000],
+        )
+
+        # Should still aggregate, just not sorted
+        stats, matched = thread_stats.get_best_match(8)
+        assert stats is not None
+        assert stats.count == 2
