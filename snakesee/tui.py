@@ -547,8 +547,17 @@ class WorkflowMonitorTUI:
             return
 
         for job in progress.recent_completions:
-            # Skip if job_id is None or already processed
-            if job.job_id is None or job.job_id in self._rule_stats_job_ids:
+            # Create a unique key for deduplication
+            # Use job_id if available, otherwise use (rule, end_time) tuple
+            if job.job_id is not None:
+                dedup_key = f"id:{job.job_id}"
+            elif job.end_time is not None:
+                dedup_key = f"time:{job.rule}:{int(job.end_time)}"
+            else:
+                # Can't deduplicate without job_id or end_time, skip
+                continue
+
+            if dedup_key in self._rule_stats_job_ids:
                 continue
 
             # Skip if we don't have a valid duration
@@ -582,7 +591,7 @@ class WorkflowMonitorTUI:
                     ts.input_sizes.append(job.input_size)
 
             # Mark this job as processed
-            self._rule_stats_job_ids.add(job.job_id)
+            self._rule_stats_job_ids.add(dedup_key)
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""
