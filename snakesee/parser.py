@@ -693,7 +693,7 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     return completed_jobs
 
 
-def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 60.0) -> bool:
+def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) -> bool:
     """
     Check if a workflow is currently running.
 
@@ -706,7 +706,8 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 60.0) -> b
     Args:
         snakemake_dir: Path to the .snakemake directory.
         stale_threshold: Seconds since last log modification before considering
-            the workflow stale/dead. Default 60 seconds.
+            the workflow stale/dead. Default 1800 seconds (30 minutes) to handle
+            long-running jobs that don't produce log output.
 
     Returns:
         True if workflow appears to be actively running, False otherwise.

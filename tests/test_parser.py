@@ -201,15 +201,15 @@ class TestIsWorkflowRunning:
         log_file = snakemake_dir / "log" / "2024-01-01T120000.000000.snakemake.log"
         log_file.write_text("test")
 
-        # Make log file appear old by setting mtime to 2 minutes ago
-        old_time = time.time() - 120
+        # Make log file appear old by setting mtime to 31 minutes ago
+        old_time = time.time() - 1860
         os.utime(log_file, (old_time, old_time))
 
-        # With default 60s threshold, workflow should appear dead
+        # With default 1800s threshold, workflow should appear dead
         assert is_workflow_running(snakemake_dir) is False
 
-        # With 300s threshold, should still appear running
-        assert is_workflow_running(snakemake_dir, stale_threshold=300.0) is True
+        # With 2400s threshold, should still appear running
+        assert is_workflow_running(snakemake_dir, stale_threshold=2400.0) is True
 
 
 class TestCollectRuleTimingStats:
