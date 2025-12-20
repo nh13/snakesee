@@ -232,6 +232,7 @@ class WorkflowMonitorTUI:
 
     def _init_estimator(self) -> None:
         """Initialize or reinitialize the time estimator."""
+        self._rule_stats_job_ids.clear()
         if self.use_estimation:
             self._estimator = TimeEstimator(
                 use_wildcard_conditioning=self._use_wildcard_conditioning,
