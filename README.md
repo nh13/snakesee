@@ -271,6 +271,17 @@ snakesee watch
 
 The plugin is optional - snakesee works without it using log parsing, and automatically uses events when available.
 
+### Workflow Status Detection
+
+snakesee determines if a workflow is actively running by checking:
+
+1. **Lock files** exist in `.snakemake/locks/`
+2. **Log file** was recently modified (within the stale threshold)
+
+The **stale threshold** defaults to **30 minutes** (1800 seconds). This allows for long-running jobs that don't produce log output for extended periods. If the log hasn't been updated within the threshold while lock files exist, the workflow is considered interrupted (INCOMPLETE status).
+
+For workflows with very long-running jobs, snakesee may show INCOMPLETE status even while Snakemake is running. The status will update to RUNNING once any job completes and updates the log file.
+
 ## TUI Keyboard Shortcuts
 
 | Key | Action |

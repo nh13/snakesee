@@ -388,7 +388,7 @@ class WorkflowMonitorTUI:
                 if event.job_id is not None:
                     for i, job in enumerate(new_running_jobs):
                         if job.job_id == str(event.job_id):
-                            # Create updated JobInfo with accurate start time
+                            # Create updated JobInfo with accurate start time and threads
                             new_running_jobs[i] = JobInfo(
                                 rule=job.rule,
                                 job_id=job.job_id,
@@ -397,6 +397,7 @@ class WorkflowMonitorTUI:
                                 output_file=job.output_file,
                                 wildcards=job.wildcards,
                                 input_size=job.input_size,
+                                threads=event.threads or job.threads,
                             )
                             break
 
@@ -417,6 +418,7 @@ class WorkflowMonitorTUI:
                                 output_file=job.output_file,
                                 wildcards=job.wildcards,
                                 input_size=job.input_size,
+                                threads=event.threads or job.threads,
                             )
                             break
 
@@ -435,6 +437,7 @@ class WorkflowMonitorTUI:
                                 else None,
                                 end_time=event.timestamp,
                                 wildcards=event.wildcards_dict,
+                                threads=event.threads,
                             )
                         )
                         new_failed = len(new_failed_list)
@@ -1178,6 +1181,7 @@ class WorkflowMonitorTUI:
 
         table = Table(expand=True, show_header=True, header_style=header_style)
         table.add_column(f"Rule{self._sort_indicator('running', 0)}", style="cyan", no_wrap=True)
+        table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Started{self._sort_indicator('running', 1)}", justify="right")
         table.add_column(f"Elapsed{self._sort_indicator('running', 2)}", justify="right")
         table.add_column("Progress", justify="right")
@@ -1214,8 +1218,10 @@ class WorkflowMonitorTUI:
                 if job.rule == self._filter_matches[self._filter_index]:
                     rule_style = "bold cyan on dark_blue"
 
+            threads_str = str(job.threads) if job.threads is not None else "-"
             table.add_row(
                 Text(job.rule, style=rule_style),
+                threads_str,
                 started_str,
                 elapsed_str,
                 Text(progress_str, style="green") if progress_str else Text("-", style="dim"),
@@ -1225,7 +1231,7 @@ class WorkflowMonitorTUI:
         if not jobs:
             msg = f"[dim]No jobs matching '{self._filter_text}'[/dim]" if self._filter_text else ""
             msg = msg or "[dim]No jobs currently running[/dim]"
-            table.add_row(msg, "", "", "", "")
+            table.add_row(msg, "", "", "", "", "")
 
         is_selecting_running = self._job_selection_mode and self._log_source == "running"
         title = f"Currently Running ({len(progress.running_jobs)} jobs)"
@@ -1236,7 +1242,7 @@ class WorkflowMonitorTUI:
         if self._filter_text:
             title += f" [dim]filter: {self._filter_text}[/dim]"
         border = "cyan" if is_selecting_running else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
-        return Panel(table, title=title, border_style=border)
+        return Panel(table, title=title, border_style=border, padding=0)
 
     def _make_completions_table(self, progress: WorkflowProgress) -> Panel:
         """Create the recent completions table."""
@@ -1305,13 +1311,14 @@ class WorkflowMonitorTUI:
         elif is_sorting:
             title += " [bold cyan]◀ sorting[/bold cyan]"
         border = "cyan" if is_selecting else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
-        return Panel(table, title=title, border_style=border)
+        return Panel(table, title=title, border_style=border, padding=0)
 
     def _make_summary_footer(self, progress: WorkflowProgress) -> Panel:
         """Create the job status summary as a one-line footer panel."""
         succeeded = progress.completed_jobs
         failed = progress.failed_jobs
         running = len(progress.running_jobs)
+        incomplete = len(progress.incomplete_jobs_list)
         pending = progress.pending_jobs
 
         summary = Text()
@@ -1324,12 +1331,14 @@ class WorkflowMonitorTUI:
         summary.append("  │  ", style="dim")
         summary.append(f"{running}", style="cyan" if running > 0 else "dim")
         summary.append(" running", style="dim")
+        # Show incomplete count if there are incomplete jobs
+        if incomplete > 0:
+            summary.append("  │  ", style="dim")
+            summary.append(f"{incomplete}", style="yellow")
+            summary.append(" incomplete", style="dim")
         summary.append("  │  ", style="dim")
         summary.append(f"{pending}", style="yellow" if pending > 0 else "dim")
-        if progress.status == WorkflowStatus.INCOMPLETE:
-            summary.append(" incomplete", style="dim")
-        else:
-            summary.append(" pending", style="dim")
+        summary.append(" pending", style="dim")
 
         border_style = "red" if failed > 0 else FG_BLUE
         return Panel(summary, border_style=border_style, padding=(0, 1))
@@ -1592,7 +1601,10 @@ class WorkflowMonitorTUI:
             table.add_row(f"[dim]... and {len(rules_list) - 10} more rules[/dim]", "")
 
         return Panel(
-            table, title=f"Pending Jobs (~{pending_count})" + title_suffix, border_style=border
+            table,
+            title=f"Pending Jobs (~{pending_count})" + title_suffix,
+            border_style=border,
+            padding=0,
         )
 
     def _make_failed_jobs_panel(self, progress: WorkflowProgress) -> Panel:
@@ -1620,6 +1632,7 @@ class WorkflowMonitorTUI:
             table,
             title=f"Failed Jobs ({len(progress.failed_jobs_list)})",
             border_style="red",
+            padding=0,
         )
 
     def _make_incomplete_jobs_panel(self, progress: WorkflowProgress) -> Panel:
@@ -1653,6 +1666,7 @@ class WorkflowMonitorTUI:
             table,
             title=f"Incomplete Jobs ({len(progress.incomplete_jobs_list)})",
             border_style="yellow",
+            padding=0,
         )
 
     def _parse_stats_from_logs(self, cutoff: float) -> dict[str, RuleTimingStats]:
@@ -1756,7 +1770,7 @@ class WorkflowMonitorTUI:
         if is_sorting:
             title += " [bold cyan]◀ sorting[/bold cyan]"
         border = f"bold {FG_BLUE}" if is_sorting else FG_BLUE
-        return Panel(table, title=title, border_style=border)
+        return Panel(table, title=title, border_style=border, padding=0)
 
     def _make_footer(self) -> Panel:
         """Create the footer with settings and key bindings."""
@@ -1880,39 +1894,47 @@ class WorkflowMonitorTUI:
                 Layout(name="right", ratio=1),
             )
 
-            # Left column: running jobs on top, pending jobs on bottom
-            layout["left"].split_column(
-                Layout(name="running", ratio=1, minimum_size=5),
-                Layout(name="pending", ratio=1, minimum_size=5),
-            )
+            # Check if we have incomplete jobs to show
+            has_failed = bool(progress.failed_jobs_list)
+            has_incomplete = bool(progress.incomplete_jobs_list)
+
+            # Left column: running jobs, incomplete jobs (if any), pending jobs
+            if has_incomplete:
+                layout["left"].split_column(
+                    Layout(name="running", ratio=1, minimum_size=3),
+                    Layout(name="incomplete", ratio=1, minimum_size=3),
+                    Layout(name="pending", ratio=1, minimum_size=3),
+                )
+            else:
+                layout["left"].split_column(
+                    Layout(name="running", ratio=1, minimum_size=3),
+                    Layout(name="pending", ratio=1, minimum_size=3),
+                )
 
             # Right column: completions, failed jobs (if any), stats
-            # Note: incomplete jobs are shown in the left column (replacing running jobs)
-            # when status is INCOMPLETE
-            has_failed = bool(progress.failed_jobs_list)
-            is_incomplete = progress.status == WorkflowStatus.INCOMPLETE
-
             if has_failed:
                 layout["right"].split_column(
-                    Layout(name="completions", ratio=1, minimum_size=5),
-                    Layout(name="failed", ratio=1, minimum_size=5),
-                    Layout(name="stats", ratio=1, minimum_size=5),
+                    Layout(name="completions", ratio=1, minimum_size=3),
+                    Layout(name="failed", ratio=1, minimum_size=3),
+                    Layout(name="stats", ratio=1, minimum_size=3),
                 )
                 layout["failed"].update(self._make_failed_jobs_panel(progress))
             else:
                 layout["right"].split_column(
-                    Layout(name="completions", ratio=1, minimum_size=5),
-                    Layout(name="stats", ratio=1, minimum_size=5),
+                    Layout(name="completions", ratio=1, minimum_size=3),
+                    Layout(name="stats", ratio=1, minimum_size=3),
                 )
 
             layout["header"].update(self._make_header(progress))
             layout["progress"].update(self._make_progress_panel(progress, estimate))
 
-            # Show incomplete jobs panel in place of running jobs when workflow is incomplete
-            if is_incomplete:
-                layout["running"].update(self._make_incomplete_jobs_panel(progress))
-            else:
-                layout["running"].update(self._make_running_table(progress))
+            # Always show running jobs panel
+            layout["running"].update(self._make_running_table(progress))
+
+            # Show incomplete jobs panel if there are incomplete jobs
+            if has_incomplete:
+                layout["incomplete"].update(self._make_incomplete_jobs_panel(progress))
+
             # Show log panel when in job selection mode, otherwise show pending jobs
             if self._job_selection_mode:
                 layout["pending"].update(self._make_job_log_panel(progress))
