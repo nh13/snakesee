@@ -37,6 +37,7 @@ class JobInfo:
         output_file: The output file path this job produces.
         wildcards: Dictionary of wildcard names to values (e.g., {"sample": "A", "batch": "1"}).
         input_size: Total size of input files in bytes (None if unknown).
+        threads: Number of threads allocated to this job (None if unknown).
     """
 
     rule: str
@@ -46,6 +47,7 @@ class JobInfo:
     output_file: Path | None = None
     wildcards: dict[str, str] | None = None
     input_size: int | None = None
+    threads: int | None = None
 
     @property
     def elapsed(self) -> float | None:
