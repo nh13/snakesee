@@ -21,6 +21,7 @@ from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
+from snakesee.models import ThreadTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WorkflowProgress
@@ -202,6 +203,12 @@ class WorkflowMonitorTUI:
         # Track job_ids already added to rule_stats (to avoid duplicates)
         self._rule_stats_job_ids: set[str] = set()
 
+        # Track threads by job_id (populated from JOB_SUBMITTED events)
+        self._job_threads: dict[str, int] = {}
+
+        # Thread-grouped timing stats: rule -> ThreadTimingStats
+        self._thread_stats: dict[str, ThreadTimingStats] = {}
+
         self._init_estimator()
 
     def _refresh_log_list(self) -> None:
@@ -233,6 +240,8 @@ class WorkflowMonitorTUI:
     def _init_estimator(self) -> None:
         """Initialize or reinitialize the time estimator."""
         self._rule_stats_job_ids.clear()
+        self._job_threads.clear()
+        self._thread_stats.clear()
         if self.use_estimation:
             self._estimator = TimeEstimator(
                 use_wildcard_conditioning=self._use_wildcard_conditioning,
@@ -255,8 +264,34 @@ class WorkflowMonitorTUI:
             metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
             if metadata_dir.exists():
                 self._estimator.load_from_metadata(metadata_dir)
+
+            # Initialize thread stats from log parsing (metadata doesn't have threads)
+            self._init_thread_stats_from_log()
         else:
             self._estimator = None
+
+    def _init_thread_stats_from_log(self) -> None:
+        """Initialize thread stats from log file parsing."""
+        from snakesee.parser import find_latest_log
+        from snakesee.parser import parse_completed_jobs_from_log
+
+        snakemake_dir = self.workflow_dir / ".snakemake"
+        log_path = find_latest_log(snakemake_dir)
+        if log_path is None:
+            return
+
+        for job in parse_completed_jobs_from_log(log_path):
+            if job.threads is None or job.duration is None:
+                continue
+            if job.rule not in self._thread_stats:
+                self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
+            thread_stats = self._thread_stats[job.rule]
+            if job.threads not in thread_stats.stats_by_threads:
+                thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
+            ts = thread_stats.stats_by_threads[job.threads]
+            ts.durations.append(job.duration)
+            if job.end_time is not None:
+                ts.timestamps.append(job.end_time)
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
@@ -348,6 +383,104 @@ class WorkflowMonitorTUI:
 
         return self._event_reader.read_new_events()
 
+    def _handle_job_submitted_event(
+        self,
+        event: SnakeseeEvent,
+        running_jobs: list[JobInfo],
+    ) -> None:
+        """Handle JOB_SUBMITTED event - capture threads info."""
+        if event.job_id is None:
+            return
+        job_id_str = str(event.job_id)
+        if event.threads is not None:
+            self._job_threads[job_id_str] = event.threads
+        threads = event.threads or self._job_threads.get(job_id_str)
+        for i, job in enumerate(running_jobs):
+            if job.job_id == job_id_str:
+                running_jobs[i] = JobInfo(
+                    rule=job.rule,
+                    job_id=job.job_id,
+                    start_time=job.start_time,
+                    end_time=job.end_time,
+                    output_file=job.output_file,
+                    wildcards=event.wildcards_dict or job.wildcards,
+                    input_size=job.input_size,
+                    threads=threads,
+                )
+                break
+
+    def _handle_job_started_event(
+        self,
+        event: SnakeseeEvent,
+        running_jobs: list[JobInfo],
+    ) -> None:
+        """Handle JOB_STARTED event - update start time and threads."""
+        if event.job_id is None:
+            return
+        job_id_str = str(event.job_id)
+        threads = event.threads or self._job_threads.get(job_id_str)
+        for i, job in enumerate(running_jobs):
+            if job.job_id == job_id_str:
+                running_jobs[i] = JobInfo(
+                    rule=job.rule,
+                    job_id=job.job_id,
+                    start_time=event.timestamp,
+                    end_time=job.end_time,
+                    output_file=job.output_file,
+                    wildcards=job.wildcards,
+                    input_size=job.input_size,
+                    threads=threads or job.threads,
+                )
+                break
+
+    def _handle_job_finished_event(
+        self,
+        event: SnakeseeEvent,
+        completions: list[JobInfo],
+    ) -> None:
+        """Handle JOB_FINISHED event - update completion with accurate duration."""
+        if event.job_id is None or event.duration is None:
+            return
+        job_id_str = str(event.job_id)
+        threads = event.threads or self._job_threads.get(job_id_str)
+        for i, job in enumerate(completions):
+            if job.job_id == job_id_str:
+                completions[i] = JobInfo(
+                    rule=job.rule,
+                    job_id=job.job_id,
+                    start_time=event.timestamp - event.duration
+                    if event.duration
+                    else job.start_time,
+                    end_time=event.timestamp,
+                    output_file=job.output_file,
+                    wildcards=job.wildcards,
+                    input_size=job.input_size,
+                    threads=threads or job.threads,
+                )
+                break
+
+    def _handle_job_error_event(
+        self,
+        event: SnakeseeEvent,
+        failed_list: list[JobInfo],
+    ) -> int:
+        """Handle JOB_ERROR event - track failed job. Returns new failed count."""
+        if event.job_id is None:
+            return len(failed_list)
+        job_id_str = str(event.job_id)
+        if not any(j.job_id == job_id_str for j in failed_list):
+            failed_list.append(
+                JobInfo(
+                    rule=event.rule_name or "unknown",
+                    job_id=job_id_str,
+                    start_time=event.timestamp - event.duration if event.duration else None,
+                    end_time=event.timestamp,
+                    wildcards=event.wildcards_dict,
+                    threads=event.threads,
+                )
+            )
+        return len(failed_list)
+
     def _apply_events_to_progress(
         self, progress: WorkflowProgress, events: list[SnakeseeEvent]
     ) -> WorkflowProgress:
@@ -377,70 +510,18 @@ class WorkflowMonitorTUI:
         # Process events to update state
         for event in events:
             if event.event_type == EventType.PROGRESS:
-                # Use authoritative progress from snakemake
                 if event.total_jobs is not None:
                     new_total = event.total_jobs
                 if event.completed_jobs is not None:
                     new_completed = event.completed_jobs
-
+            elif event.event_type == EventType.JOB_SUBMITTED:
+                self._handle_job_submitted_event(event, new_running_jobs)
             elif event.event_type == EventType.JOB_STARTED:
-                # Update running job start time if we have a matching job
-                if event.job_id is not None:
-                    for i, job in enumerate(new_running_jobs):
-                        if job.job_id == str(event.job_id):
-                            # Create updated JobInfo with accurate start time and threads
-                            new_running_jobs[i] = JobInfo(
-                                rule=job.rule,
-                                job_id=job.job_id,
-                                start_time=event.timestamp,
-                                end_time=job.end_time,
-                                output_file=job.output_file,
-                                wildcards=job.wildcards,
-                                input_size=job.input_size,
-                                threads=event.threads or job.threads,
-                            )
-                            break
-
+                self._handle_job_started_event(event, new_running_jobs)
             elif event.event_type == EventType.JOB_FINISHED:
-                # Update completion with accurate duration
-                if event.job_id is not None and event.duration is not None:
-                    # Check if this job is in our recent completions
-                    # and update its duration
-                    for i, job in enumerate(new_completions):
-                        if job.job_id == str(event.job_id):
-                            new_completions[i] = JobInfo(
-                                rule=job.rule,
-                                job_id=job.job_id,
-                                start_time=event.timestamp - event.duration
-                                if event.duration
-                                else job.start_time,
-                                end_time=event.timestamp,
-                                output_file=job.output_file,
-                                wildcards=job.wildcards,
-                                input_size=job.input_size,
-                                threads=event.threads or job.threads,
-                            )
-                            break
-
+                self._handle_job_finished_event(event, new_completions)
             elif event.event_type == EventType.JOB_ERROR:
-                # Track failed job from event
-                if event.job_id is not None:
-                    # Check if we already have this failure
-                    job_id_str = str(event.job_id)
-                    if not any(j.job_id == job_id_str for j in new_failed_list):
-                        new_failed_list.append(
-                            JobInfo(
-                                rule=event.rule_name or "unknown",
-                                job_id=job_id_str,
-                                start_time=event.timestamp - event.duration
-                                if event.duration
-                                else None,
-                                end_time=event.timestamp,
-                                wildcards=event.wildcards_dict,
-                                threads=event.threads,
-                            )
-                        )
-                        new_failed = len(new_failed_list)
+                new_failed = self._handle_job_error_event(event, new_failed_list)
 
         # Return updated progress
         return WorkflowProgress(
@@ -485,6 +566,20 @@ class WorkflowMonitorTUI:
                 stats.timestamps.append(job.end_time)
             if job.input_size is not None:
                 stats.input_sizes.append(job.input_size)
+
+            # Also update thread stats if thread info is available
+            if job.threads is not None:
+                if job.rule not in self._thread_stats:
+                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
+                thread_stats = self._thread_stats[job.rule]
+                if job.threads not in thread_stats.stats_by_threads:
+                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
+                ts = thread_stats.stats_by_threads[job.threads]
+                ts.durations.append(duration)
+                if job.end_time is not None:
+                    ts.timestamps.append(job.end_time)
+                if job.input_size is not None:
+                    ts.input_sizes.append(job.input_size)
 
             # Mark this job as processed
             self._rule_stats_job_ids.add(job.job_id)
@@ -1737,6 +1832,7 @@ class WorkflowMonitorTUI:
         header_style = "bold yellow on dark_blue" if is_sorting else "bold yellow"
         table = Table(expand=True, show_header=True, header_style=header_style)
         table.add_column(f"Rule{self._sort_indicator('stats', 0)}", style="cyan", no_wrap=True)
+        table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Count{self._sort_indicator('stats', 1)}", justify="right")
         table.add_column(f"Avg Time{self._sort_indicator('stats', 2)}", justify="right")
         table.add_column(f"Std Dev{self._sort_indicator('stats', 3)}", justify="right", style="dim")
@@ -1758,9 +1854,28 @@ class WorkflowMonitorTUI:
         else:
             stats_list.sort(key=lambda s: s.count, reverse=True)
 
+        # Build hierarchical display: rule is primary, threads is secondary
+        # Each row is (rule_display, threads_display, stats)
+        rows: list[tuple[str, str, RuleTimingStats]] = []
         for stats in stats_list[:8]:
+            rule = stats.rule
+            if rule in self._thread_stats and self._thread_stats[rule].stats_by_threads:
+                # Has thread-specific data - show each thread count
+                thread_stats = self._thread_stats[rule]
+                sorted_threads = sorted(thread_stats.stats_by_threads.keys())
+                for i, threads in enumerate(sorted_threads):
+                    ts = thread_stats.stats_by_threads[threads]
+                    # First row shows rule name, subsequent rows show blank
+                    rule_display = rule if i == 0 else ""
+                    rows.append((rule_display, str(threads), ts))
+            else:
+                # No thread data - show with "-" for threads
+                rows.append((rule, "-", stats))
+
+        for rule_display, threads_display, stats in rows:
             table.add_row(
-                stats.rule,
+                rule_display,
+                threads_display,
                 str(stats.count),
                 format_duration(stats.mean_duration),
                 format_duration(stats.std_dev) if stats.std_dev > 0 else "-",
