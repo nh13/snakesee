@@ -267,6 +267,9 @@ class WorkflowMonitorTUI:
 
             # Initialize thread stats from log parsing (metadata doesn't have threads)
             self._init_thread_stats_from_log()
+
+            # Share thread stats with estimator for thread-aware ETA
+            self._estimator.thread_stats = self._thread_stats
         else:
             self._estimator = None
 
@@ -1238,12 +1241,12 @@ class WorkflowMonitorTUI:
             remaining: float | None = None
             tool_progress: ToolProgress | None = None
 
-            if (
-                self._estimator is not None
-                and job.rule in self._estimator.rule_stats
-                and elapsed is not None
-            ):
-                expected = self._estimator._get_weighted_mean(self._estimator.rule_stats[job.rule])
+            if self._estimator is not None and elapsed is not None:
+                # Use thread-aware ETA when thread info is available
+                expected, _ = self._estimator.get_estimate_for_job(
+                    rule=job.rule,
+                    threads=job.threads,
+                )
                 remaining = max(0, expected - elapsed)
 
             # Try to get tool-specific progress
