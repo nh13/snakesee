@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snakesee.events import EventType
 from snakesee.models import JobInfo
 from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
@@ -17,6 +18,10 @@ from snakesee.tui import MAX_REFRESH_RATE
 from snakesee.tui import MIN_REFRESH_RATE
 from snakesee.tui import LayoutMode
 from snakesee.tui import WorkflowMonitorTUI
+from tests.conftest import make_job_info
+from tests.conftest import make_snakesee_event
+from tests.conftest import make_time_estimate
+from tests.conftest import make_workflow_progress
 
 
 class TestLayoutMode:
@@ -363,3 +368,272 @@ class TestWorkflowMonitorTUI:
         tui._current_log_index = 2
         tui._handle_key("]")
         assert tui._current_log_index == 1
+
+
+class TestEventHandling:
+    """Tests for event processing methods."""
+
+    def test_apply_events_empty_list(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test applying empty event list returns unchanged progress."""
+        progress = make_workflow_progress()
+        result = tui_with_mocks._apply_events_to_progress(progress, [])
+        assert result.completed_jobs == progress.completed_jobs
+        assert result.total_jobs == progress.total_jobs
+
+    def test_apply_events_progress_event(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test that progress events update total and completed jobs."""
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50)
+        events = [make_snakesee_event(EventType.PROGRESS, total_jobs=100, completed_jobs=60)]
+        result = tui_with_mocks._apply_events_to_progress(progress, events)
+        assert result.completed_jobs == 60
+
+    def test_apply_events_job_error(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test that job error events update failed count."""
+        progress = make_workflow_progress(failed_jobs=0, failed_jobs_list=[])
+        events = [make_snakesee_event(EventType.JOB_ERROR, rule_name="align", job_id=123)]
+        result = tui_with_mocks._apply_events_to_progress(progress, events)
+        assert result.failed_jobs == 1
+        assert len(result.failed_jobs_list) == 1
+
+    def test_handle_job_submitted_tracks_threads(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test that submitted events track thread info in _job_threads."""
+        event = make_snakesee_event(
+            EventType.JOB_SUBMITTED, rule_name="align", job_id=123, threads=8
+        )
+        # Pass empty running_jobs list as required by the method
+        running_jobs: list[JobInfo] = []
+        tui_with_mocks._handle_job_submitted_event(event, running_jobs)
+        assert "123" in tui_with_mocks._job_threads
+        assert tui_with_mocks._job_threads["123"] == 8
+
+
+class TestPanelCreation:
+    """Tests for panel creation methods."""
+
+    def test_make_header_running(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test header shows RUNNING status."""
+        progress = make_workflow_progress(status=WorkflowStatus.RUNNING)
+        panel = tui_with_mocks._make_header(progress)
+        # Panel should contain RUNNING text
+        assert panel is not None
+
+    def test_make_header_completed(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test header shows COMPLETED status."""
+        progress = make_workflow_progress(status=WorkflowStatus.COMPLETED)
+        panel = tui_with_mocks._make_header(progress)
+        assert panel is not None
+
+    def test_make_header_failed(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test header shows FAILED status."""
+        progress = make_workflow_progress(status=WorkflowStatus.FAILED, failed_jobs=1)
+        panel = tui_with_mocks._make_header(progress)
+        assert panel is not None
+
+    def test_make_header_incomplete(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test header shows INCOMPLETE status."""
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            incomplete_jobs_list=[make_job_info(rule="interrupted")],
+        )
+        panel = tui_with_mocks._make_header(progress)
+        assert panel is not None
+
+    def test_make_progress_bar_all_succeeded(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test progress bar with all jobs succeeded."""
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=100, failed_jobs=0)
+        bar = tui_with_mocks._make_progress_bar(progress, width=40)
+        assert len(bar.plain) == 40
+
+    def test_make_progress_bar_with_failures(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test progress bar shows failures in different color."""
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=80, failed_jobs=10)
+        bar = tui_with_mocks._make_progress_bar(progress, width=40)
+        assert len(bar.plain) == 40
+
+    def test_make_progress_panel_with_estimate(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test progress panel includes ETA when estimate provided."""
+        progress = make_workflow_progress()
+        estimate = make_time_estimate(seconds_remaining=600)
+        panel = tui_with_mocks._make_progress_panel(progress, estimate)
+        assert panel.title == "Progress"
+
+    def test_make_progress_panel_without_estimate(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test progress panel without ETA."""
+        progress = make_workflow_progress()
+        panel = tui_with_mocks._make_progress_panel(progress, None)
+        assert panel.title == "Progress"
+
+    def test_make_progress_panel_completed_workflow(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """Test progress panel for completed workflow."""
+        progress = make_workflow_progress(
+            status=WorkflowStatus.COMPLETED,
+            total_jobs=100,
+            completed_jobs=100,
+        )
+        panel = tui_with_mocks._make_progress_panel(progress, None)
+        assert panel is not None
+
+    def test_make_incomplete_jobs_panel_empty(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test incomplete jobs panel with no incomplete jobs."""
+        progress = make_workflow_progress(incomplete_jobs_list=[])
+        panel = tui_with_mocks._make_incomplete_jobs_panel(progress)
+        assert "Incomplete" in panel.title
+
+    def test_make_incomplete_jobs_panel_with_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test incomplete jobs panel with interrupted jobs."""
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            incomplete_jobs_list=[
+                make_job_info(rule="align", output_file=Path("output.bam")),
+                make_job_info(rule="sort"),
+            ],
+        )
+        panel = tui_with_mocks._make_incomplete_jobs_panel(progress)
+        assert "(2)" in panel.title
+
+    def test_make_pending_jobs_panel(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test pending jobs panel creation."""
+        tui_with_mocks._estimator = mock_estimator
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50)
+        panel = tui_with_mocks._make_pending_jobs_panel(progress)
+        assert "Pending" in panel.title
+
+    def test_make_help_panel(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test help panel creation."""
+        panel = tui_with_mocks._make_help_panel()
+        assert "Keyboard" in panel.title
+
+    def test_make_footer(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test footer creation."""
+        footer = tui_with_mocks._make_footer()
+        assert footer is not None
+
+
+class TestLayout:
+    """Tests for layout building."""
+
+    def test_make_layout_full_mode(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test full layout mode includes all panels."""
+        tui_with_mocks._layout_mode = LayoutMode.FULL
+        progress = make_workflow_progress()
+        estimate = make_time_estimate()
+        layout = tui_with_mocks._make_layout(progress, estimate)
+        assert layout is not None
+
+    def test_make_layout_compact_mode(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test compact layout mode."""
+        tui_with_mocks._layout_mode = LayoutMode.COMPACT
+        progress = make_workflow_progress()
+        layout = tui_with_mocks._make_layout(progress, None)
+        assert layout is not None
+
+    def test_make_layout_minimal_mode(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test minimal layout mode."""
+        tui_with_mocks._layout_mode = LayoutMode.MINIMAL
+        progress = make_workflow_progress()
+        layout = tui_with_mocks._make_layout(progress, None)
+        assert layout is not None
+
+    def test_make_layout_with_failed_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test layout includes failed jobs panel when applicable."""
+        tui_with_mocks._layout_mode = LayoutMode.FULL
+        progress = make_workflow_progress(
+            status=WorkflowStatus.FAILED,
+            failed_jobs=2,
+            failed_jobs_list=[
+                make_job_info(rule="align", job_id="1"),
+                make_job_info(rule="sort", job_id="2"),
+            ],
+        )
+        layout = tui_with_mocks._make_layout(progress, None)
+        assert layout is not None
+
+    def test_make_layout_with_incomplete_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test layout includes incomplete panel when applicable."""
+        tui_with_mocks._layout_mode = LayoutMode.FULL
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            incomplete_jobs_list=[make_job_info(rule="interrupted")],
+        )
+        layout = tui_with_mocks._make_layout(progress, None)
+        assert layout is not None
+
+    def test_make_layout_with_help_overlay(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test layout with help overlay shown."""
+        tui_with_mocks._show_help = True
+        progress = make_workflow_progress()
+        layout = tui_with_mocks._make_layout(progress, None)
+        assert layout is not None
+
+
+class TestDataBuilding:
+    """Tests for data building and transformation methods."""
+
+    def test_build_running_job_data_empty(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test building job data with no running jobs."""
+        result = tui_with_mocks._build_running_job_data([])
+        assert result == []
+
+    def test_build_running_job_data_with_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test building job data with running jobs."""
+        import time
+
+        jobs = [
+            make_job_info(rule="align", job_id="1", start_time=time.time() - 100),
+            make_job_info(rule="sort", job_id="2", start_time=time.time() - 50),
+        ]
+        result = tui_with_mocks._build_running_job_data(jobs)
+        assert len(result) == 2
+        # Each result should be a tuple of (job, elapsed, remaining, start_time, tool_progress)
+        assert result[0][0].rule == "align"
+
+    def test_sort_running_job_data_by_rule(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test sorting job data by rule name."""
+        import time
+
+        jobs = [
+            make_job_info(rule="zebra", job_id="1", start_time=time.time() - 100),
+            make_job_info(rule="alpha", job_id="2", start_time=time.time() - 50),
+        ]
+        job_data = tui_with_mocks._build_running_job_data(jobs)
+        tui_with_mocks._sort_table = "running"
+        tui_with_mocks._sort_column = 0  # Rule column
+        tui_with_mocks._sort_ascending = True
+        sorted_data = tui_with_mocks._sort_running_job_data(job_data)
+        assert sorted_data[0][0].rule == "alpha"
+
+    def test_get_running_jobs_list(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test getting running jobs list with filtering."""
+        import time
+
+        progress = make_workflow_progress(
+            running_jobs=[
+                make_job_info(rule="align", job_id="1", start_time=time.time() - 100),
+                make_job_info(rule="sort", job_id="2", start_time=time.time() - 50),
+            ]
+        )
+        result = tui_with_mocks._get_running_jobs_list(progress)
+        assert len(result) == 2
+
+    def test_get_completions_list(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test getting completions list."""
+        import time
+
+        progress = make_workflow_progress(
+            recent_completions=[
+                make_job_info(
+                    rule="align", start_time=time.time() - 200, end_time=time.time() - 100
+                ),
+            ],
+            failed_jobs_list=[
+                make_job_info(rule="sort", job_id="failed"),
+            ],
+        )
+        jobs, failed_ids = tui_with_mocks._get_completions_list(progress)
+        # Should include both completed and failed
+        assert len(jobs) == 2
+        assert len(failed_ids) == 1
