@@ -2,6 +2,7 @@
 
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -11,6 +12,11 @@ from rich.console import Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.progress import BarColumn
+from rich.progress import MofNCompleteColumn
+from rich.progress import Progress
+from rich.progress import SpinnerColumn
+from rich.progress import TextColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -238,20 +244,47 @@ class WorkflowMonitorTUI:
         return self._available_logs[0] if self._available_logs else None
 
     def _init_estimator(self) -> None:
-        """Initialize or reinitialize the time estimator."""
+        """Initialize or reinitialize the time estimator with progress display."""
         self._rule_stats_job_ids.clear()
         self._job_threads.clear()
         self._thread_stats.clear()
-        if self.use_estimation:
-            self._estimator = TimeEstimator(
-                use_wildcard_conditioning=self._use_wildcard_conditioning,
-                weighting_strategy=self.weighting_strategy,
-                half_life_logs=self.half_life_logs,
-                half_life_days=self.half_life_days,
-            )
 
+        if not self.use_estimation:
+            self._estimator = None
+            return
+
+        self._estimator = TimeEstimator(
+            use_wildcard_conditioning=self._use_wildcard_conditioning,
+            weighting_strategy=self.weighting_strategy,
+            half_life_logs=self.half_life_logs,
+            half_life_days=self.half_life_days,
+        )
+
+        metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
+        has_metadata = metadata_dir.exists()
+        has_profile = self.profile_path is not None and self.profile_path.exists()
+
+        # Check if there's anything to load (worth showing progress)
+        snakemake_dir = self.workflow_dir / ".snakemake"
+        from snakesee.parser import find_all_logs
+
+        log_paths = find_all_logs(snakemake_dir)
+
+        # Skip progress display if nothing to load
+        if not has_metadata and not has_profile and not log_paths:
+            return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=self.console,
+            transient=True,
+        ) as progress:
             # Load from profile first if available
-            if self.profile_path is not None and self.profile_path.exists():
+            if has_profile:
+                task = progress.add_task("Loading profile...", total=1)
                 try:
                     from snakesee.profile import load_profile
 
@@ -259,34 +292,64 @@ class WorkflowMonitorTUI:
                     self._estimator.rule_stats = profile.to_rule_stats()
                 except (OSError, ValueError):
                     pass  # Fall back to metadata only
+                progress.update(task, completed=1)
 
-            # Load/merge with live metadata (live data takes precedence for recent runs)
-            metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
-            if metadata_dir.exists():
-                self._estimator.load_from_metadata(metadata_dir)
+            # Load metadata (single-pass for efficiency)
+            if has_metadata:
+                metadata_files = list(metadata_dir.rglob("*"))
+                metadata_files = [f for f in metadata_files if f.is_file()]
+                file_count = len(metadata_files)
 
-            # Initialize thread stats from log parsing (metadata doesn't have threads)
-            self._init_thread_stats_from_log()
+                if file_count > 0:
+                    task = progress.add_task("Loading metadata...", total=file_count)
 
-            # Parse current rules from log to filter out deleted rules
+                    def metadata_cb(current: int, total: int) -> None:
+                        progress.update(task, completed=current)
+
+                    self._estimator.load_from_metadata(metadata_dir, progress_callback=metadata_cb)
+
+            # Initialize thread stats from log parsing
+            if log_paths:
+                task = progress.add_task("Analyzing thread usage...", total=len(log_paths))
+                self._init_thread_stats_from_log(
+                    log_paths=log_paths,
+                    progress_callback=lambda current, total: progress.update(
+                        task, completed=current
+                    ),
+                )
+
+            # Parse current rules (fast, no progress needed)
             self._init_current_rules_from_log()
 
-            # Share thread stats with estimator for thread-aware ETA
-            self._estimator.thread_stats = self._thread_stats
-        else:
-            self._estimator = None
+        # Share thread stats with estimator for thread-aware ETA
+        self._estimator.thread_stats = self._thread_stats
 
-    def _init_thread_stats_from_log(self) -> None:
-        """Initialize thread stats from all log files (metadata doesn't have threads)."""
+    def _init_thread_stats_from_log(
+        self,
+        log_paths: list[Path] | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Initialize thread stats from all log files (metadata doesn't have threads).
+
+        Args:
+            log_paths: Optional list of log paths to process (avoids re-discovering).
+            progress_callback: Optional callback(current, total) for progress reporting.
+        """
         from snakesee.parser import find_all_logs
         from snakesee.parser import parse_completed_jobs_from_log
 
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        log_paths = find_all_logs(snakemake_dir)
+        if log_paths is None:
+            snakemake_dir = self.workflow_dir / ".snakemake"
+            log_paths = find_all_logs(snakemake_dir)
+
         if not log_paths:
             return
 
-        for log_path in log_paths:
+        total = len(log_paths)
+        for i, log_path in enumerate(log_paths):
+            if progress_callback is not None:
+                progress_callback(i + 1, total)
+
             for job in parse_completed_jobs_from_log(log_path):
                 if job.threads is None or job.duration is None:
                     continue
@@ -2183,6 +2246,10 @@ class WorkflowMonitorTUI:
             self._run_simple()
             return
 
+        # Initial state poll (before switching to raw mode for cleaner spinner)
+        with self.console.status("[bold blue]Preparing display..."):
+            progress, estimate = self._poll_state()
+
         # Save terminal settings and switch to raw mode for single-key input
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -2190,9 +2257,6 @@ class WorkflowMonitorTUI:
         try:
             # Set terminal to raw mode (cbreak would also work)
             tty.setcbreak(fd)
-
-            # Initial state
-            progress, estimate = self._poll_state()
 
             with Live(
                 self._make_layout(progress, estimate),
