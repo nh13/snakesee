@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterator
@@ -94,6 +95,70 @@ def find_all_logs(snakemake_dir: Path) -> list[Path]:
     if not log_dir.exists():
         return []
     return sorted(log_dir.glob("*.snakemake.log"), key=lambda p: p.stat().st_mtime)
+
+
+def parse_job_stats_from_log(log_path: Path) -> set[str]:
+    """
+    Parse the 'Job stats' table from a Snakemake log to get the set of rules.
+
+    The job stats table appears at the start of a Snakemake run and lists all
+    rules that will be executed along with their job counts.
+
+    Args:
+        log_path: Path to the Snakemake log file.
+
+    Returns:
+        Set of rule names from the job stats table. Returns empty set if
+        the table cannot be found or parsed.
+    """
+    rules: set[str] = set()
+
+    try:
+        content = log_path.read_text(errors="ignore")
+    except OSError:
+        return rules
+
+    lines = content.splitlines()
+    in_job_stats = False
+    past_header = False
+
+    for line in lines:
+        # Look for the start of job stats table
+        if line.strip() == "Job stats:":
+            in_job_stats = True
+            continue
+
+        if not in_job_stats:
+            continue
+
+        stripped = line.strip()
+
+        # Skip empty lines
+        if not stripped:
+            # Empty line after data means end of table
+            if past_header and rules:
+                break
+            continue
+
+        # Skip header line (job count)
+        if stripped.startswith("job") and "count" in stripped:
+            continue
+
+        # Skip separator line (dashes)
+        if stripped.startswith("-"):
+            past_header = True
+            continue
+
+        # Parse data row: "rule_name    count"
+        if past_header:
+            parts = stripped.split()
+            if len(parts) >= 2:
+                rule_name = parts[0]
+                # Skip 'total' row
+                if rule_name != "total":
+                    rules.add(rule_name)
+
+    return rules
 
 
 class IncrementalLogReader:
@@ -482,6 +547,48 @@ def parse_metadata_files(metadata_dir: Path) -> Iterator[JobInfo]:  # noqa: C901
                 )
         except (json.JSONDecodeError, OSError, KeyError):
             continue
+
+
+def collect_rule_code_hashes(metadata_dir: Path) -> dict[str, set[str]]:
+    """
+    Collect code hashes for each rule from metadata files.
+
+    This enables detection of renamed rules by matching their shell code.
+    If two rules have the same code hash, they are likely the same rule
+    that was renamed.
+
+    Args:
+        metadata_dir: Path to .snakemake/metadata/ directory.
+
+    Returns:
+        Dictionary mapping code_hash -> set of rule names that use that code.
+    """
+    hash_to_rules: dict[str, set[str]] = {}
+
+    if not metadata_dir.exists():
+        return hash_to_rules
+
+    for meta_file in metadata_dir.rglob("*"):
+        if not meta_file.is_file():
+            continue
+        try:
+            data = json.loads(meta_file.read_text())
+            rule = data.get("rule")
+            code = data.get("code")
+
+            if rule and code:
+                # Normalize whitespace before hashing to handle formatting differences
+                normalized_code = " ".join(code.split())
+                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
+
+                if code_hash not in hash_to_rules:
+                    hash_to_rules[code_hash] = set()
+                hash_to_rules[code_hash].add(rule)
+
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+    return hash_to_rules
 
 
 def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:

@@ -268,6 +268,9 @@ class WorkflowMonitorTUI:
             # Initialize thread stats from log parsing (metadata doesn't have threads)
             self._init_thread_stats_from_log()
 
+            # Parse current rules from log to filter out deleted rules
+            self._init_current_rules_from_log()
+
             # Share thread stats with estimator for thread-aware ETA
             self._estimator.thread_stats = self._thread_stats
         else:
@@ -298,6 +301,23 @@ class WorkflowMonitorTUI:
                     ts.timestamps.append(job.end_time)
                 if job.input_size is not None:
                     ts.input_sizes.append(job.input_size)
+
+    def _init_current_rules_from_log(self) -> None:
+        """Parse current rules from the latest log to filter deleted rules."""
+        from snakesee.parser import find_latest_log
+        from snakesee.parser import parse_job_stats_from_log
+
+        if self._estimator is None:
+            return
+
+        snakemake_dir = self.workflow_dir / ".snakemake"
+        log_path = find_latest_log(snakemake_dir)
+        if log_path is None:
+            return
+
+        current_rules = parse_job_stats_from_log(log_path)
+        if current_rules:
+            self._estimator.current_rules = current_rules
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
