@@ -484,6 +484,20 @@ class TestWorkflowProgress:
         )
         assert progress.pending_jobs == 70  # 100 - 25 - 5
 
+    def test_pending_jobs_with_incomplete(self) -> None:
+        """Test pending jobs calculation excludes incomplete jobs."""
+        progress = WorkflowProgress(
+            workflow_dir=Path("."),
+            status=WorkflowStatus.INCOMPLETE,
+            total_jobs=100,
+            completed_jobs=25,
+            failed_jobs=2,
+            running_jobs=[],
+            incomplete_jobs_list=[JobInfo(rule="incomplete")] * 3,
+        )
+        # 100 - 25 - 2 - 0 - 3 = 70
+        assert progress.pending_jobs == 70
+
     def test_elapsed_seconds(self) -> None:
         """Test elapsed seconds calculation."""
         start = time.time() - 60
