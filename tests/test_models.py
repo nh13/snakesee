@@ -197,6 +197,45 @@ class TestRuleTimingStats:
         result = stats.weighted_mean()
         assert result > 0
 
+    def test_median_input_size_empty(self) -> None:
+        """Test median_input_size returns None when no data."""
+        stats = RuleTimingStats(rule="test", durations=[10.0], input_sizes=[])
+        assert stats.median_input_size is None
+
+    def test_median_input_size_all_none(self) -> None:
+        """Test median_input_size returns None when all sizes are None."""
+        stats = RuleTimingStats(rule="test", durations=[10.0, 20.0], input_sizes=[None, None])
+        assert stats.median_input_size is None
+
+    def test_median_input_size_odd_count(self) -> None:
+        """Test median_input_size with odd number of values."""
+        stats = RuleTimingStats(
+            rule="test",
+            durations=[10.0, 20.0, 30.0],
+            input_sizes=[100, 200, 300],
+        )
+        assert stats.median_input_size == 200
+
+    def test_median_input_size_even_count(self) -> None:
+        """Test median_input_size with even number of values."""
+        stats = RuleTimingStats(
+            rule="test",
+            durations=[10.0, 20.0, 30.0, 40.0],
+            input_sizes=[100, 200, 300, 400],
+        )
+        # (200 + 300) // 2 = 250
+        assert stats.median_input_size == 250
+
+    def test_median_input_size_with_some_none(self) -> None:
+        """Test median_input_size ignores None values."""
+        stats = RuleTimingStats(
+            rule="test",
+            durations=[10.0, 20.0, 30.0],
+            input_sizes=[100, None, 300],
+        )
+        # Only [100, 300] -> (100 + 300) // 2 = 200
+        assert stats.median_input_size == 200
+
     def test_recency_factor_no_timestamps_time_strategy(self) -> None:
         """Test recency factor returns 0.5 when no timestamps with time strategy."""
         stats = RuleTimingStats(rule="test", durations=[10.0, 20.0])
