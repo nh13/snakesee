@@ -637,3 +637,225 @@ class TestDataBuilding:
         # Should include both completed and failed
         assert len(jobs) == 2
         assert len(failed_ids) == 1
+
+
+class TestRuleStatsUpdate:
+    """Tests for _update_rule_stats_from_completions method."""
+
+    def test_update_stats_no_estimator(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test that no update happens without estimator."""
+        tui_with_mocks._estimator = None
+        progress = make_workflow_progress(
+            recent_completions=[
+                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0),
+            ]
+        )
+        # Should not raise
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+
+    def test_update_stats_with_job_id(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test stats update with job_id deduplication."""
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {}
+
+        progress = make_workflow_progress(
+            recent_completions=[
+                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0),
+            ]
+        )
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+
+        # Should have added stats for align rule
+        assert "align" in tui_with_mocks._estimator.rule_stats
+        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+
+    def test_update_stats_deduplication(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test that duplicate jobs are not counted twice."""
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {}
+
+        job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
+        progress = make_workflow_progress(recent_completions=[job])
+
+        # Call twice with same job
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+
+        # Should only count once
+        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+
+    def test_update_stats_with_threads(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test that thread stats are updated when job has threads."""
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {}
+
+        progress = make_workflow_progress(
+            recent_completions=[
+                make_job_info(
+                    rule="align", job_id="1", start_time=100.0, end_time=200.0, threads=4
+                ),
+            ]
+        )
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+
+        # Should have thread stats
+        assert "align" in tui_with_mocks._thread_stats
+        assert 4 in tui_with_mocks._thread_stats["align"].stats_by_threads
+
+    def test_update_stats_skips_no_duration(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test that jobs without duration are skipped."""
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {}
+
+        # Job with no end_time means no duration
+        progress = make_workflow_progress(
+            recent_completions=[
+                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=None),
+            ]
+        )
+        tui_with_mocks._update_rule_stats_from_completions(progress)
+
+        # Should not have added stats
+        assert "align" not in tui_with_mocks._estimator.rule_stats
+
+
+class TestStatsPanel:
+    """Tests for _make_stats_panel method."""
+
+    def test_stats_panel_estimation_disabled(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test stats panel when estimation is disabled."""
+        tui_with_mocks.use_estimation = False
+        panel = tui_with_mocks._make_stats_panel()
+        assert "disabled" in str(panel.renderable).lower()
+
+    def test_stats_panel_no_data(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test stats panel with no historical data."""
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {}
+        panel = tui_with_mocks._make_stats_panel()
+        assert "No historical data" in str(panel.renderable)
+
+    def test_stats_panel_with_data(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test stats panel with rule statistics."""
+        from snakesee.models import RuleTimingStats
+
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {
+            "align": RuleTimingStats(rule="align", durations=[100.0, 110.0, 90.0]),
+            "sort": RuleTimingStats(rule="sort", durations=[50.0, 55.0]),
+        }
+        panel = tui_with_mocks._make_stats_panel()
+        assert "Rule Statistics" in panel.title
+
+    def test_stats_panel_with_thread_stats(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test stats panel displays thread-specific statistics."""
+        from snakesee.models import RuleTimingStats
+        from snakesee.models import ThreadTimingStats
+
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {
+            "align": RuleTimingStats(rule="align", durations=[100.0]),
+        }
+        # Add thread stats
+        thread_stats = ThreadTimingStats(rule="align")
+        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[100.0])
+        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[60.0])
+        tui_with_mocks._thread_stats["align"] = thread_stats
+
+        panel = tui_with_mocks._make_stats_panel()
+        assert panel is not None
+
+    def test_stats_panel_sorting_active(
+        self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
+    ) -> None:
+        """Test stats panel when sorting is active."""
+        from snakesee.models import RuleTimingStats
+
+        tui_with_mocks._estimator = mock_estimator
+        tui_with_mocks._estimator.rule_stats = {
+            "align": RuleTimingStats(rule="align", durations=[100.0]),
+        }
+        tui_with_mocks._sort_table = "stats"
+        tui_with_mocks._sort_column = 0
+        tui_with_mocks._sort_ascending = True
+
+        panel = tui_with_mocks._make_stats_panel()
+        assert "sorting" in panel.title
+
+
+class TestJobLogPanel:
+    """Tests for _make_job_log_panel method."""
+
+    def test_job_log_panel_no_running_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test job log panel with no running jobs."""
+        tui_with_mocks._job_selection_mode = True
+        tui_with_mocks._log_source = "running"
+        progress = make_workflow_progress(running_jobs=[])
+        panel = tui_with_mocks._make_job_log_panel(progress)
+        assert "No running jobs" in str(panel.renderable)
+
+    def test_job_log_panel_no_completed_jobs(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test job log panel with no completed jobs."""
+        tui_with_mocks._job_selection_mode = True
+        tui_with_mocks._log_source = "completions"
+        progress = make_workflow_progress(recent_completions=[], failed_jobs_list=[])
+        panel = tui_with_mocks._make_job_log_panel(progress)
+        assert "No completed jobs" in str(panel.renderable)
+
+    def test_job_log_panel_no_log_file(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test job log panel when log file doesn't exist."""
+        import time
+
+        tui_with_mocks._job_selection_mode = True
+        tui_with_mocks._log_source = "running"
+        progress = make_workflow_progress(
+            running_jobs=[
+                make_job_info(rule="align", job_id="1", start_time=time.time() - 100),
+            ]
+        )
+        panel = tui_with_mocks._make_job_log_panel(progress)
+        assert "No log file found" in str(panel.renderable)
+
+
+class TestInitMethods:
+    """Tests for TUI initialization methods."""
+
+    def test_init_event_reader_disabled(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test event reader init when events disabled."""
+        tui_with_mocks._events_enabled = False
+        tui_with_mocks._event_reader = "placeholder"  # type: ignore
+        tui_with_mocks._init_event_reader()
+        # Should not modify event_reader when disabled
+        assert tui_with_mocks._event_reader == "placeholder"
+
+    def test_init_event_reader_no_file(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test event reader init when event file doesn't exist."""
+        tui_with_mocks._events_enabled = True
+        tui_with_mocks._init_event_reader()
+        assert tui_with_mocks._event_reader is None
+
+    def test_init_log_reader(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test log reader initialization."""
+        tui_with_mocks._init_log_reader()
+        # Should have created a log reader (even with placeholder)
+        assert tui_with_mocks._log_reader is not None
+
+    def test_init_validation_no_event_file(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Test validation init when event file doesn't exist."""
+        tui_with_mocks._init_validation()
+        # Should not create validator without event file
+        assert tui_with_mocks._event_accumulator is None
