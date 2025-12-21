@@ -3,6 +3,7 @@
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -14,6 +15,9 @@ from snakesee.models import JobInfo
 from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
+
+if TYPE_CHECKING:
+    from snakesee.tui import WorkflowMonitorTUI
 
 # =============================================================================
 # Factory Functions for Test Data
@@ -144,7 +148,7 @@ def mock_estimator() -> MagicMock:
 
 
 @pytest.fixture
-def tui_with_mocks(tmp_path: Path, mock_console: MagicMock):
+def tui_with_mocks(tmp_path: Path, mock_console: MagicMock) -> "WorkflowMonitorTUI":
     """Create a TUI instance with mocked dependencies for testing."""
     from snakesee.tui import WorkflowMonitorTUI
 
@@ -157,7 +161,6 @@ def tui_with_mocks(tmp_path: Path, mock_console: MagicMock):
         tui._event_reader = None
         tui._log_reader = None
         tui._estimator = None
-        tui._validator = None
         tui._validation_logger = None
         return tui
 
