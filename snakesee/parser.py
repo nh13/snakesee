@@ -64,6 +64,14 @@ def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
     return wildcards
 
 
+def _safe_mtime(p: Path) -> float:
+    """Get mtime, returning 0 if file was deleted (race condition)."""
+    try:
+        return p.stat().st_mtime
+    except FileNotFoundError:
+        return 0
+
+
 def find_latest_log(snakemake_dir: Path) -> Path | None:
     """
     Find the most recent snakemake log file.
@@ -77,8 +85,11 @@ def find_latest_log(snakemake_dir: Path) -> Path | None:
     log_dir = snakemake_dir / "log"
     if not log_dir.exists():
         return None
-    logs = sorted(log_dir.glob("*.snakemake.log"), key=lambda p: p.stat().st_mtime)
-    return logs[-1] if logs else None
+    logs = [p for p in log_dir.glob("*.snakemake.log") if p.exists()]
+    if not logs:
+        return None
+    logs.sort(key=_safe_mtime)
+    return logs[-1]
 
 
 def find_all_logs(snakemake_dir: Path) -> list[Path]:
@@ -94,7 +105,9 @@ def find_all_logs(snakemake_dir: Path) -> list[Path]:
     log_dir = snakemake_dir / "log"
     if not log_dir.exists():
         return []
-    return sorted(log_dir.glob("*.snakemake.log"), key=lambda p: p.stat().st_mtime)
+    logs = [p for p in log_dir.glob("*.snakemake.log") if p.exists()]
+    logs.sort(key=_safe_mtime)
+    return logs
 
 
 def parse_job_stats_from_log(log_path: Path) -> set[str]:
