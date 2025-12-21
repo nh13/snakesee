@@ -619,7 +619,9 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     return failed_jobs
 
 
-def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
+def parse_incomplete_jobs(
+    incomplete_dir: Path, min_start_time: float | None = None
+) -> Iterator[JobInfo]:
     """
     Parse currently running jobs from incomplete markers.
 
@@ -632,6 +634,8 @@ def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
 
     Args:
         incomplete_dir: Path to .snakemake/incomplete/ directory.
+        min_start_time: If provided, only yield markers with mtime >= this time.
+            Used to filter out stale markers from previous workflow runs.
 
     Yields:
         JobInfo instances for each in-progress job.
@@ -644,6 +648,12 @@ def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
     for marker in incomplete_dir.rglob("*"):
         if marker.is_file() and marker.name != "migration_underway":
             try:
+                marker_mtime = marker.stat().st_mtime
+
+                # Skip markers that are older than the current workflow run
+                if min_start_time is not None and marker_mtime < min_start_time:
+                    continue
+
                 # Decode the base64 filename to get the output file path
                 output_file: Path | None = None
                 try:
@@ -655,7 +665,7 @@ def parse_incomplete_jobs(incomplete_dir: Path) -> Iterator[JobInfo]:
                 # The marker's mtime is approximately when the job started
                 yield JobInfo(
                     rule="unknown",  # Cannot determine rule from marker filename
-                    start_time=marker.stat().st_mtime,
+                    start_time=marker_mtime,
                     output_file=output_file,
                 )
             except OSError:
@@ -1128,7 +1138,11 @@ def parse_workflow_state(
 
     # Check for incomplete markers (jobs that were in progress when workflow was interrupted)
     incomplete_dir = snakemake_dir / "incomplete"
-    incomplete_list = list(parse_incomplete_jobs(incomplete_dir)) if is_latest_log else []
+    incomplete_list = (
+        list(parse_incomplete_jobs(incomplete_dir, min_start_time=start_time))
+        if is_latest_log
+        else []
+    )
 
     # Remove failed jobs from the running list - a job can't be both running and failed
     failed_job_ids = {job.job_id for job in failed_list if job.job_id is not None}
