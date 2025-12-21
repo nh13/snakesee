@@ -519,6 +519,14 @@ class TestParseWorkflowState:
         assert state.failed_jobs == 0  # No explicit failures, just interrupted
 
 
+def _local_timestamp(timestamp_str: str) -> float:
+    """Parse timestamp string to Unix time using local timezone (same as parser)."""
+    from datetime import datetime
+
+    dt = datetime.strptime(timestamp_str, "%a %b %d %H:%M:%S %Y")
+    return dt.timestamp()
+
+
 class TestAugmentCompletionsWithThreads:
     """Tests for _augment_completions_with_threads function."""
 
@@ -527,28 +535,33 @@ class TestAugmentCompletionsWithThreads:
         from snakesee.models import JobInfo
         from snakesee.parser import _augment_completions_with_threads
 
+        # Use timestamps that will be parsed consistently in any timezone
+        start_ts_str = "Fri Jan  1 12:00:00 2024"
+        end_ts_str = "Fri Jan  1 12:01:00 2024"
+        start_time = _local_timestamp(start_ts_str)
+        end_time = _local_timestamp(end_ts_str)
+
         # Create log file with thread info
         log_dir = tmp_path / ".snakemake" / "log"
         log_dir.mkdir(parents=True)
         log_file = log_dir / "2024-01-01T120000.snakemake.log"
         log_file.write_text(
-            "[Fri Jan  1 12:00:00 2024]\n"
+            f"[{start_ts_str}]\n"
             "rule align:\n"
             "    output: out.bam\n"
             "    jobid: 1\n"
             "    threads: 4\n"
-            "[Fri Jan  1 12:01:00 2024]\n"
+            f"[{end_ts_str}]\n"
             "Finished job 1.\n"
         )
 
         # Create completion without threads - end_time matches log finish timestamp
-        # Jan 1 2024 12:01:00 UTC = 1704135660.0
         completions = [
             JobInfo(
                 rule="align",
                 job_id="1",
-                start_time=1704135600.0,  # 2024-01-01 12:00:00 UTC
-                end_time=1704135660.0,  # 2024-01-01 12:01:00 UTC
+                start_time=start_time,
+                end_time=end_time,
             )
         ]
 
@@ -561,17 +574,23 @@ class TestAugmentCompletionsWithThreads:
         from snakesee.models import JobInfo
         from snakesee.parser import _augment_completions_with_threads
 
+        # Use timestamps that will be parsed consistently in any timezone
+        start_ts_str = "Fri Jan  1 12:00:00 2024"
+        end_ts_str = "Fri Jan  1 12:01:00 2024"
+        start_time = _local_timestamp(start_ts_str)
+        end_time = _local_timestamp(end_ts_str)
+
         # Create log file with different thread info
         log_dir = tmp_path / ".snakemake" / "log"
         log_dir.mkdir(parents=True)
         log_file = log_dir / "2024-01-01T120000.snakemake.log"
         log_file.write_text(
-            "[Fri Jan  1 12:00:00 2024]\n"
+            f"[{start_ts_str}]\n"
             "rule align:\n"
             "    output: out.bam\n"
             "    jobid: 1\n"
             "    threads: 8\n"  # Different from existing
-            "[Fri Jan  1 12:01:00 2024]\n"
+            f"[{end_ts_str}]\n"
             "Finished job 1.\n"
         )
 
@@ -580,8 +599,8 @@ class TestAugmentCompletionsWithThreads:
             JobInfo(
                 rule="align",
                 job_id="1",
-                start_time=1704135600.0,
-                end_time=1704135660.0,
+                start_time=start_time,
+                end_time=end_time,
                 threads=4,  # Already has threads
             )
         ]
@@ -601,6 +620,7 @@ class TestAugmentCompletionsWithThreads:
         log_file = log_dir / "2024-01-01T120000.snakemake.log"
         log_file.write_text("")
 
+        # Use a timestamp that won't match anything (different from log)
         completions = [JobInfo(rule="align", job_id="1", end_time=1704110460.0)]
 
         result = _augment_completions_with_threads(completions, log_file)
