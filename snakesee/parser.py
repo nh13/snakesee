@@ -540,27 +540,23 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
     return rule_counts
 
 
-def parse_metadata_files(
+def _iterate_metadata_files(
     metadata_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> Iterator[JobInfo]:
-    """
-    Parse completed job information from Snakemake metadata files.
-
-    Reads JSON metadata files from .snakemake/metadata/ to extract
-    timing information for completed jobs, including input file sizes.
+) -> Iterator[tuple[Path, dict]]:
+    """Iterate metadata files with optional progress reporting.
 
     Args:
         metadata_dir: Path to .snakemake/metadata/ directory.
         progress_callback: Optional callback(current, total) for progress reporting.
 
     Yields:
-        JobInfo instances for each completed job found.
+        Tuples of (file_path, parsed_json_data) for each valid metadata file.
     """
     if not metadata_dir.exists():
         return
 
-    # Get file list - count upfront if progress is requested for accurate progress
+    # Get file list upfront if progress is requested for accurate reporting
     if progress_callback is not None:
         files = [f for f in metadata_dir.rglob("*") if f.is_file()]
         total = len(files)
@@ -579,6 +575,51 @@ def parse_metadata_files(
 
         try:
             data = json.loads(meta_file.read_text())
+            yield meta_file, data
+        except (json.JSONDecodeError, OSError):
+            continue
+
+
+def _calculate_input_size(input_files: list | None) -> int | None:
+    """Calculate total input size from file list.
+
+    Args:
+        input_files: List of input file paths from metadata.
+
+    Returns:
+        Total size in bytes, or None if not a valid list or any file is missing.
+    """
+    if not isinstance(input_files, list) or not input_files:
+        return None
+
+    total_size = 0
+    for f in input_files:
+        try:
+            total_size += Path(f).stat().st_size
+        except OSError:
+            return None
+    return total_size
+
+
+def parse_metadata_files(
+    metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Iterator[JobInfo]:
+    """
+    Parse completed job information from Snakemake metadata files.
+
+    Reads JSON metadata files from .snakemake/metadata/ to extract
+    timing information for completed jobs, including input file sizes.
+
+    Args:
+        metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
+
+    Yields:
+        JobInfo instances for each completed job found.
+    """
+    for _path, data in _iterate_metadata_files(metadata_dir, progress_callback):
+        try:
             rule = data.get("rule")
             starttime = data.get("starttime")
             endtime = data.get("endtime")
@@ -590,29 +631,14 @@ def parse_metadata_files(
                 if isinstance(wildcards_data, dict):
                     wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
 
-                # Extract input files and calculate total size
-                input_size: int | None = None
-                input_files = data.get("input")
-                if isinstance(input_files, list) and input_files:
-                    total_size = 0
-                    all_found = True
-                    for f in input_files:
-                        try:
-                            total_size += Path(f).stat().st_size
-                        except OSError:
-                            all_found = False
-                            break
-                    if all_found:
-                        input_size = total_size
-
                 yield JobInfo(
                     rule=rule,
                     start_time=starttime,
                     end_time=endtime,
                     wildcards=wildcards,
-                    input_size=input_size,
+                    input_size=_calculate_input_size(data.get("input")),
                 )
-        except (json.JSONDecodeError, OSError, KeyError):
+        except KeyError:
             continue
 
 
@@ -633,28 +659,8 @@ def parse_metadata_files_full(
     Yields:
         MetadataRecord instances containing timing and code hash data.
     """
-    if not metadata_dir.exists():
-        return
-
-    # Get file list - count upfront if progress is requested
-    if progress_callback is not None:
-        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
-        total = len(files)
-    else:
-        files = None
-        total = 0
-
-    file_iter = files if files is not None else metadata_dir.rglob("*")
-
-    for i, meta_file in enumerate(file_iter):
-        if files is None and not meta_file.is_file():
-            continue
-
-        if progress_callback is not None:
-            progress_callback(i + 1, total)
-
+    for _path, data in _iterate_metadata_files(metadata_dir, progress_callback):
         try:
-            data = json.loads(meta_file.read_text())
             rule = data.get("rule")
             if rule is None:
                 continue
@@ -669,21 +675,6 @@ def parse_metadata_files_full(
             if isinstance(wildcards_data, dict):
                 wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
 
-            # Extract input files and calculate total size
-            input_size: int | None = None
-            input_files = data.get("input")
-            if isinstance(input_files, list) and input_files:
-                total_size = 0
-                all_found = True
-                for f in input_files:
-                    try:
-                        total_size += Path(f).stat().st_size
-                    except OSError:
-                        all_found = False
-                        break
-                if all_found:
-                    input_size = total_size
-
             # Extract and hash code
             code_hash: str | None = None
             code = data.get("code")
@@ -696,10 +687,10 @@ def parse_metadata_files_full(
                 start_time=starttime,
                 end_time=endtime,
                 wildcards=wildcards,
-                input_size=input_size,
+                input_size=_calculate_input_size(data.get("input")),
                 code_hash=code_hash,
             )
-        except (json.JSONDecodeError, OSError, KeyError):
+        except KeyError:
             continue
 
 
