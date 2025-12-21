@@ -1,6 +1,7 @@
 """Time estimation for Snakemake workflow progress."""
 
 import math
+from collections.abc import Callable
 from pathlib import Path
 from statistics import mean
 
@@ -10,9 +11,7 @@ from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
-from snakesee.parser import collect_rule_code_hashes
-from snakesee.parser import collect_rule_timing_stats
-from snakesee.parser import collect_wildcard_timing_stats
+from snakesee.parser import parse_metadata_files_full
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
@@ -100,21 +99,95 @@ class TimeEstimator:
         self.half_life_days = half_life_days
         self.half_life_logs = half_life_logs
 
-    def load_from_metadata(self, metadata_dir: Path) -> None:
+    def load_from_metadata(
+        self,
+        metadata_dir: Path,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
         """
         Load historical execution times from .snakemake/metadata/.
 
+        Uses a single-pass parser for efficiency - reads each metadata file
+        only once to collect timing stats, code hashes, and wildcard stats.
+
         Args:
             metadata_dir: Path to .snakemake/metadata/ directory.
+            progress_callback: Optional callback(current, total) for progress reporting.
         """
-        self.rule_stats = collect_rule_timing_stats(metadata_dir)
+        # Collect all data in temporary structures
+        # rule -> [(duration, end_time, input_size), ...]
+        jobs_by_rule: dict[str, list[tuple[float, float, int | None]]] = {}
+        # code_hash -> set of rule names
+        hash_to_rules: dict[str, set[str]] = {}
+        # rule -> wildcard_key -> wildcard_value -> [(duration, end_time), ...]
+        wildcard_data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
 
-        # Load code hashes for renamed rule detection
-        self.code_hash_to_rules = collect_rule_code_hashes(metadata_dir)
+        # Single pass through all metadata files
+        for record in parse_metadata_files_full(metadata_dir, progress_callback):
+            duration = record.duration
+            end_time = record.end_time
 
-        # Also load wildcard stats if conditioning is enabled
+            # Collect timing stats
+            if duration is not None and end_time is not None:
+                if record.rule not in jobs_by_rule:
+                    jobs_by_rule[record.rule] = []
+                jobs_by_rule[record.rule].append((duration, end_time, record.input_size))
+
+                # Collect wildcard stats if enabled
+                if self.use_wildcard_conditioning and record.wildcards:
+                    if record.rule not in wildcard_data:
+                        wildcard_data[record.rule] = {}
+                    for wc_key, wc_value in record.wildcards.items():
+                        if wc_key not in wildcard_data[record.rule]:
+                            wildcard_data[record.rule][wc_key] = {}
+                        if wc_value not in wildcard_data[record.rule][wc_key]:
+                            wildcard_data[record.rule][wc_key][wc_value] = []
+                        wildcard_data[record.rule][wc_key][wc_value].append((duration, end_time))
+
+            # Collect code hashes
+            if record.code_hash:
+                if record.code_hash not in hash_to_rules:
+                    hash_to_rules[record.code_hash] = set()
+                hash_to_rules[record.code_hash].add(record.rule)
+
+        # Build RuleTimingStats from collected data
+        self.rule_stats = {}
+        for rule, timing_tuples in jobs_by_rule.items():
+            timing_tuples.sort(key=lambda x: x[1])  # Sort by end_time
+            durations = [t[0] for t in timing_tuples]
+            timestamps = [t[1] for t in timing_tuples]
+            input_sizes = [t[2] for t in timing_tuples]
+            self.rule_stats[rule] = RuleTimingStats(
+                rule=rule,
+                durations=durations,
+                timestamps=timestamps,
+                input_sizes=input_sizes,
+            )
+
+        # Store code hashes
+        self.code_hash_to_rules = hash_to_rules
+
+        # Build WildcardTimingStats if enabled
         if self.use_wildcard_conditioning:
-            self.wildcard_stats = collect_wildcard_timing_stats(metadata_dir)
+            self.wildcard_stats = {}
+            for rule, wc_keys in wildcard_data.items():
+                self.wildcard_stats[rule] = {}
+                for wc_key, wc_values in wc_keys.items():
+                    stats_by_value: dict[str, RuleTimingStats] = {}
+                    for wc_value, timing_pairs in wc_values.items():
+                        timing_pairs.sort(key=lambda x: x[1])
+                        durations = [pair[0] for pair in timing_pairs]
+                        timestamps = [pair[1] for pair in timing_pairs]
+                        stats_by_value[wc_value] = RuleTimingStats(
+                            rule=f"{rule}:{wc_key}={wc_value}",
+                            durations=durations,
+                            timestamps=timestamps,
+                        )
+                    self.wildcard_stats[rule][wc_key] = WildcardTimingStats(
+                        rule=rule,
+                        wildcard_key=wc_key,
+                        stats_by_value=stats_by_value,
+                    )
 
     def _find_rules_by_code_hash(self, rule: str) -> list[str]:
         """
