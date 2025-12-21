@@ -366,8 +366,6 @@ def find_rule_log(
     # logs/ directory (common convention)
     logs_dir = workflow_dir / "logs"
     search_paths.extend(_search_log_dir(logs_dir, rule_name, wildcards))
-    if logs_dir.exists():
-        search_paths.extend(logs_dir.glob(f"**/*{rule_name}*"))
 
     # log/ directory (another common convention)
     search_paths.extend(_search_log_dir(workflow_dir / "log", rule_name, wildcards))
