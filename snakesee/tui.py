@@ -274,29 +274,30 @@ class WorkflowMonitorTUI:
             self._estimator = None
 
     def _init_thread_stats_from_log(self) -> None:
-        """Initialize thread stats from log file parsing."""
-        from snakesee.parser import find_latest_log
+        """Initialize thread stats from all log files (metadata doesn't have threads)."""
+        from snakesee.parser import find_all_logs
         from snakesee.parser import parse_completed_jobs_from_log
 
         snakemake_dir = self.workflow_dir / ".snakemake"
-        log_path = find_latest_log(snakemake_dir)
-        if log_path is None:
+        log_paths = find_all_logs(snakemake_dir)
+        if not log_paths:
             return
 
-        for job in parse_completed_jobs_from_log(log_path):
-            if job.threads is None or job.duration is None:
-                continue
-            if job.rule not in self._thread_stats:
-                self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
-            thread_stats = self._thread_stats[job.rule]
-            if job.threads not in thread_stats.stats_by_threads:
-                thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
-            ts = thread_stats.stats_by_threads[job.threads]
-            ts.durations.append(job.duration)
-            if job.end_time is not None:
-                ts.timestamps.append(job.end_time)
-            if job.input_size is not None:
-                ts.input_sizes.append(job.input_size)
+        for log_path in log_paths:
+            for job in parse_completed_jobs_from_log(log_path):
+                if job.threads is None or job.duration is None:
+                    continue
+                if job.rule not in self._thread_stats:
+                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
+                thread_stats = self._thread_stats[job.rule]
+                if job.threads not in thread_stats.stats_by_threads:
+                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
+                ts = thread_stats.stats_by_threads[job.threads]
+                ts.durations.append(job.duration)
+                if job.end_time is not None:
+                    ts.timestamps.append(job.end_time)
+                if job.input_size is not None:
+                    ts.input_sizes.append(job.input_size)
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
