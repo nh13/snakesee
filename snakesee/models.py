@@ -701,10 +701,14 @@ class WorkflowProgress:
 
     @property
     def pending_jobs(self) -> int:
-        """Number of jobs not yet started (excludes failed and running)."""
+        """Number of jobs not yet started (excludes failed, running, and incomplete)."""
         return max(
             0,
-            self.total_jobs - self.completed_jobs - self.failed_jobs - len(self.running_jobs),
+            self.total_jobs
+            - self.completed_jobs
+            - self.failed_jobs
+            - len(self.running_jobs)
+            - len(self.incomplete_jobs_list),
         )
 
 
