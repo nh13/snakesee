@@ -970,6 +970,22 @@ def _parse_timestamp(timestamp_str: str) -> float | None:
         return None
 
 
+def _get_first_log_timestamp(log_path: Path) -> float | None:
+    """Extract the first timestamp from a snakemake log file.
+
+    This provides a more accurate workflow start time than the file's ctime,
+    since the log file may be created before jobs actually start.
+    """
+    try:
+        with log_path.open() as f:
+            for line in f:
+                if match := TIMESTAMP_PATTERN.match(line):
+                    return _parse_timestamp(match.group(1))
+    except OSError:
+        pass
+    return None
+
+
 def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     """
     Parse completed jobs with timing from a snakemake log file.
@@ -1385,13 +1401,17 @@ def parse_workflow_state(
     else:
         completed, total = (0, 0) if log_path is None else parse_progress_from_log(log_path)
 
-    # Get workflow start time from log file creation
+    # Get workflow start time for filtering incomplete markers
+    # Prefer the first timestamp in the log (when jobs actually started) over file ctime
     start_time: float | None = None
     if log_path is not None:
-        try:
-            start_time = log_path.stat().st_ctime
-        except OSError:
-            pass
+        start_time = _get_first_log_timestamp(log_path)
+        if start_time is None:
+            # Fall back to file ctime if no timestamps in log yet
+            try:
+                start_time = log_path.stat().st_ctime
+            except OSError:
+                pass
 
     # Parse completed jobs for recent completions
     metadata_dir = snakemake_dir / "metadata"
@@ -1445,6 +1465,10 @@ def parse_workflow_state(
     # (those are orphaned jobs, not truly running - they're reflected in incomplete_list)
     if not workflow_is_running:
         running = []
+    else:
+        # If workflow IS running, incomplete markers represent running jobs, not
+        # interrupted ones - clear them to avoid double-counting
+        incomplete_list = []
 
     # Determine final status based on running jobs, failures, and incomplete markers
     failed_jobs = len(failed_list)
