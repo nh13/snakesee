@@ -1,5 +1,6 @@
 """Log handler for snakesee logger plugin."""
 
+import atexit
 import time
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,10 @@ class LogHandler(LogHandlerBase):
 
         # Set baseFilename for compatibility with Snakemake's logger manager
         self.baseFilename = str(event_path)
+
+        # Register cleanup on exit to ensure events are flushed
+        # even if Snakemake doesn't call close()
+        atexit.register(self._cleanup)
 
     @property
     def writes_to_stream(self) -> bool:
@@ -364,10 +369,16 @@ class LogHandler(LogHandlerBase):
     def _handle_workflow_started(self, record: Any, timestamp: float) -> None:
         """Handle workflow initialization.
 
+        Truncates the event file to clear stale data from previous runs,
+        then writes the workflow_started event.
+
         Args:
             record: The log record.
             timestamp: Event timestamp.
         """
+        # Clear stale events from previous workflow runs
+        self._writer.truncate()
+
         workflow_id = getattr(record, "workflow_id", None)
 
         event = SnakeseeEvent(
@@ -379,5 +390,12 @@ class LogHandler(LogHandlerBase):
 
     def close(self) -> None:
         """Clean up resources."""
-        if hasattr(self, "_writer"):
-            self._writer.close()
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Internal cleanup - safe to call multiple times."""
+        if hasattr(self, "_writer") and self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass  # Ignore errors during cleanup

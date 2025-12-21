@@ -240,9 +240,13 @@ my_tool = "my_package.plugins:MyToolPlugin"
 
 Entry-point plugins are discovered automatically when the package is installed.
 
-### Enhanced Monitoring with Logger Plugin
+### Enhanced Monitoring with Real-Time Events
 
-For real-time event streaming (instead of log polling), install the optional Snakemake logger plugin:
+For real-time event streaming (instead of log polling), you can enable event-based monitoring:
+
+#### Snakemake 9.0+ (Logger Plugin)
+
+Install the optional Snakemake logger plugin:
 
 ```bash
 pip install snakemake-logger-plugin-snakesee
@@ -254,22 +258,37 @@ Then run Snakemake with the logger:
 snakemake --logger snakesee --cores 4
 ```
 
+#### Snakemake 8.x (Log Handler Script)
+
+Use the built-in log handler script:
+
+```bash
+snakemake --log-handler-script $(snakesee log-handler-path) --cores 4
+```
+
+> **Note:** The log handler script is optimized for local execution where jobs start
+> immediately after submission. For cluster/cloud executors (SLURM, AWS Batch, etc.),
+> jobs shown as "running" may still be queued. For accurate queue tracking on clusters,
+> use Snakemake 9+ with the logger plugin.
+
+#### Monitoring
+
 In another terminal, monitor with snakesee:
 
 ```bash
 snakesee watch
 ```
 
-**Benefits of the logger plugin:**
+**Benefits of real-time events:**
 
-| Feature | Without Plugin | With Plugin |
-|---------|---------------|-------------|
-| Job detection | Log parsing (polling) | Real-time events |
+| Feature | Log Parsing | Real-Time Events |
+|---------|-------------|------------------|
+| Job detection | Polling (delayed) | Immediate |
 | Start times | Approximate (log mtime) | Exact timestamp |
 | Durations | Calculated from logs | Precise from events |
 | Failed jobs | Pattern matching | Direct notification |
 
-The plugin is optional - snakesee works without it using log parsing, and automatically uses events when available.
+Real-time events are optional - snakesee works without them using log parsing, and automatically uses events when available.
 
 ### Workflow Status Detection
 
