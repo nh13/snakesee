@@ -546,7 +546,7 @@ class TestAugmentCompletionsWithThreads:
         completions = [
             JobInfo(
                 rule="align",
-                job_id=1,
+                job_id="1",
                 start_time=1704135600.0,  # 2024-01-01 12:00:00 UTC
                 end_time=1704135660.0,  # 2024-01-01 12:01:00 UTC
             )
@@ -579,7 +579,7 @@ class TestAugmentCompletionsWithThreads:
         completions = [
             JobInfo(
                 rule="align",
-                job_id=1,
+                job_id="1",
                 start_time=1704135600.0,
                 end_time=1704135660.0,
                 threads=4,  # Already has threads
@@ -601,7 +601,7 @@ class TestAugmentCompletionsWithThreads:
         log_file = log_dir / "2024-01-01T120000.snakemake.log"
         log_file.write_text("")
 
-        completions = [JobInfo(rule="align", job_id=1, end_time=1704110460.0)]
+        completions = [JobInfo(rule="align", job_id="1", end_time=1704110460.0)]
 
         result = _augment_completions_with_threads(completions, log_file)
         assert len(result) == 1
