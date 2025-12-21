@@ -543,7 +543,7 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
 def parse_metadata_files(
     metadata_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> Iterator[JobInfo]:  # noqa: C901
+) -> Iterator[JobInfo]:
     """
     Parse completed job information from Snakemake metadata files.
 
@@ -619,7 +619,7 @@ def parse_metadata_files(
 def parse_metadata_files_full(
     metadata_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> Iterator[MetadataRecord]:  # noqa: C901
+) -> Iterator[MetadataRecord]:
     """
     Parse all metadata from Snakemake metadata files in a single pass.
 
