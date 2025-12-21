@@ -837,7 +837,7 @@ class TestInitMethods:
     def test_init_event_reader_disabled(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
         """Test event reader init when events disabled."""
         tui_with_mocks._events_enabled = False
-        tui_with_mocks._event_reader = "placeholder"  # type: ignore
+        tui_with_mocks._event_reader = "placeholder"  # type: ignore[assignment]
         tui_with_mocks._init_event_reader()
         # Should not modify event_reader when disabled
         assert tui_with_mocks._event_reader == "placeholder"
