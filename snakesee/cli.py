@@ -290,6 +290,19 @@ def profile_show(
         sys.exit(1)
 
 
+def log_handler_path() -> None:
+    """
+    Print the path to the log handler script for Snakemake 8.x.
+
+    Use with: snakemake --log-handler-script $(snakesee log-handler-path) --cores 4
+
+    This enables real-time job tracking without requiring Snakemake 9+.
+    """
+    from snakesee import LOG_HANDLER_SCRIPT
+
+    print(LOG_HANDLER_SCRIPT)
+
+
 def main() -> None:
     """Entry point for the snakesee CLI."""
     defopt.run(
@@ -298,6 +311,7 @@ def main() -> None:
             "status": status,
             "profile-export": profile_export,
             "profile-show": profile_show,
+            "log-handler-path": log_handler_path,
         },
         no_negated_flags=True,
     )

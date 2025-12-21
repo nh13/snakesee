@@ -1162,6 +1162,13 @@ class WorkflowMonitorTUI:
             header_text.append("  │  ")
             header_text.append("PAUSED", style="bold yellow")
 
+        # Monitoring method indicator
+        header_text.append("  │  ")
+        if self._event_reader is not None:
+            header_text.append("⚡ Events", style="bold green")
+        else:
+            header_text.append("📄 Parsing", style="bold blue")
+
         return Panel(header_text, style="white on grey23", border_style=FG_BLUE, height=3)
 
     def _make_progress_bar(self, progress: WorkflowProgress, width: int = 40) -> Text:
@@ -1445,8 +1452,9 @@ class WorkflowMonitorTUI:
         table = Table(expand=True, show_header=True, header_style=header_style)
         ind = self._sort_indicator
         table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
-        table.add_column(f"Duration{ind('completions', 1)}", justify="right")
-        table.add_column(f"Completed{ind('completions', 2)}", justify="right")
+        table.add_column(f"Thr{ind('completions', 1)}", justify="right")
+        table.add_column(f"Duration{ind('completions', 2)}", justify="right")
+        table.add_column(f"Completed{ind('completions', 3)}", justify="right")
 
         # Merge successful completions and failed jobs for a unified view
         failed_job_ids = {id(job) for job in progress.failed_jobs_list}
@@ -1461,10 +1469,11 @@ class WorkflowMonitorTUI:
         if is_sorting and jobs:
             sort_keys = {
                 0: lambda j: j.rule.lower(),
-                1: lambda j: j.duration or 0,
-                2: lambda j: j.end_time or 0,
+                1: lambda j: j.threads or 0,
+                2: lambda j: j.duration or 0,
+                3: lambda j: j.end_time or 0,
             }
-            key_fn = sort_keys.get(self._sort_column, sort_keys[2])
+            key_fn = sort_keys.get(self._sort_column, sort_keys[3])
             jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
 
         # Check if we're in completions selection mode
@@ -1473,6 +1482,7 @@ class WorkflowMonitorTUI:
         for idx, job in enumerate(jobs[:8]):  # Limit to 8 rows
             duration = job.duration
             duration_str = format_duration(duration) if duration is not None else "?"
+            threads_str = str(job.threads) if job.threads is not None else "-"
 
             completed_str = "?"
             if job.end_time is not None:
@@ -1489,6 +1499,7 @@ class WorkflowMonitorTUI:
 
             table.add_row(
                 Text(job.rule, style=rule_style),
+                threads_str,
                 duration_str,
                 f"[{time_style}]{completed_str}[/{time_style}]",
             )
@@ -1496,7 +1507,7 @@ class WorkflowMonitorTUI:
         if not jobs:
             msg = f"[dim]No jobs matching '{self._filter_text}'[/dim]" if self._filter_text else ""
             msg = msg or "[dim]No completed jobs yet[/dim]"
-            table.add_row(msg, "", "")
+            table.add_row(msg, "", "", "")
 
         title = "Recent Completions"
         if is_selecting:
@@ -1614,10 +1625,11 @@ class WorkflowMonitorTUI:
         if is_sorting and jobs:
             sort_keys = {
                 0: lambda j: j.rule.lower(),
-                1: lambda j: j.duration or 0,
-                2: lambda j: j.end_time or 0,
+                1: lambda j: j.threads or 0,
+                2: lambda j: j.duration or 0,
+                3: lambda j: j.end_time or 0,
             }
-            key_fn = sort_keys.get(self._sort_column, sort_keys[2])
+            key_fn = sort_keys.get(self._sort_column, sort_keys[3])
             jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
 
         return jobs, failed_job_ids

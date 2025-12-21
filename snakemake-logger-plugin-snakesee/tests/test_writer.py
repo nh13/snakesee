@@ -144,3 +144,29 @@ class TestEventWriter:
         assert len(lines) == 1
 
         writer.close()
+
+    def test_truncate_clears_existing_file(self, tmp_path: Path) -> None:
+        """Test that truncate clears existing file content."""
+        event_file = tmp_path / "events.jsonl"
+
+        # Write some initial events
+        with EventWriter(event_file) as writer:
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=1.0, total_jobs=10))
+            writer.write(SnakeseeEvent(event_type=EventType.PROGRESS, timestamp=2.0, total_jobs=10))
+
+        # Verify initial content
+        lines = event_file.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+        # Truncate and write new event
+        writer = EventWriter(event_file)
+        writer.truncate()
+        writer.write(SnakeseeEvent(event_type=EventType.WORKFLOW_STARTED, timestamp=3.0))
+        writer.close()
+
+        # Only new event should be present
+        lines = event_file.read_text().strip().split("\n")
+        assert len(lines) == 1
+        parsed = SnakeseeEvent.from_json(lines[0])
+        assert parsed.event_type == EventType.WORKFLOW_STARTED
+        assert parsed.timestamp == 3.0

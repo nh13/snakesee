@@ -1,6 +1,7 @@
 """Snakesee: A terminal UI for monitoring Snakemake workflows."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version
+from pathlib import Path
 
 from snakesee.estimator import TimeEstimator
 from snakesee.events import EVENT_FILE_NAME
@@ -16,11 +17,17 @@ from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
 from snakesee.parser import parse_workflow_state
 
+__version__ = version("snakesee")
+
+# Path to the log handler script for Snakemake 8.x --log-handler-script
+LOG_HANDLER_SCRIPT = Path(__file__).parent / "log_handler_script.py"
+
 __all__ = [
     "EVENT_FILE_NAME",
     "EventReader",
     "EventType",
     "JobInfo",
+    "LOG_HANDLER_SCRIPT",
     "RuleTimingStats",
     "SnakeseeEvent",
     "TimeEstimate",
