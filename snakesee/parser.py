@@ -80,6 +80,22 @@ def find_latest_log(snakemake_dir: Path) -> Path | None:
     return logs[-1] if logs else None
 
 
+def find_all_logs(snakemake_dir: Path) -> list[Path]:
+    """
+    Find all snakemake log files, sorted by modification time (oldest first).
+
+    Args:
+        snakemake_dir: Path to the .snakemake directory.
+
+    Returns:
+        List of paths to all log files, sorted oldest to newest.
+    """
+    log_dir = snakemake_dir / "log"
+    if not log_dir.exists():
+        return []
+    return sorted(log_dir.glob("*.snakemake.log"), key=lambda p: p.stat().st_mtime)
+
+
 class IncrementalLogReader:
     """Streaming reader for Snakemake log files with position tracking.
 

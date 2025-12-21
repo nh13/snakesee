@@ -285,6 +285,34 @@ def parse_tool_progress(
     return plugin.parse_progress(content)
 
 
+def _safe_mtime(p: Path) -> float:
+    """Get mtime, returning 0 if file was deleted (race condition)."""
+    try:
+        return p.stat().st_mtime
+    except FileNotFoundError:
+        return 0
+
+
+def _search_log_dir(
+    log_dir: Path,
+    rule_name: str,
+    wildcards: dict[str, str] | None,
+) -> list[Path]:
+    """Search a log directory for logs matching rule_name and wildcards."""
+    paths: list[Path] = []
+    if not log_dir.exists():
+        return paths
+    paths.extend(log_dir.glob(f"**/{rule_name}*"))
+    rule_log_dir = log_dir / rule_name
+    if rule_log_dir.exists():
+        paths.extend(rule_log_dir.glob("*"))
+    if wildcards:
+        for wc_value in wildcards.values():
+            if wc_value:
+                paths.extend(log_dir.glob(f"**/*{wc_value}*"))
+    return paths
+
+
 def find_rule_log(
     rule_name: str,
     job_id: int | str | None,
@@ -337,37 +365,20 @@ def find_rule_log(
 
     # logs/ directory (common convention)
     logs_dir = workflow_dir / "logs"
+    search_paths.extend(_search_log_dir(logs_dir, rule_name, wildcards))
     if logs_dir.exists():
-        search_paths.extend(logs_dir.glob(f"**/{rule_name}*"))
         search_paths.extend(logs_dir.glob(f"**/*{rule_name}*"))
-        # Also search inside rule-named directories (logs/{rule}/*.log pattern)
-        rule_log_dir = logs_dir / rule_name
-        if rule_log_dir.exists():
-            search_paths.extend(rule_log_dir.glob("*"))
-        # Search for logs matching wildcard values
-        if wildcards:
-            for wc_value in wildcards.values():
-                if wc_value:  # Skip empty values
-                    search_paths.extend(logs_dir.glob(f"**/*{wc_value}*"))
 
     # log/ directory (another common convention)
-    log_dir2 = workflow_dir / "log"
-    if log_dir2.exists():
-        search_paths.extend(log_dir2.glob(f"**/{rule_name}*"))
-        # Also search inside rule-named directories (log/{rule}/*.log pattern)
-        rule_log_dir2 = log_dir2 / rule_name
-        if rule_log_dir2.exists():
-            search_paths.extend(rule_log_dir2.glob("*"))
-        # Search for logs matching wildcard values
-        if wildcards:
-            for wc_value in wildcards.values():
-                if wc_value:
-                    search_paths.extend(log_dir2.glob(f"**/*{wc_value}*"))
+    search_paths.extend(_search_log_dir(workflow_dir / "log", rule_name, wildcards))
 
     # Sort by modification time (newest first) and return first match
     existing_logs = [p for p in search_paths if p.is_file()]
     if existing_logs:
-        existing_logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return existing_logs[0]
+        existing_logs.sort(key=_safe_mtime, reverse=True)
+        # Return first file that still exists
+        for log in existing_logs:
+            if log.exists():
+                return log
 
     return None
