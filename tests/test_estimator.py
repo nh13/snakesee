@@ -350,3 +350,67 @@ class TestThreadAwareETA:
         assert 95 < mean < 105
         # With aggregate fallback single sample, variance should be (mean * 0.3)^2 = 900
         assert 880 < var < 920
+
+
+class TestWildcardConditioning:
+    """Tests for wildcard-conditioned ETA estimation."""
+
+    def test_wildcard_conditioning_with_match(self) -> None:
+        """Test get_estimate_for_job uses wildcard-specific stats when available."""
+        from snakesee.models import WildcardTimingStats
+
+        estimator = TimeEstimator(use_wildcard_conditioning=True)
+
+        # Set up wildcard stats: sample1 takes 50s, sample2 takes 200s
+        # Need at least 2 values with enough variance for get_most_predictive_key
+        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
+        wc_stats.stats_by_value["sample1"] = RuleTimingStats(
+            rule="align", durations=[50.0, 52.0, 48.0]
+        )
+        wc_stats.stats_by_value["sample2"] = RuleTimingStats(
+            rule="align", durations=[200.0, 210.0, 190.0]
+        )
+        estimator.wildcard_stats["align"] = {"sample": wc_stats}
+
+        # Set up rule stats with different timing (100s)
+        estimator.rule_stats["align"] = RuleTimingStats(
+            rule="align", durations=[100.0, 100.0, 100.0]
+        )
+
+        # With sample1 wildcard, should use wildcard-specific stats (~50s)
+        mean, var = estimator.get_estimate_for_job("align", wildcards={"sample": "sample1"})
+        assert 45 < mean < 55  # Should be around 50s, not 100s
+        assert var > 0
+
+        # With sample2 wildcard, should use wildcard-specific stats (~200s)
+        mean2, var2 = estimator.get_estimate_for_job("align", wildcards={"sample": "sample2"})
+        assert 190 < mean2 < 210
+        assert var2 > 0
+
+    def test_wildcard_conditioning_no_match_falls_to_rule(self) -> None:
+        """Test wildcard conditioning falls back to rule stats when no match."""
+        from snakesee.models import WildcardTimingStats
+
+        estimator = TimeEstimator(use_wildcard_conditioning=True)
+
+        # Set up wildcard stats with 2+ values (required for get_most_predictive_key)
+        # Need 3+ samples per value for MIN_SAMPLES_FOR_CONDITIONING
+        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
+        wc_stats.stats_by_value["sample1"] = RuleTimingStats(
+            rule="align", durations=[50.0, 52.0, 48.0]
+        )
+        wc_stats.stats_by_value["sample2"] = RuleTimingStats(
+            rule="align",
+            durations=[200.0, 210.0, 190.0],  # High variance needed
+        )
+        estimator.wildcard_stats["align"] = {"sample": wc_stats}
+
+        # Set up rule stats
+        estimator.rule_stats["align"] = RuleTimingStats(
+            rule="align", durations=[100.0, 105.0, 95.0]
+        )
+
+        # With unknown sample3 wildcard, should fall back to rule stats
+        mean, var = estimator.get_estimate_for_job("align", wildcards={"sample": "sample3"})
+        assert 95 < mean < 105  # Should be around 100s, not 50s
+        assert var > 0
