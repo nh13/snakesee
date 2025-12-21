@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from snakesee.models import JobInfo
@@ -13,6 +15,40 @@ from snakesee.models import RuleTimingStats
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
+
+
+@dataclass(frozen=True)
+class MetadataRecord:
+    """Single metadata file parsed data for efficient single-pass collection.
+
+    Contains all fields needed by various collection functions so we only
+    read each metadata file once.
+    """
+
+    rule: str
+    start_time: float | None = None
+    end_time: float | None = None
+    wildcards: dict[str, str] | None = None
+    input_size: int | None = None
+    code_hash: str | None = None
+
+    @property
+    def duration(self) -> float | None:
+        """Calculate duration from start and end times."""
+        if self.start_time is not None and self.end_time is not None:
+            return self.end_time - self.start_time
+        return None
+
+    def to_job_info(self) -> JobInfo:
+        """Convert to JobInfo for compatibility with existing code."""
+        return JobInfo(
+            rule=self.rule,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            wildcards=self.wildcards,
+            input_size=self.input_size,
+        )
+
 
 # Pattern: "15 of 50 steps (30%) done"
 PROGRESS_PATTERN = re.compile(r"(\d+) of (\d+) steps \((\d+(?:\.\d+)?)%\) done")
@@ -504,7 +540,10 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
     return rule_counts
 
 
-def parse_metadata_files(metadata_dir: Path) -> Iterator[JobInfo]:  # noqa: C901
+def parse_metadata_files(
+    metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Iterator[JobInfo]:  # noqa: C901
     """
     Parse completed job information from Snakemake metadata files.
 
@@ -513,6 +552,7 @@ def parse_metadata_files(metadata_dir: Path) -> Iterator[JobInfo]:  # noqa: C901
 
     Args:
         metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
 
     Yields:
         JobInfo instances for each completed job found.
@@ -520,9 +560,23 @@ def parse_metadata_files(metadata_dir: Path) -> Iterator[JobInfo]:  # noqa: C901
     if not metadata_dir.exists():
         return
 
-    for meta_file in metadata_dir.rglob("*"):
-        if not meta_file.is_file():
+    # Get file list - count upfront if progress is requested for accurate progress
+    if progress_callback is not None:
+        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
+        total = len(files)
+    else:
+        files = None
+        total = 0
+
+    file_iter = files if files is not None else metadata_dir.rglob("*")
+
+    for i, meta_file in enumerate(file_iter):
+        if files is None and not meta_file.is_file():
             continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
         try:
             data = json.loads(meta_file.read_text())
             rule = data.get("rule")
@@ -562,7 +616,97 @@ def parse_metadata_files(metadata_dir: Path) -> Iterator[JobInfo]:  # noqa: C901
             continue
 
 
-def collect_rule_code_hashes(metadata_dir: Path) -> dict[str, set[str]]:
+def parse_metadata_files_full(
+    metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Iterator[MetadataRecord]:  # noqa: C901
+    """
+    Parse all metadata from Snakemake metadata files in a single pass.
+
+    This is more efficient than calling parse_metadata_files and
+    collect_rule_code_hashes separately, as it reads each file only once.
+
+    Args:
+        metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
+
+    Yields:
+        MetadataRecord instances containing timing and code hash data.
+    """
+    if not metadata_dir.exists():
+        return
+
+    # Get file list - count upfront if progress is requested
+    if progress_callback is not None:
+        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
+        total = len(files)
+    else:
+        files = None
+        total = 0
+
+    file_iter = files if files is not None else metadata_dir.rglob("*")
+
+    for i, meta_file in enumerate(file_iter):
+        if files is None and not meta_file.is_file():
+            continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
+        try:
+            data = json.loads(meta_file.read_text())
+            rule = data.get("rule")
+            if rule is None:
+                continue
+
+            # Extract timing data
+            starttime = data.get("starttime")
+            endtime = data.get("endtime")
+
+            # Extract wildcards if present
+            wildcards_data = data.get("wildcards")
+            wildcards: dict[str, str] | None = None
+            if isinstance(wildcards_data, dict):
+                wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
+
+            # Extract input files and calculate total size
+            input_size: int | None = None
+            input_files = data.get("input")
+            if isinstance(input_files, list) and input_files:
+                total_size = 0
+                all_found = True
+                for f in input_files:
+                    try:
+                        total_size += Path(f).stat().st_size
+                    except OSError:
+                        all_found = False
+                        break
+                if all_found:
+                    input_size = total_size
+
+            # Extract and hash code
+            code_hash: str | None = None
+            code = data.get("code")
+            if code:
+                normalized_code = " ".join(code.split())
+                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
+
+            yield MetadataRecord(
+                rule=rule,
+                start_time=starttime,
+                end_time=endtime,
+                wildcards=wildcards,
+                input_size=input_size,
+                code_hash=code_hash,
+            )
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+
+def collect_rule_code_hashes(
+    metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, set[str]]:
     """
     Collect code hashes for each rule from metadata files.
 
@@ -572,6 +716,7 @@ def collect_rule_code_hashes(metadata_dir: Path) -> dict[str, set[str]]:
 
     Args:
         metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
 
     Returns:
         Dictionary mapping code_hash -> set of rule names that use that code.
@@ -581,9 +726,23 @@ def collect_rule_code_hashes(metadata_dir: Path) -> dict[str, set[str]]:
     if not metadata_dir.exists():
         return hash_to_rules
 
-    for meta_file in metadata_dir.rglob("*"):
-        if not meta_file.is_file():
+    # Get file list - count upfront if progress is requested
+    if progress_callback is not None:
+        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
+        total = len(files)
+    else:
+        files = None
+        total = 0
+
+    file_iter = files if files is not None else metadata_dir.rglob("*")
+
+    for i, meta_file in enumerate(file_iter):
+        if files is None and not meta_file.is_file():
             continue
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
         try:
             data = json.loads(meta_file.read_text())
             rule = data.get("rule")
@@ -996,7 +1155,10 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
         return True
 
 
-def collect_rule_timing_stats(metadata_dir: Path) -> dict[str, RuleTimingStats]:
+def collect_rule_timing_stats(
+    metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, RuleTimingStats]:
     """
     Collect historical timing statistics per rule from metadata.
 
@@ -1006,6 +1168,7 @@ def collect_rule_timing_stats(metadata_dir: Path) -> dict[str, RuleTimingStats]:
 
     Args:
         metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
 
     Returns:
         Dictionary mapping rule names to their timing statistics.
@@ -1014,7 +1177,7 @@ def collect_rule_timing_stats(metadata_dir: Path) -> dict[str, RuleTimingStats]:
     # rule -> [(duration, end_time, input_size), ...]
     jobs_by_rule: dict[str, list[tuple[float, float, int | None]]] = {}
 
-    for job in parse_metadata_files(metadata_dir):
+    for job in parse_metadata_files(metadata_dir, progress_callback=progress_callback):
         duration = job.duration
         end_time = job.end_time
         if duration is None or end_time is None:
@@ -1046,6 +1209,7 @@ def collect_rule_timing_stats(metadata_dir: Path) -> dict[str, RuleTimingStats]:
 
 def collect_wildcard_timing_stats(  # noqa: C901
     metadata_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, dict[str, WildcardTimingStats]]:
     """
     Collect timing statistics per rule, conditioned on wildcards.
@@ -1055,6 +1219,7 @@ def collect_wildcard_timing_stats(  # noqa: C901
 
     Args:
         metadata_dir: Path to .snakemake/metadata/ directory.
+        progress_callback: Optional callback(current, total) for progress reporting.
 
     Returns:
         Nested dictionary: rule -> wildcard_key -> WildcardTimingStats
@@ -1063,7 +1228,7 @@ def collect_wildcard_timing_stats(  # noqa: C901
     # Structure: rule -> wildcard_key -> wildcard_value -> [(duration, end_time), ...]
     data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
 
-    for job in parse_metadata_files(metadata_dir):
+    for job in parse_metadata_files(metadata_dir, progress_callback=progress_callback):
         duration = job.duration
         end_time = job.end_time
         if duration is None or end_time is None:
