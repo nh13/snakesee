@@ -341,6 +341,12 @@ class TimeEstimator:
         for job in progress.recent_completions:
             rule_completed[job.rule] = rule_completed.get(job.rule, 0) + 1
 
+        # Augment with historical rule stats for rules not in recent completions
+        # This ensures pending rules can be inferred even early in the workflow
+        for rule, stats in self.rule_stats.items():
+            if rule not in rule_completed:
+                rule_completed[rule] = stats.count
+
         # Estimate pending rule distribution (assume proportional to completed)
         pending = progress.total_jobs - progress.completed_jobs - len(progress.running_jobs)
         pending_rules = self._infer_pending_rules(rule_completed, pending)
