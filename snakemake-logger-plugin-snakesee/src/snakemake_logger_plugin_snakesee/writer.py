@@ -44,6 +44,20 @@ class EventWriter:
             self._file = open(self.path, "a", encoding="utf-8")
         return self._file
 
+    def truncate(self) -> None:
+        """Truncate the event file to clear stale data from previous runs.
+
+        Should be called when a new workflow starts to ensure fresh state.
+        """
+        # Close existing handle if open
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+        # Truncate by opening in write mode
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(self.path, "w", encoding="utf-8")
+
     def write(self, event: SnakeseeEvent) -> None:
         """Write an event to the file.
 
