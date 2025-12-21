@@ -10,8 +10,41 @@ from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
+from snakesee.parser import collect_rule_code_hashes
 from snakesee.parser import collect_rule_timing_stats
 from snakesee.parser import collect_wildcard_timing_stats
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """
+    Calculate the Levenshtein distance between two strings.
+
+    Args:
+        s1: First string.
+        s2: Second string.
+
+    Returns:
+        The minimum number of edits (insertions, deletions, substitutions)
+        needed to transform s1 into s2.
+    """
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row: list[int] = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost is 0 if characters match, 1 otherwise
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
 
 
 class TimeEstimator:
@@ -60,6 +93,8 @@ class TimeEstimator:
         self.rule_stats: dict[str, RuleTimingStats] = rule_stats or {}
         self.thread_stats: dict[str, ThreadTimingStats] = {}
         self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
+        self.current_rules: set[str] | None = None  # Rules in current workflow (for filtering)
+        self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
         self.use_wildcard_conditioning = use_wildcard_conditioning
         self.weighting_strategy = weighting_strategy
         self.half_life_days = half_life_days
@@ -74,9 +109,74 @@ class TimeEstimator:
         """
         self.rule_stats = collect_rule_timing_stats(metadata_dir)
 
+        # Load code hashes for renamed rule detection
+        self.code_hash_to_rules = collect_rule_code_hashes(metadata_dir)
+
         # Also load wildcard stats if conditioning is enabled
         if self.use_wildcard_conditioning:
             self.wildcard_stats = collect_wildcard_timing_stats(metadata_dir)
+
+    def _find_rules_by_code_hash(self, rule: str) -> list[str]:
+        """
+        Find other rules that share the same code hash as the given rule.
+
+        This helps detect renamed rules - if two rules have the same shell
+        code but different names, they are likely the same rule renamed.
+
+        Args:
+            rule: The rule name to look up.
+
+        Returns:
+            List of other rule names that share the same code hash.
+            Empty list if no code hash data or no matches.
+        """
+        for _code_hash, rules in self.code_hash_to_rules.items():
+            if rule in rules:
+                # Return other rules in the same hash group
+                return [r for r in rules if r != rule and r in self.rule_stats]
+        return []
+
+    def _find_similar_rule(
+        self, rule: str, max_distance: int = 3
+    ) -> tuple[str, RuleTimingStats] | None:
+        """
+        Find the most similar known rule using code hash and Levenshtein distance.
+
+        First checks if any known rule shares the same code hash (renamed rule).
+        Then falls back to Levenshtein distance for similar names.
+
+        Args:
+            rule: The unknown rule name to match.
+            max_distance: Maximum edit distance to consider a match (default 3).
+
+        Returns:
+            Tuple of (matched_rule_name, stats) if a similar rule is found,
+            None otherwise.
+        """
+        if not self.rule_stats:
+            return None
+
+        # First, try code hash matching (exact code match = renamed rule)
+        hash_matches = self._find_rules_by_code_hash(rule)
+        if hash_matches:
+            # Use the first match (could merge stats in future)
+            matched_rule = hash_matches[0]
+            return matched_rule, self.rule_stats[matched_rule]
+
+        # Fall back to Levenshtein distance
+        best_match: str | None = None
+        best_distance = max_distance + 1
+
+        for known_rule in self.rule_stats:
+            distance = _levenshtein_distance(rule, known_rule)
+            if distance < best_distance:
+                best_distance = distance
+                best_match = known_rule
+
+        if best_match is not None and best_distance <= max_distance:
+            return best_match, self.rule_stats[best_match]
+
+        return None
 
     def _get_weighted_mean(self, stats: RuleTimingStats) -> float:
         """Get weighted mean using configured strategy."""
@@ -192,6 +292,15 @@ class TimeEstimator:
             # Standard rule-level estimate
             rule_mean = self._get_weighted_mean(stats)
             rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.3) ** 2
+            return rule_mean, rule_var
+
+        # Try fuzzy matching for renamed/similar rules before falling back to global mean
+        similar = self._find_similar_rule(rule)
+        if similar is not None:
+            matched_rule, stats = similar
+            rule_mean = self._get_weighted_mean(stats)
+            # Wider variance for fuzzy matches due to uncertainty
+            rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.4) ** 2
             return rule_mean, rule_var
 
         # No data available, use global mean
@@ -348,8 +457,9 @@ class TimeEstimator:
                 rule_completed[rule] = stats.count
 
         # Estimate pending rule distribution (assume proportional to completed)
+        # Filter by current_rules to exclude deleted rules from historical data
         pending = progress.total_jobs - progress.completed_jobs - len(progress.running_jobs)
-        pending_rules = self._infer_pending_rules(rule_completed, pending)
+        pending_rules = self._infer_pending_rules(rule_completed, pending, self.current_rules)
 
         # Calculate expected remaining time
         total_expected = 0.0
@@ -449,6 +559,7 @@ class TimeEstimator:
         self,
         completed_by_rule: dict[str, int],
         pending_count: int,
+        current_rules: set[str] | None = None,
     ) -> dict[str, int]:
         """
         Infer the composition of pending rules.
@@ -459,12 +570,19 @@ class TimeEstimator:
         Args:
             completed_by_rule: Count of completed jobs per rule.
             pending_count: Total number of pending jobs.
+            current_rules: Optional set of rules that exist in the current workflow.
+                If provided, only rules in this set will be included in inference.
+                This filters out deleted rules from historical data.
 
         Returns:
             Estimated count of pending jobs per rule.
         """
         if not completed_by_rule or pending_count <= 0:
             return {}
+
+        # Filter out deleted rules if current_rules is provided
+        if current_rules is not None:
+            completed_by_rule = {r: c for r, c in completed_by_rule.items() if r in current_rules}
 
         total_completed = sum(completed_by_rule.values())
         if total_completed == 0:
