@@ -303,7 +303,7 @@ class WorkflowMonitorTUI:
                 if file_count > 0:
                     task = progress.add_task("Loading metadata...", total=file_count)
 
-                    def metadata_cb(current: int, total: int) -> None:
+                    def metadata_cb(current: int, _total: int) -> None:
                         progress.update(task, completed=current)
 
                     self._estimator.load_from_metadata(metadata_dir, progress_callback=metadata_cb)
@@ -313,7 +313,7 @@ class WorkflowMonitorTUI:
                 task = progress.add_task("Analyzing thread usage...", total=len(log_paths))
                 self._init_thread_stats_from_log(
                     log_paths=log_paths,
-                    progress_callback=lambda current, total: progress.update(
+                    progress_callback=lambda current, _total: progress.update(
                         task, completed=current
                     ),
                 )
