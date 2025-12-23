@@ -1563,7 +1563,9 @@ class WorkflowMonitorTUI:
                 if rule not in completed_by_rule:
                     completed_by_rule[rule] = stats.count
 
-        return self._estimator._infer_pending_rules(completed_by_rule, progress.pending_jobs)
+        return self._estimator._infer_pending_rules(
+            completed_by_rule, progress.pending_jobs, self._estimator.current_rules
+        )
 
     def _read_log_tail(self, log_path: Path, max_lines: int = 500) -> list[str]:
         """
@@ -1897,8 +1899,15 @@ class WorkflowMonitorTUI:
         from snakesee.parser import parse_metadata_files
 
         if self._cutoff_time is None:
-            # Latest log: use all stats from estimator
+            # Latest log: use stats from estimator, filtered by current workflow rules
             if self._estimator and self._estimator.rule_stats:
+                current_rules = self._estimator.current_rules
+                if current_rules is not None:
+                    return [
+                        stats
+                        for stats in self._estimator.rule_stats.values()
+                        if stats.rule in current_rules
+                    ]
                 return list(self._estimator.rule_stats.values())
             return []
 
