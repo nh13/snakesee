@@ -231,9 +231,11 @@ class TestIsWorkflowRunning:
         incomplete_marker = incomplete_dir / "c29tZV9vdXRwdXRfZmlsZQ=="  # base64 encoded
         incomplete_marker.write_text("")
 
-        # Incomplete markers do NOT indicate the workflow is running - they persist
-        # after a workflow is killed. Log freshness is the primary indicator.
-        assert is_workflow_running(snakemake_dir) is False
+        # When locks AND incomplete markers both exist, the workflow is running.
+        # Incomplete markers are created when jobs START and removed when they FINISH,
+        # so their presence combined with locks strongly indicates active execution.
+        # (Log freshness is only used as a fallback when no incomplete markers exist)
+        assert is_workflow_running(snakemake_dir) is True
 
 
 class TestCollectRuleTimingStats:
