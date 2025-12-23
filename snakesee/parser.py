@@ -1118,11 +1118,12 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
 
     Uses multiple signals:
     1. Lock files exist in .snakemake/locks/
-    2. Log file was recently modified (within stale_threshold seconds)
+    2. Incomplete markers exist in .snakemake/incomplete/ (jobs in progress)
+    3. Log file was recently modified (within stale_threshold seconds)
 
-    Note: Incomplete markers in .snakemake/incomplete/ are NOT used to determine
-    if a workflow is running, as they can persist after a workflow is killed.
-    Log freshness is the primary indicator of active execution.
+    If locks AND incomplete markers both exist, the workflow is definitely running
+    (incomplete markers are created when jobs start and removed when they finish).
+    Log freshness is only used as a fallback when there are no incomplete markers.
 
     Args:
         snakemake_dir: Path to the .snakemake directory.
@@ -1146,7 +1147,18 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
     if not has_locks:
         return False
 
-    # Check log freshness to determine if workflow is actually running
+    # If locks exist AND incomplete markers exist, workflow is definitely running
+    # (incomplete markers are created when jobs start, removed when they finish)
+    incomplete_dir = snakemake_dir / "incomplete"
+    if incomplete_dir.exists():
+        try:
+            has_incomplete = any(incomplete_dir.iterdir())
+            if has_incomplete:
+                return True
+        except OSError:
+            pass
+
+    # Fall back to log freshness check when no incomplete markers
     log_file = find_latest_log(snakemake_dir)
     if log_file is None:
         # No log file but locks exist - assume running (early startup)
