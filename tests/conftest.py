@@ -144,6 +144,7 @@ def mock_estimator() -> MagicMock:
     estimator.estimate_remaining.return_value = make_time_estimate()
     estimator.get_rule_estimate.return_value = (100.0, 0.8)
     estimator._infer_pending_rules.return_value = {"align": 5, "sort": 3}
+    estimator.current_rules = None  # No filtering by default
     return estimator
 
 
