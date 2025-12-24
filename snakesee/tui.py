@@ -1394,6 +1394,7 @@ class WorkflowMonitorTUI:
         header_style = "bold magenta on dark_blue" if is_sorting else "bold magenta"
 
         table = Table(expand=True, show_header=True, header_style=header_style)
+        table.add_column("#", justify="right", style="dim", width=3)
         table.add_column(f"Rule{self._sort_indicator('running', 0)}", style="cyan", no_wrap=True)
         table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Started{self._sort_indicator('running', 1)}", justify="right")
@@ -1460,7 +1461,9 @@ class WorkflowMonitorTUI:
                     rule_style = "bold cyan on dark_blue"
 
             threads_str = str(job.threads) if job.threads is not None else "-"
+            row_num = str(actual_idx + 1)  # 1-indexed row number
             table.add_row(
+                row_num,
                 Text(job.rule, style=rule_style),
                 threads_str,
                 started_str,
@@ -1472,7 +1475,7 @@ class WorkflowMonitorTUI:
         if not jobs:
             msg = f"[dim]No jobs matching '{self._filter_text}'[/dim]" if self._filter_text else ""
             msg = msg or "[dim]No jobs currently running[/dim]"
-            table.add_row(msg, "", "", "", "", "")
+            table.add_row("", msg, "", "", "", "", "")
 
         # Build title with scroll indicator
         total_jobs = len(job_data)
@@ -1498,6 +1501,7 @@ class WorkflowMonitorTUI:
 
         table = Table(expand=True, show_header=True, header_style=header_style)
         ind = self._sort_indicator
+        table.add_column("#", justify="right", style="dim", width=3)
         table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
         table.add_column(f"Thr{ind('completions', 1)}", justify="right")
         table.add_column(f"Duration{ind('completions', 2)}", justify="right")
@@ -1571,7 +1575,9 @@ class WorkflowMonitorTUI:
             if is_selecting and actual_idx == self._selected_completion_index:
                 rule_style = "bold cyan on dark_blue" if not is_failed else "bold red on dark_blue"
 
+            row_num = str(actual_idx + 1)  # 1-indexed row number
             table.add_row(
+                row_num,
                 Text(job.rule, style=rule_style),
                 threads_str,
                 duration_str,
@@ -1581,7 +1587,7 @@ class WorkflowMonitorTUI:
         if not jobs:
             msg = f"[dim]No jobs matching '{self._filter_text}'[/dim]" if self._filter_text else ""
             msg = msg or "[dim]No completed jobs yet[/dim]"
-            table.add_row(msg, "", "", "")
+            table.add_row("", msg, "", "", "")
 
         # Build title with scroll indicator
         total_jobs = len(jobs)
@@ -1905,16 +1911,17 @@ class WorkflowMonitorTUI:
             )
 
         table = Table(expand=True, show_header=True, header_style="bold red")
+        table.add_column("#", justify="right", style="dim", width=3)
         table.add_column("Rule", style="red", no_wrap=True)
         table.add_column("Job ID", justify="right", style="dim")
 
-        for job in progress.failed_jobs_list[:8]:  # Limit to 8 rows
+        for idx, job in enumerate(progress.failed_jobs_list[:8]):  # Limit to 8 rows
             job_id_str = job.job_id if job.job_id else "-"
-            table.add_row(job.rule, job_id_str)
+            table.add_row(str(idx + 1), job.rule, job_id_str)
 
         more_count = len(progress.failed_jobs_list) - 8
         if more_count > 0:
-            table.add_row(f"[dim]... and {more_count} more[/dim]", "")
+            table.add_row("", f"[dim]... and {more_count} more[/dim]", "")
 
         return Panel(
             table,
