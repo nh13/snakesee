@@ -509,7 +509,9 @@ class TestKeepGoing:
     def test_keep_going_mixed(self, workflow_runner: WorkflowRunner) -> None:
         """Test --keep-going with mixed success/failure branches."""
         workflow_runner.setup_workflow("keep_going_mixed")
-        run_result = workflow_runner.run(expect_failure=True, cores=4, extra_args=["--keep-going"])
+        # Use cores=1 for deterministic execution order - this test validates
+        # --keep-going behavior, not parallel failure handling
+        run_result = workflow_runner.run(expect_failure=True, cores=1, extra_args=["--keep-going"])
 
         # Should fail overall
         assert run_result.returncode != 0
