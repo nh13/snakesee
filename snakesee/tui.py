@@ -168,6 +168,7 @@ class WorkflowMonitorTUI:
         # Log file navigation
         self._available_logs: list[Path] = []
         self._current_log_index: int = 0  # 0 = most recent
+        self._latest_log_path: Path | None = None  # Track latest log to detect new workflows
         self._refresh_log_list()
 
         # Table sorting state
@@ -234,6 +235,13 @@ class WorkflowMonitorTUI:
         # Reset to most recent if current index is out of bounds
         if self._current_log_index >= len(self._available_logs):
             self._current_log_index = 0
+
+        # Detect when a new workflow starts (new latest log)
+        # and re-parse current_rules to filter pending jobs correctly
+        new_latest = self._available_logs[0] if self._available_logs else None
+        if new_latest != self._latest_log_path:
+            self._latest_log_path = new_latest
+            self._init_current_rules_from_log()
 
     def _get_current_log(self) -> Path | None:
         """Get the currently selected log file."""
