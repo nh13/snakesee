@@ -1401,6 +1401,12 @@ class WorkflowMonitorTUI:
         if is_sorting:
             job_data = self._sort_running_job_data(job_data)
 
+        # Clamp selected job index to valid bounds (table shows max 10 jobs)
+        is_selecting_running = self._job_selection_mode and self._log_source == "running"
+        if is_selecting_running and job_data:
+            max_idx = min(len(job_data), 10) - 1
+            self._selected_job_index = max(0, min(self._selected_job_index, max_idx))
+
         for idx, (job, elapsed, remaining, _start, tool_progress) in enumerate(job_data[:10]):
             elapsed_str = format_duration(elapsed) if elapsed is not None else "?"
             remaining_str = f"~{format_duration(remaining)}" if remaining is not None else "?"
@@ -1486,6 +1492,11 @@ class WorkflowMonitorTUI:
 
         # Check if we're in completions selection mode
         is_selecting = self._job_selection_mode and self._log_source == "completions"
+
+        # Clamp selected completion index to valid bounds (table shows max 8 jobs)
+        if is_selecting and jobs:
+            max_idx = min(len(jobs), 8) - 1
+            self._selected_completion_index = max(0, min(self._selected_completion_index, max_idx))
 
         for idx, job in enumerate(jobs[:8]):  # Limit to 8 rows
             duration = job.duration
@@ -2267,6 +2278,8 @@ class WorkflowMonitorTUI:
             return
 
         try:
+            import fcntl
+            import os
             import select
             import termios
             import tty
@@ -2298,18 +2311,34 @@ class WorkflowMonitorTUI:
                 while self._running:
                     # Check for keyboard input (non-blocking)
                     if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
-                        key = sys.stdin.read(1)
+                        # Read all available input at once using os.read
+                        # to avoid buffering issues with escape sequences
+                        old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+                        try:
+                            data = os.read(fd, 32)
+                            chars = data.decode("utf-8", errors="ignore")
+                        except BlockingIOError:
+                            chars = ""
+                        finally:
+                            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
 
-                        # Handle escape sequences (arrow keys, etc.)
-                        if key == "\x1b":
-                            # Check if this is an escape sequence or just Esc
-                            if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
-                                seq = sys.stdin.read(2)
-                                if seq == "[A":  # Up arrow
-                                    key = "\x10"  # Map to Ctrl+p
-                                elif seq == "[B":  # Down arrow
-                                    key = "\x0e"  # Map to Ctrl+n
-                                # Otherwise keep as Escape
+                        if not chars:
+                            continue
+
+                        # Parse the input - handle escape sequences
+                        key = chars[0]
+                        if key == "\x1b" and len(chars) >= 3:
+                            seq = chars[1:3]
+                            # Map known sequences to control characters
+                            if seq in ("[A", "OA"):  # Up arrow
+                                key = "\x10"  # Map to Ctrl+p
+                            elif seq in ("[B", "OB"):  # Down arrow
+                                key = "\x0e"  # Map to Ctrl+n
+                            elif seq.startswith("[") or seq.startswith("O"):
+                                # Unknown escape sequence - discard
+                                continue
+                            # Otherwise keep as Escape
 
                         if self._handle_key(key):
                             break
