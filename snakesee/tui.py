@@ -188,6 +188,8 @@ class WorkflowMonitorTUI:
         self._log_source: str | None = None  # "running" or "completions"
         self._selected_job_index: int = 0  # Index into running_jobs list
         self._selected_completion_index: int = 0  # Index into completions list
+        self._running_scroll_offset: int = 0  # Scroll offset for running jobs table
+        self._completions_scroll_offset: int = 0  # Scroll offset for completions table
         self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
         self._cached_log_path: Path | None = None
         self._cached_log_lines: list[str] = []
@@ -830,6 +832,8 @@ class WorkflowMonitorTUI:
                 self._log_source = None
                 self._selected_job_index = 0
                 self._selected_completion_index = 0
+                self._running_scroll_offset = 0
+                self._completions_scroll_offset = 0
                 self._log_scroll_offset = 0
                 self._cached_log_path = None
                 self._cached_log_lines = []
@@ -959,6 +963,8 @@ class WorkflowMonitorTUI:
             self._log_source = None
             self._selected_job_index = 0
             self._selected_completion_index = 0
+            self._running_scroll_offset = 0
+            self._completions_scroll_offset = 0
             self._log_scroll_offset = 0
             self._cached_log_path = None
             self._cached_log_lines = []
@@ -1401,13 +1407,35 @@ class WorkflowMonitorTUI:
         if is_sorting:
             job_data = self._sort_running_job_data(job_data)
 
-        # Clamp selected job index to valid bounds (table shows max 10 jobs)
+        # Virtual scrolling for running jobs table
+        max_visible = 10
         is_selecting_running = self._job_selection_mode and self._log_source == "running"
-        if is_selecting_running and job_data:
-            max_idx = min(len(job_data), 10) - 1
-            self._selected_job_index = max(0, min(self._selected_job_index, max_idx))
 
-        for idx, (job, elapsed, remaining, _start, tool_progress) in enumerate(job_data[:10]):
+        if is_selecting_running and job_data:
+            # Clamp selected index to valid bounds
+            self._selected_job_index = max(0, min(self._selected_job_index, len(job_data) - 1))
+
+            # Adjust scroll offset to keep selection visible
+            if self._selected_job_index < self._running_scroll_offset:
+                self._running_scroll_offset = self._selected_job_index
+            elif self._selected_job_index >= self._running_scroll_offset + max_visible:
+                self._running_scroll_offset = self._selected_job_index - max_visible + 1
+
+            # Clamp scroll offset
+            max_scroll = max(0, len(job_data) - max_visible)
+            self._running_scroll_offset = max(0, min(self._running_scroll_offset, max_scroll))
+        else:
+            self._running_scroll_offset = 0
+
+        # Get visible slice
+        visible_data = job_data[
+            self._running_scroll_offset : self._running_scroll_offset + max_visible
+        ]
+
+        for visible_idx, (job, elapsed, remaining, _start, tool_progress) in enumerate(
+            visible_data
+        ):
+            actual_idx = self._running_scroll_offset + visible_idx
             elapsed_str = format_duration(elapsed) if elapsed is not None else "?"
             remaining_str = f"~{format_duration(remaining)}" if remaining is not None else "?"
             started_str = "?"
@@ -1425,8 +1453,7 @@ class WorkflowMonitorTUI:
 
             rule_style = "cyan"
             # Highlight selected job in selection mode (only when viewing running jobs)
-            is_selecting_running = self._job_selection_mode and self._log_source == "running"
-            if is_selecting_running and idx == self._selected_job_index:
+            if is_selecting_running and actual_idx == self._selected_job_index:
                 rule_style = "bold cyan on dark_blue"
             elif self._filter_matches and self._filter_index < len(self._filter_matches):
                 if job.rule == self._filter_matches[self._filter_index]:
@@ -1447,8 +1474,14 @@ class WorkflowMonitorTUI:
             msg = msg or "[dim]No jobs currently running[/dim]"
             table.add_row(msg, "", "", "", "", "")
 
-        is_selecting_running = self._job_selection_mode and self._log_source == "running"
-        title = f"Currently Running ({len(progress.running_jobs)} jobs)"
+        # Build title with scroll indicator
+        total_jobs = len(job_data)
+        if is_selecting_running and total_jobs > max_visible:
+            start = self._running_scroll_offset + 1
+            end = min(self._running_scroll_offset + max_visible, total_jobs)
+            title = f"Currently Running ({start}-{end} of {total_jobs})"
+        else:
+            title = f"Currently Running ({len(progress.running_jobs)} jobs)"
         if is_selecting_running:
             title += " [bold cyan]◀ select job[/bold cyan]"
         elif is_sorting:
@@ -1490,15 +1523,37 @@ class WorkflowMonitorTUI:
             key_fn = sort_keys.get(self._sort_column, sort_keys[3])
             jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
 
-        # Check if we're in completions selection mode
+        # Virtual scrolling for completions table
+        max_visible = 8
         is_selecting = self._job_selection_mode and self._log_source == "completions"
 
-        # Clamp selected completion index to valid bounds (table shows max 8 jobs)
         if is_selecting and jobs:
-            max_idx = min(len(jobs), 8) - 1
-            self._selected_completion_index = max(0, min(self._selected_completion_index, max_idx))
+            # Clamp selected index to valid bounds
+            self._selected_completion_index = max(
+                0, min(self._selected_completion_index, len(jobs) - 1)
+            )
 
-        for idx, job in enumerate(jobs[:8]):  # Limit to 8 rows
+            # Adjust scroll offset to keep selection visible
+            if self._selected_completion_index < self._completions_scroll_offset:
+                self._completions_scroll_offset = self._selected_completion_index
+            elif self._selected_completion_index >= self._completions_scroll_offset + max_visible:
+                self._completions_scroll_offset = self._selected_completion_index - max_visible + 1
+
+            # Clamp scroll offset
+            max_scroll = max(0, len(jobs) - max_visible)
+            self._completions_scroll_offset = max(
+                0, min(self._completions_scroll_offset, max_scroll)
+            )
+        else:
+            self._completions_scroll_offset = 0
+
+        # Get visible slice
+        visible_jobs = jobs[
+            self._completions_scroll_offset : self._completions_scroll_offset + max_visible
+        ]
+
+        for visible_idx, job in enumerate(visible_jobs):
+            actual_idx = self._completions_scroll_offset + visible_idx
             duration = job.duration
             duration_str = format_duration(duration) if duration is not None else "?"
             threads_str = str(job.threads) if job.threads is not None else "-"
@@ -1513,7 +1568,7 @@ class WorkflowMonitorTUI:
             time_style = "red" if is_failed else "green"
 
             # Highlight selected job in selection mode
-            if is_selecting and idx == self._selected_completion_index:
+            if is_selecting and actual_idx == self._selected_completion_index:
                 rule_style = "bold cyan on dark_blue" if not is_failed else "bold red on dark_blue"
 
             table.add_row(
@@ -1528,7 +1583,14 @@ class WorkflowMonitorTUI:
             msg = msg or "[dim]No completed jobs yet[/dim]"
             table.add_row(msg, "", "", "")
 
-        title = "Recent Completions"
+        # Build title with scroll indicator
+        total_jobs = len(jobs)
+        if is_selecting and total_jobs > max_visible:
+            start = self._completions_scroll_offset + 1
+            end = min(self._completions_scroll_offset + max_visible, total_jobs)
+            title = f"Recent Completions ({start}-{end} of {total_jobs})"
+        else:
+            title = "Recent Completions"
         if is_selecting:
             title += " [bold cyan]◀ select job[/bold cyan]"
         elif is_sorting:
