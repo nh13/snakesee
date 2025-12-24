@@ -30,6 +30,7 @@ rule branch_a_fails:
     output: "output/a_complete.txt"
     shell:
         """
+        sleep 0.3
         echo "Branch A failing"
         exit 1
         """
@@ -39,6 +40,7 @@ rule branch_c_fails:
     output: "output/c_complete.txt"
     shell:
         """
+        sleep 0.3
         echo "Branch C failing"
         exit 1
         """
