@@ -2270,6 +2270,8 @@ class WorkflowMonitorTUI:
             return
 
         try:
+            import fcntl
+            import os
             import select
             import termios
             import tty
@@ -2298,20 +2300,15 @@ class WorkflowMonitorTUI:
             ) as live:
                 last_update = time.time()
 
-                import fcntl
-                import os as os_module
-
-                fd = sys.stdin.fileno()
-
                 while self._running:
                     # Check for keyboard input (non-blocking)
                     if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
                         # Read all available input at once using os.read
                         # to avoid buffering issues with escape sequences
                         old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os_module.O_NONBLOCK)
+                        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
                         try:
-                            data = os_module.read(fd, 32)
+                            data = os.read(fd, 32)
                             chars = data.decode("utf-8", errors="ignore")
                         except BlockingIOError:
                             chars = ""
