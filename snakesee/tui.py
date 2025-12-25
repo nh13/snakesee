@@ -194,6 +194,7 @@ class WorkflowMonitorTUI:
         self._running_scroll_offset: int = 0  # Scroll offset for running jobs table
         self._completions_scroll_offset: int = 0  # Scroll offset for completions table
         self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
+        self._log_scroll_page_size: int = 10  # Lines to scroll with Ctrl+u/d
         self._cached_log_path: Path | None = None
         self._cached_log_lines: list[str] = []
         self._cached_log_mtime: float = 0
@@ -1065,18 +1066,20 @@ class WorkflowMonitorTUI:
 
         # Log scrolling: Ctrl+u (up) or Ctrl+d (down)
         if key == "\x15":  # Ctrl+u - scroll log up (show older)
-            self._log_scroll_offset += 10
+            self._log_scroll_offset += self._log_scroll_page_size
             self._force_refresh = True
             return False
 
         if key == "\x04":  # Ctrl+d - scroll log down (show newer)
-            self._log_scroll_offset = max(0, self._log_scroll_offset - 10)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - self._log_scroll_page_size)
             self._force_refresh = True
             return False
 
         # Jump to top/bottom of log
         if key == "g":  # Jump to top of log
-            self._log_scroll_offset = max(0, len(self._cached_log_lines) - 10)
+            self._log_scroll_offset = max(
+                0, len(self._cached_log_lines) - self._log_scroll_page_size
+            )
             self._force_refresh = True
             return False
 

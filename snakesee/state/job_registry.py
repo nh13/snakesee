@@ -212,9 +212,7 @@ class JobRegistry:
         with self._lock:
             self._update_indexes_unlocked(job, old_status)
 
-    def _update_indexes_unlocked(
-        self, job: Job, old_status: JobStatus | None = None
-    ) -> None:
+    def _update_indexes_unlocked(self, job: Job, old_status: JobStatus | None = None) -> None:
         """Update indexes without acquiring lock (caller must hold lock)."""
         # Update job_id index if needed
         if job.job_id is not None and job.job_id not in self._by_job_id:

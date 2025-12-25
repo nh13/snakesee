@@ -8,8 +8,6 @@ import logging
 import re
 import threading
 from collections.abc import Callable
-
-logger = logging.getLogger(__name__)
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +17,8 @@ from snakesee.models import RuleTimingStats
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

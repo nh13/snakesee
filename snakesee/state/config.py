@@ -168,6 +168,13 @@ class EstimationConfig:
     bootstrap_lower_multiplier: float = 0.2
     bootstrap_upper_multiplier: float = 3.0
 
+    # Simple estimate bounds (used when no historical data)
+    simple_estimate_confidence_cap: float = 0.7
+    simple_estimate_jobs_divisor: int = 20
+
+    # Fuzzy rule matching
+    fuzzy_match_max_distance: int = 3
+
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
         if self.half_life_logs <= 0:
