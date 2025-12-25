@@ -317,6 +317,13 @@ class WorkflowMonitorTUI:
 
                     self._estimator.load_from_metadata(metadata_dir, progress_callback=metadata_cb)
 
+            # Load historical timing from events file (complements metadata)
+            events_file = get_event_file_path(self.workflow_dir)
+            if events_file.exists():
+                task = progress.add_task("Loading events...", total=1)
+                self._estimator.load_from_events(events_file)
+                progress.update(task, completed=1)
+
             # Initialize thread stats from log parsing
             if log_paths:
                 task = progress.add_task("Analyzing thread usage...", total=len(log_paths))
@@ -375,8 +382,9 @@ class WorkflowMonitorTUI:
                     ts.input_sizes.append(job.input_size)
 
     def _init_current_rules_from_log(self) -> None:
-        """Parse current rules from the latest log to filter deleted rules."""
+        """Parse current rules and job counts from the latest log."""
         from snakesee.parser import find_latest_log
+        from snakesee.parser import parse_job_stats_counts_from_log
         from snakesee.parser import parse_job_stats_from_log
 
         if self._estimator is None:
@@ -387,9 +395,15 @@ class WorkflowMonitorTUI:
         if log_path is None:
             return
 
+        # Parse rule names for filtering
         current_rules = parse_job_stats_from_log(log_path)
         if current_rules:
             self._estimator.current_rules = current_rules
+
+        # Parse job counts for accurate pending job inference
+        job_counts = parse_job_stats_counts_from_log(log_path)
+        if job_counts:
+            self._estimator.expected_job_counts = job_counts
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
@@ -512,7 +526,7 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         running_jobs: list[JobInfo],
     ) -> None:
-        """Handle JOB_STARTED event - update start time and threads."""
+        """Handle JOB_STARTED event - update start time, threads, and wildcards."""
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
@@ -525,7 +539,7 @@ class WorkflowMonitorTUI:
                     start_time=event.timestamp,
                     end_time=job.end_time,
                     output_file=job.output_file,
-                    wildcards=job.wildcards,
+                    wildcards=event.wildcards_dict or job.wildcards,
                     input_size=job.input_size,
                     threads=threads or job.threads,
                 )
@@ -1637,7 +1651,11 @@ class WorkflowMonitorTUI:
 
     def _get_inferred_pending_rules(self, progress: WorkflowProgress) -> dict[str, int] | None:
         """Get inferred pending rules from completions and historical data."""
-        if not self._estimator or not progress.recent_completions:
+        if not self._estimator:
+            return None
+
+        # If we have expected job counts, we can infer pending even without completions
+        if not progress.recent_completions and not self._estimator.expected_job_counts:
             return None
 
         # Count completed jobs by rule
@@ -1645,14 +1663,19 @@ class WorkflowMonitorTUI:
         for job in progress.recent_completions:
             completed_by_rule[job.rule] = completed_by_rule.get(job.rule, 0) + 1
 
-        # Also include rule stats from historical data
-        if self._estimator.rule_stats:
+        # Count running jobs by rule
+        running_by_rule: dict[str, int] = {}
+        for job in progress.running_jobs:
+            running_by_rule[job.rule] = running_by_rule.get(job.rule, 0) + 1
+
+        # Only augment with historical counts if we don't have expected_job_counts
+        if not self._estimator.expected_job_counts and self._estimator.rule_stats:
             for rule, stats in self._estimator.rule_stats.items():
                 if rule not in completed_by_rule:
                     completed_by_rule[rule] = stats.count
 
         return self._estimator._infer_pending_rules(
-            completed_by_rule, progress.pending_jobs, self._estimator.current_rules
+            completed_by_rule, progress.pending_jobs, self._estimator.current_rules, running_by_rule
         )
 
     def _read_log_tail(self, log_path: Path, max_lines: int = 500) -> list[str]:

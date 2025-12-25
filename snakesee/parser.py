@@ -213,6 +213,76 @@ def parse_job_stats_from_log(log_path: Path) -> set[str]:
     return rules
 
 
+def parse_job_stats_counts_from_log(log_path: Path) -> dict[str, int]:
+    """
+    Parse the 'Job stats' table from a Snakemake log to get rule -> job count mapping.
+
+    The job stats table appears at the start of a Snakemake run and lists all
+    rules that will be executed along with their job counts. This function
+    captures both the rule names AND their expected counts.
+
+    Args:
+        log_path: Path to the Snakemake log file.
+
+    Returns:
+        Dictionary mapping rule names to their expected job counts.
+        Returns empty dict if the table cannot be found or parsed.
+    """
+    counts: dict[str, int] = {}
+
+    try:
+        content = log_path.read_text(errors="ignore")
+    except OSError:
+        return counts
+
+    lines = content.splitlines()
+    in_job_stats = False
+    past_header = False
+
+    for line in lines:
+        # Look for the start of job stats table
+        if line.strip() == "Job stats:":
+            in_job_stats = True
+            continue
+
+        if not in_job_stats:
+            continue
+
+        stripped = line.strip()
+
+        # Skip empty lines
+        if not stripped:
+            # Empty line after data means end of table
+            if past_header and counts:
+                break
+            continue
+
+        # Skip header line (job count)
+        if stripped.startswith("job") and "count" in stripped:
+            continue
+
+        # Skip separator line (dashes)
+        if stripped.startswith("-"):
+            past_header = True
+            continue
+
+        # Parse data row: "rule_name    count"
+        if past_header:
+            parts = stripped.split()
+            if len(parts) >= 2:
+                rule_name = parts[0]
+                # Skip 'total' row
+                if rule_name != "total":
+                    try:
+                        count = int(parts[-1])
+                        counts[rule_name] = count
+                    except ValueError:
+                        # Skip if count isn't a valid integer
+                        pass
+
+    return counts
+
+
 class IncrementalLogReader:
     """Streaming reader for Snakemake log files with position tracking.
 
@@ -382,6 +452,15 @@ class IncrementalLogReader:
         # Capture wildcards within rule block
         if match := WILDCARDS_PATTERN.match(line):
             self._current_wildcards = _parse_wildcards(match.group(1))
+            # Update already-stored job if wildcards comes after jobid
+            if self._current_jobid and self._current_jobid in self._started_jobs:
+                rule, ts, _, threads = self._started_jobs[self._current_jobid]
+                self._started_jobs[self._current_jobid] = (
+                    rule,
+                    ts,
+                    self._current_wildcards,
+                    threads,
+                )
             return
 
         # Capture threads within rule block
