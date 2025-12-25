@@ -1,5 +1,6 @@
 """Time estimation for Snakemake workflow progress."""
 
+import functools
 import math
 from collections.abc import Callable
 from pathlib import Path
@@ -20,9 +21,13 @@ if TYPE_CHECKING:
     from snakesee.state.rule_registry import RuleRegistry
 
 
+@functools.lru_cache(maxsize=256)
 def _levenshtein_distance(s1: str, s2: str) -> int:
     """
     Calculate the Levenshtein distance between two strings.
+
+    Results are cached for efficiency when comparing the same rule names
+    multiple times during estimation.
 
     Args:
         s1: First string.
@@ -103,6 +108,10 @@ class TimeEstimator:
 
         # Centralized registry - create internal one if not provided
         self._rule_registry: RuleRegistry = rule_registry or RuleRegistry(config=self.config)
+
+        # Cache for global_mean_duration (invalidated when sample count changes)
+        self._global_mean_cache: float | None = None
+        self._global_mean_cache_sample_count: int = 0
 
         self.current_rules: set[str] | None = None  # Rules in current workflow (for filtering)
         self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
@@ -455,13 +464,27 @@ class TimeEstimator:
         Get the global average duration across all known rules.
 
         Used as a fallback when a specific rule has no historical data.
+        Result is cached and invalidated when sample count changes.
 
         Returns:
             Average duration in seconds, or config.default_global_mean if no data.
         """
+        # Check cache validity using sample count as version indicator
+        current_sample_count = self._rule_registry.total_sample_count()
+        if (
+            self._global_mean_cache is not None
+            and current_sample_count == self._global_mean_cache_sample_count
+        ):
+            return self._global_mean_cache
+
+        # Recalculate and cache
         effective_stats = self.rule_stats
         all_durations = [d for stats in effective_stats.values() for d in stats.durations]
-        return mean(all_durations) if all_durations else self.config.default_global_mean
+        self._global_mean_cache = (
+            mean(all_durations) if all_durations else self.config.default_global_mean
+        )
+        self._global_mean_cache_sample_count = current_sample_count
+        return self._global_mean_cache
 
     def estimate_remaining(
         self,

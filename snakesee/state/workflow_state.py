@@ -8,12 +8,13 @@ rule statistics, paths, and configuration.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from snakesee.models import WorkflowProgress
+    from snakesee.models import WorkflowStatus
     from snakesee.state.clock import Clock
     from snakesee.state.config import EstimationConfig
     from snakesee.state.job_registry import JobRegistry
@@ -21,15 +22,11 @@ if TYPE_CHECKING:
     from snakesee.state.rule_registry import RuleRegistry
 
 
-class WorkflowStatus(Enum):
-    """Status of the overall workflow."""
+def _default_status() -> WorkflowStatus:
+    """Return default status (deferred import to avoid circular import)."""
+    from snakesee.models import WorkflowStatus
 
-    UNKNOWN = "unknown"
-    NOT_STARTED = "not_started"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    STALE = "stale"  # No activity for extended period
+    return WorkflowStatus.UNKNOWN
 
 
 @dataclass
@@ -57,7 +54,7 @@ class WorkflowState:
     rules: RuleRegistry
     clock: Clock
     config: EstimationConfig
-    status: WorkflowStatus = WorkflowStatus.UNKNOWN
+    status: WorkflowStatus = field(default_factory=_default_status)
     total_jobs: int | None = None
     start_time: float | None = None
     current_log: Path | None = None
@@ -100,6 +97,8 @@ class WorkflowState:
 
     def update_status(self) -> None:
         """Update workflow status based on current state."""
+        from snakesee.models import WorkflowStatus
+
         if self.total_jobs is None:
             self.status = WorkflowStatus.UNKNOWN
         elif self.running_count > 0:
@@ -135,21 +134,10 @@ class WorkflowState:
             WorkflowProgress snapshot of current state.
         """
         from snakesee.models import WorkflowProgress
-        from snakesee.models import WorkflowStatus as ModelWorkflowStatus
-
-        # Map our status to models.WorkflowStatus
-        status_map = {
-            WorkflowStatus.UNKNOWN: ModelWorkflowStatus.UNKNOWN,
-            WorkflowStatus.NOT_STARTED: ModelWorkflowStatus.UNKNOWN,
-            WorkflowStatus.RUNNING: ModelWorkflowStatus.RUNNING,
-            WorkflowStatus.COMPLETED: ModelWorkflowStatus.COMPLETED,
-            WorkflowStatus.FAILED: ModelWorkflowStatus.FAILED,
-            WorkflowStatus.STALE: ModelWorkflowStatus.INCOMPLETE,
-        }
 
         return WorkflowProgress(
             workflow_dir=self.paths.workflow_dir,
-            status=status_map.get(self.status, ModelWorkflowStatus.UNKNOWN),
+            status=self.status,
             total_jobs=self.total_jobs or 0,
             completed_jobs=self.completed_count,
             running_jobs=[job.to_job_info() for job in self.jobs.running()],
@@ -161,6 +149,8 @@ class WorkflowState:
 
     def clear(self) -> None:
         """Clear all state."""
+        from snakesee.models import WorkflowStatus
+
         self.jobs.clear()
         self.rules.clear()
         self.status = WorkflowStatus.UNKNOWN

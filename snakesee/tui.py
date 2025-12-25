@@ -1,5 +1,6 @@
 """Rich TUI for Snakemake workflow monitoring."""
 
+import logging
 import sys
 import time
 from collections.abc import Callable
@@ -41,6 +42,8 @@ from snakesee.state.workflow_state import WorkflowState
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
+
+logger = logging.getLogger(__name__)
 
 # Refresh rate bounds
 MIN_REFRESH_RATE = 0.5
@@ -195,6 +198,10 @@ class WorkflowMonitorTUI:
         self._cached_log_lines: list[str] = []
         self._cached_log_mtime: float = 0
 
+        # Tool progress cache (to avoid parsing job logs on every refresh)
+        self._tool_progress_cache: dict[str, tuple[float, ToolProgress | None]] = {}
+        self._tool_progress_cache_ttl: float = 5.0  # seconds
+
         # Event reader for real-time events from logger plugin
         self._event_reader: EventReader | None = None
         self._events_enabled: bool = True
@@ -296,8 +303,9 @@ class WorkflowMonitorTUI:
 
                     profile = load_profile(self.profile_path)
                     self._estimator.rule_stats = profile.to_rule_stats()
-                except (OSError, ValueError):
-                    pass  # Fall back to metadata only
+                except (OSError, ValueError) as e:
+                    # Log failure and fall back to metadata only
+                    logger.debug("Failed to load profile %s: %s", self.profile_path, e)
                 progress.update(task, completed=1)
 
             # Load metadata (single-pass for efficiency)
@@ -1367,6 +1375,9 @@ class WorkflowMonitorTUI:
         """
         Get tool-specific progress for a running job.
 
+        Results are cached for the TTL duration to avoid parsing job logs
+        on every refresh cycle.
+
         Args:
             job: The running job to check.
 
@@ -1376,12 +1387,26 @@ class WorkflowMonitorTUI:
         # Use job.log_file (parsed from snakemake log, keyed by job_id)
         if job.log_file is None:
             return None
+
+        # Use job_id as cache key (unique per job run)
+        cache_key = job.job_id if job.job_id else str(job.log_file)
+        now = time.time()
+
+        # Check cache validity
+        if cache_key in self._tool_progress_cache:
+            cached_time, cached_progress = self._tool_progress_cache[cache_key]
+            if now - cached_time < self._tool_progress_cache_ttl:
+                return cached_progress
+
         log_path = self.workflow_dir / job.log_file
         if not log_path.exists():
+            self._tool_progress_cache[cache_key] = (now, None)
             return None
 
-        # Try to parse progress from the log
-        return parse_tool_progress(job.rule, log_path)
+        # Parse and cache the result
+        progress = parse_tool_progress(job.rule, log_path)
+        self._tool_progress_cache[cache_key] = (now, progress)
+        return progress
 
     def _build_running_job_data(
         self, jobs: list[JobInfo]
@@ -1716,6 +1741,8 @@ class WorkflowMonitorTUI:
         """
         Read the last N lines of a log file efficiently.
 
+        For large files, seeks near the end instead of reading the entire file.
+
         Args:
             log_path: Path to the log file.
             max_lines: Maximum number of lines to read.
@@ -1723,9 +1750,14 @@ class WorkflowMonitorTUI:
         Returns:
             List of lines (most recent at end).
         """
+        # Average bytes per line estimate for seeking
+        BYTES_PER_LINE_ESTIMATE = 120
+
         try:
             # Check if cache is still valid
-            mtime = log_path.stat().st_mtime
+            stat = log_path.stat()
+            mtime = stat.st_mtime
+            file_size = stat.st_size
             if (
                 self._cached_log_path == log_path
                 and self._cached_log_mtime == mtime
@@ -1733,9 +1765,23 @@ class WorkflowMonitorTUI:
             ):
                 return self._cached_log_lines
 
-            # Read file and take last N lines
-            content = log_path.read_text(errors="ignore")
-            lines = content.splitlines()
+            # For small files, just read the whole thing
+            if file_size < BYTES_PER_LINE_ESTIMATE * max_lines * 2:
+                content = log_path.read_text(errors="ignore")
+                lines = content.splitlines()
+            else:
+                # For large files, seek near the end to avoid reading everything
+                # Read extra bytes to ensure we get enough lines
+                seek_bytes = BYTES_PER_LINE_ESTIMATE * max_lines * 2
+                with open(log_path, "rb") as f:
+                    # Seek to near the end
+                    f.seek(max(0, file_size - seek_bytes))
+                    # Read to end
+                    content = f.read().decode("utf-8", errors="ignore")
+                    lines = content.splitlines()
+                    # Skip first line (likely partial from seek)
+                    if lines and file_size > seek_bytes:
+                        lines = lines[1:]
 
             # Take last max_lines
             result = lines[-max_lines:] if len(lines) > max_lines else lines

@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from snakesee.models import WorkflowStatus
 from snakesee.state.clock import FrozenClock
 from snakesee.state.config import EstimationConfig
 from snakesee.state.job_registry import Job
 from snakesee.state.job_registry import JobStatus
 from snakesee.state.workflow_state import WorkflowState
-from snakesee.state.workflow_state import WorkflowStatus
 
 
 class TestWorkflowStateCreation:

@@ -6,10 +6,13 @@ accurate and timely job status information than log parsing.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Default event file name (matches plugin default)
 EVENT_FILE_NAME = ".snakesee_events.jsonl"
@@ -145,13 +148,18 @@ class EventReader:
                     if line:
                         try:
                             events.append(SnakeseeEvent.from_json(line))
-                        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
-                            # Skip malformed lines
+                        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                            # Skip malformed lines but log for debugging
+                            logger.debug(
+                                "Skipping malformed event line: %s... (%s)",
+                                line[:50],
+                                e,
+                            )
                             continue
                 self._offset = f.tell()
-        except OSError:
-            # File access error - return empty list
-            pass
+        except OSError as e:
+            # File access error - log and return empty list
+            logger.debug("Error reading event file %s: %s", self.event_file, e)
 
         return events
 

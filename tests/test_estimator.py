@@ -464,3 +464,31 @@ class TestRuleRegistryIntegration:
         # Can load data into it
         estimator._rule_registry.record_completion("align", 100.0, 1000.0)
         assert "align" in estimator.rule_stats
+
+    def test_global_mean_duration_caching(self) -> None:
+        """Test that global_mean_duration uses caching for efficiency."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        registry.record_completion("sort", 50.0, 2000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # First call computes and caches
+        mean1 = estimator.global_mean_duration()
+        assert mean1 == pytest.approx(75.0)
+
+        # Second call should return cached value
+        mean2 = estimator.global_mean_duration()
+        assert mean2 == pytest.approx(75.0)
+
+        # Cache should be valid
+        assert estimator._global_mean_cache == pytest.approx(75.0)
+        assert estimator._global_mean_cache_sample_count == 2
+
+        # Adding new data should invalidate cache
+        registry.record_completion("call", 125.0, 3000.0)
+        mean3 = estimator.global_mean_duration()
+        assert mean3 == pytest.approx(91.67, rel=0.01)  # (100+50+125)/3
+        assert estimator._global_mean_cache_sample_count == 3

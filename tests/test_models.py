@@ -77,6 +77,19 @@ class TestJobInfo:
         job_no_threads = JobInfo(rule="test")
         assert job_no_threads.threads is None
 
+    def test_duration_negative_returns_zero(self) -> None:
+        """Test that negative durations (clock skew) return 0.0 instead of negative."""
+        # This can happen with clock skew on distributed systems
+        job = JobInfo(rule="test", start_time=200.0, end_time=100.0)  # end before start
+        assert job.duration == 0.0
+
+    def test_elapsed_negative_returns_zero(self) -> None:
+        """Test that negative elapsed time (clock skew) returns 0.0."""
+        # Set start_time in the future
+        future_start = time.time() + 1000
+        job = JobInfo(rule="test", start_time=future_start)
+        assert job.elapsed == 0.0
+
 
 class TestRuleTimingStats:
     """Tests for the RuleTimingStats dataclass."""
