@@ -24,13 +24,20 @@ from __future__ import annotations
 import atexit
 import fcntl
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+# Logger for this module - debug level by default to avoid noise
+logger = logging.getLogger(__name__)
+
 # Event file name (must match snakesee/events.py EVENT_FILE_NAME)
 EVENT_FILE_NAME = ".snakesee_events.jsonl"
+
+# Compact JSON separators (no spaces after : or ,)
+JSON_SEPARATORS: tuple[str, str] = (",", ":")
 
 # Global state for tracking job start times and metadata
 _job_start_times: dict[int, float] = {}
@@ -47,8 +54,8 @@ def _close_event_file() -> None:
     if _event_file is not None:
         try:
             _event_file.close()
-        except Exception:
-            pass  # Ignore errors on close
+        except OSError as e:
+            logger.debug("Failed to close event file: %s", e)
         _event_file = None
 
 
@@ -70,7 +77,7 @@ def _write_event(event_data: dict[str, Any]) -> None:
     f = _get_event_file()
     # Remove None values to reduce file size
     event_data = {k: v for k, v in event_data.items() if v is not None}
-    line = json.dumps(event_data, separators=(",", ":"), default=str) + "\n"
+    line = json.dumps(event_data, separators=JSON_SEPARATORS, default=str) + "\n"
 
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)

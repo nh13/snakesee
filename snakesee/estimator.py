@@ -276,7 +276,7 @@ class TimeEstimator:
         return []
 
     def _find_similar_rule(
-        self, rule: str, max_distance: int = 3
+        self, rule: str, max_distance: int | None = None
     ) -> tuple[str, RuleTimingStats] | None:
         """
         Find the most similar known rule using code hash and Levenshtein distance.
@@ -286,12 +286,16 @@ class TimeEstimator:
 
         Args:
             rule: The unknown rule name to match.
-            max_distance: Maximum edit distance to consider a match (default 3).
+            max_distance: Maximum edit distance to consider a match.
+                          Defaults to config.fuzzy_match_max_distance.
 
         Returns:
             Tuple of (matched_rule_name, stats) if a similar rule is found,
             None otherwise.
         """
+        if max_distance is None:
+            max_distance = self.config.fuzzy_match_max_distance
+
         effective_stats = self.rule_stats
         if not effective_stats:
             return None
@@ -583,7 +587,10 @@ class TimeEstimator:
         estimate = avg_time_per_step * remaining_steps
 
         # Confidence grows with more completed jobs
-        confidence = min(0.7, progress.completed_jobs / 20)
+        confidence = min(
+            self.config.simple_estimate_confidence_cap,
+            progress.completed_jobs / self.config.simple_estimate_jobs_divisor,
+        )
 
         # Wider bounds for fewer samples
         uncertainty = max(0.3, 1.0 - (progress.completed_jobs / progress.total_jobs))
