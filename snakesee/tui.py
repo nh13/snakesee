@@ -608,9 +608,6 @@ class WorkflowMonitorTUI:
         Returns:
             Updated WorkflowProgress with event data applied.
         """
-        if not events:
-            return progress
-
         # Track updates from events
         new_total = progress.total_jobs
         new_completed = progress.completed_jobs
@@ -634,6 +631,24 @@ class WorkflowMonitorTUI:
                 self._handle_job_finished_event(event, new_completions)
             elif event.event_type == EventType.JOB_ERROR:
                 new_failed = self._handle_job_error_event(event, new_failed_list)
+
+        # Apply stored threads/wildcards to running jobs that may have lost them
+        # (log-parsed jobs may not have threads if the line order varies)
+        for i, job in enumerate(new_running_jobs):
+            if job.job_id and (job.threads is None or job.wildcards is None):
+                stored_threads = self._job_threads.get(job.job_id)
+                if job.threads is None and stored_threads is not None:
+                    new_running_jobs[i] = JobInfo(
+                        rule=job.rule,
+                        job_id=job.job_id,
+                        start_time=job.start_time,
+                        end_time=job.end_time,
+                        output_file=job.output_file,
+                        wildcards=job.wildcards,
+                        input_size=job.input_size,
+                        threads=stored_threads,
+                        log_file=job.log_file,
+                    )
 
         # Return updated progress
         return WorkflowProgress(
