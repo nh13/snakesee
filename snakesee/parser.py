@@ -120,15 +120,16 @@ def find_latest_log(snakemake_dir: Path) -> Path | None:
 
     Returns:
         Path to the most recent log file, or None if no logs exist.
+
+    Note:
+        This function is preserved for backward compatibility.
+        New code should use WorkflowPaths.find_latest_log() directly.
     """
-    log_dir = snakemake_dir / "log"
-    if not log_dir.exists():
-        return None
-    logs = [p for p in log_dir.glob("*.snakemake.log") if p.exists()]
-    if not logs:
-        return None
-    logs.sort(key=_safe_mtime)
-    return logs[-1]
+    from snakesee.state.paths import WorkflowPaths
+
+    # snakemake_dir is workflow_dir/.snakemake, so parent is workflow_dir
+    paths = WorkflowPaths(snakemake_dir.parent)
+    return paths.find_latest_log()
 
 
 def find_all_logs(snakemake_dir: Path) -> list[Path]:
@@ -140,13 +141,16 @@ def find_all_logs(snakemake_dir: Path) -> list[Path]:
 
     Returns:
         List of paths to all log files, sorted oldest to newest.
+
+    Note:
+        This function is preserved for backward compatibility.
+        New code should use WorkflowPaths.find_all_logs() directly.
     """
-    log_dir = snakemake_dir / "log"
-    if not log_dir.exists():
-        return []
-    logs = [p for p in log_dir.glob("*.snakemake.log") if p.exists()]
-    logs.sort(key=_safe_mtime)
-    return logs
+    from snakesee.state.paths import WorkflowPaths
+
+    # snakemake_dir is workflow_dir/.snakemake, so parent is workflow_dir
+    paths = WorkflowPaths(snakemake_dir.parent)
+    return paths.find_all_logs()
 
 
 def parse_job_stats_from_log(log_path: Path) -> set[str]:
@@ -1288,7 +1292,7 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
     Returns:
         True if workflow appears to be actively running, False otherwise.
     """
-    import time
+    from snakesee.state.clock import get_clock
 
     locks_dir = snakemake_dir / "locks"
     if not locks_dir.exists():
@@ -1321,7 +1325,7 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
 
     try:
         log_mtime = log_file.stat().st_mtime
-        age = time.time() - log_mtime
+        age = get_clock().now() - log_mtime
         # If log hasn't been modified recently, workflow is likely dead
         return age < stale_threshold
     except OSError:

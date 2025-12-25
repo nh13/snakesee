@@ -1,6 +1,5 @@
 """Data models for workflow monitoring."""
 
-import time
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -9,6 +8,8 @@ from statistics import mean
 from statistics import stdev
 from typing import ClassVar
 from typing import Literal
+
+from snakesee.state.clock import get_clock
 
 # Weighting strategy type for timing estimates
 WeightingStrategy = Literal["time", "index"]
@@ -61,7 +62,7 @@ class JobInfo:
         """
         if self.start_time is None:
             return None
-        end = self.end_time or time.time()
+        end = self.end_time or get_clock().now()
         return end - self.start_time
 
     @property
@@ -217,7 +218,7 @@ class RuleTimingStats:
         Returns:
             Time-weighted mean duration.
         """
-        now = time.time()
+        now = get_clock().now()
         half_life_seconds = half_life_days * 86400  # Convert days to seconds
 
         weights: list[float] = []
@@ -400,7 +401,7 @@ class RuleTimingStats:
         if half_life_days is None:
             half_life_days = self.DEFAULT_HALF_LIFE_DAYS
 
-        now = time.time()
+        now = get_clock().now()
         half_life_seconds = half_life_days * 86400
 
         # Calculate average weight of data points
@@ -423,7 +424,7 @@ class RuleTimingStats:
         if not self.timestamps or not self.durations:
             return 0.5  # Not enough data
 
-        now = time.time()
+        now = get_clock().now()
         cutoff = now - (days * 86400)
 
         # Get recent durations
@@ -699,7 +700,7 @@ class WorkflowProgress:
         """
         if self.start_time is None:
             return None
-        return time.time() - self.start_time
+        return get_clock().now() - self.start_time
 
     @property
     def pending_jobs(self) -> int:
@@ -718,35 +719,32 @@ def _format_duration(seconds: float) -> str:
     """
     Format seconds as human-readable duration.
 
+    Internal helper that delegates to the formatting module.
+
     Args:
         seconds: Duration in seconds.
 
     Returns:
         Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
     """
-    if seconds == float("inf"):
-        return "unknown"
-    if seconds < 0:
-        return "0s"
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes}m {secs}s" if secs > 0 else f"{minutes}m"
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+    from snakesee.formatting import format_duration as _fmt_duration
+
+    return _fmt_duration(seconds)
 
 
 def format_duration(seconds: float) -> str:
     """
     Format seconds as human-readable duration.
 
+    This is a public API function preserved for backward compatibility.
+    New code should use snakesee.formatting.format_duration directly.
+
     Args:
         seconds: Duration in seconds.
 
     Returns:
         Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
     """
-    return _format_duration(seconds)
+    from snakesee.formatting import format_duration as _fmt_duration
+
+    return _fmt_duration(seconds)

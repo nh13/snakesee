@@ -4,6 +4,7 @@ import math
 from collections.abc import Callable
 from pathlib import Path
 from statistics import mean
+from typing import TYPE_CHECKING
 
 from snakesee.models import RuleTimingStats
 from snakesee.models import ThreadTimingStats
@@ -12,6 +13,11 @@ from snakesee.models import WeightingStrategy
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.parser import parse_metadata_files_full
+from snakesee.state.config import DEFAULT_CONFIG
+from snakesee.state.config import EstimationConfig
+
+if TYPE_CHECKING:
+    from snakesee.state.rule_registry import RuleRegistry
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
@@ -59,18 +65,18 @@ class TimeEstimator:
         thread_stats: Dictionary mapping rule names to thread-conditioned timing stats.
         wildcard_stats: Nested dict of wildcard-conditioned timing stats.
         use_wildcard_conditioning: Whether to use wildcard-specific estimates.
-        weighting_strategy: Strategy for weighting historical data ("time" or "index").
-        half_life_days: Half-life in days for time-based weighting.
-        half_life_logs: Half-life in log count for index-based weighting.
+        config: Centralized estimation configuration.
     """
 
     def __init__(
         self,
         rule_stats: dict[str, RuleTimingStats] | None = None,
         use_wildcard_conditioning: bool = False,
-        half_life_days: float = 7.0,
-        weighting_strategy: WeightingStrategy = "index",
-        half_life_logs: int = 10,
+        half_life_days: float | None = None,
+        weighting_strategy: WeightingStrategy | None = None,
+        half_life_logs: int | None = None,
+        config: EstimationConfig | None = None,
+        rule_registry: "RuleRegistry | None" = None,
     ) -> None:
         """
         Initialize the estimator.
@@ -82,13 +88,26 @@ class TimeEstimator:
             half_life_days: Half-life in days for time-based weighting.
                            After this many days, a run's weight is halved.
                            Only used when weighting_strategy="time".
+                           Deprecated: Use config parameter instead.
             weighting_strategy: Strategy for weighting historical data.
                               "time" - decay based on wall-clock time (good for stable pipelines)
                               "index" - decay based on run count (good for active development)
+                              Deprecated: Use config parameter instead.
             half_life_logs: Half-life in log count for index-based weighting.
                            After this many runs, a run's weight is halved.
                            Only used when weighting_strategy="index".
+                           Deprecated: Use config parameter instead.
+            config: Centralized estimation configuration. If not provided, uses
+                   DEFAULT_CONFIG with any explicit parameters overriding it.
+            rule_registry: Optional RuleRegistry for centralized statistics.
+                          When provided, property accessors will delegate to the registry.
         """
+        # Use provided config or default
+        self.config = config if config is not None else DEFAULT_CONFIG
+
+        # Centralized registry (Phase 11) - when provided, property accessors use it
+        self._rule_registry: "RuleRegistry | None" = rule_registry
+
         self.rule_stats: dict[str, RuleTimingStats] = rule_stats or {}
         self.thread_stats: dict[str, ThreadTimingStats] = {}
         self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
@@ -96,9 +115,50 @@ class TimeEstimator:
         self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
         self.expected_job_counts: dict[str, int] | None = None  # Expected counts from Job stats
         self.use_wildcard_conditioning = use_wildcard_conditioning
-        self.weighting_strategy = weighting_strategy
-        self.half_life_days = half_life_days
-        self.half_life_logs = half_life_logs
+
+        # Use explicit params if provided, otherwise use config values
+        self.weighting_strategy: WeightingStrategy = (
+            weighting_strategy if weighting_strategy is not None else self.config.weighting_strategy
+        )
+        self.half_life_days = (
+            half_life_days if half_life_days is not None else self.config.half_life_days
+        )
+        self.half_life_logs = (
+            half_life_logs if half_life_logs is not None else self.config.half_life_logs
+        )
+
+    @property
+    def _effective_rule_stats(self) -> dict[str, RuleTimingStats]:
+        """Get rule stats from registry or fallback to direct dict.
+
+        When a RuleRegistry is provided, delegates to it for centralized stats.
+        Otherwise, uses the local rule_stats dict for backward compatibility.
+        """
+        if self._rule_registry is not None:
+            return self._rule_registry.to_rule_stats_dict()
+        return self.rule_stats
+
+    @property
+    def _effective_thread_stats(self) -> dict[str, ThreadTimingStats]:
+        """Get thread stats from registry or fallback to direct dict.
+
+        When a RuleRegistry is provided, delegates to it for centralized stats.
+        Otherwise, uses the local thread_stats dict for backward compatibility.
+        """
+        if self._rule_registry is not None:
+            return self._rule_registry.to_thread_stats_dict()
+        return self.thread_stats
+
+    @property
+    def _effective_wildcard_stats(self) -> dict[str, dict[str, WildcardTimingStats]]:
+        """Get wildcard stats from registry or fallback to direct dict.
+
+        When a RuleRegistry is provided, delegates to it for centralized stats.
+        Otherwise, uses the local wildcard_stats dict for backward compatibility.
+        """
+        if self._rule_registry is not None:
+            return self._rule_registry.to_wildcard_stats_dict()
+        return self.wildcard_stats
 
     def load_from_metadata(
         self,
@@ -335,10 +395,11 @@ class TimeEstimator:
             List of other rule names that share the same code hash.
             Empty list if no code hash data or no matches.
         """
+        effective_stats = self._effective_rule_stats
         for _code_hash, rules in self.code_hash_to_rules.items():
             if rule in rules:
                 # Return other rules in the same hash group
-                return [r for r in rules if r != rule and r in self.rule_stats]
+                return [r for r in rules if r != rule and r in effective_stats]
         return []
 
     def _find_similar_rule(
@@ -358,7 +419,8 @@ class TimeEstimator:
             Tuple of (matched_rule_name, stats) if a similar rule is found,
             None otherwise.
         """
-        if not self.rule_stats:
+        effective_stats = self._effective_rule_stats
+        if not effective_stats:
             return None
 
         # First, try code hash matching (exact code match = renamed rule)
@@ -366,20 +428,20 @@ class TimeEstimator:
         if hash_matches:
             # Use the first match (could merge stats in future)
             matched_rule = hash_matches[0]
-            return matched_rule, self.rule_stats[matched_rule]
+            return matched_rule, effective_stats[matched_rule]
 
         # Fall back to Levenshtein distance
         best_match: str | None = None
         best_distance = max_distance + 1
 
-        for known_rule in self.rule_stats:
+        for known_rule in effective_stats:
             distance = _levenshtein_distance(rule, known_rule)
             if distance < best_distance:
                 best_distance = distance
                 best_match = known_rule
 
         if best_match is not None and best_distance <= max_distance:
-            return best_match, self.rule_stats[best_match]
+            return best_match, effective_stats[best_match]
 
         return None
 
@@ -436,29 +498,32 @@ class TimeEstimator:
         global_mean = self.global_mean_duration()
 
         # Try thread-specific stats first (highest priority for running job ETA)
-        if threads is not None and rule in self.thread_stats:
-            thread_stats, matched_threads = self.thread_stats[rule].get_best_match(threads)
+        effective_thread_stats = self._effective_thread_stats
+        if threads is not None and rule in effective_thread_stats:
+            thread_stats, matched_threads = effective_thread_stats[rule].get_best_match(threads)
             if thread_stats is not None:
                 thread_mean = self._get_weighted_mean(thread_stats)
+                var_mult = self.config.variance
                 # Tighter variance for exact thread match, wider for aggregate fallback
                 if matched_threads is not None:
                     thread_var = (
                         thread_stats.std_dev**2
                         if thread_stats.count > 1
-                        else (thread_mean * 0.2) ** 2
+                        else (thread_mean * var_mult.exact_thread_match) ** 2
                     )
                 else:
                     # Aggregate fallback - use standard variance
                     thread_var = (
                         thread_stats.std_dev**2
                         if thread_stats.count > 1
-                        else (thread_mean * 0.3) ** 2
+                        else (thread_mean * var_mult.aggregate_fallback) ** 2
                     )
                 return thread_mean, thread_var
 
         # Try wildcard-specific stats if enabled
-        if self.use_wildcard_conditioning and wildcards and rule in self.wildcard_stats:
-            rule_wc_stats = self.wildcard_stats[rule]
+        effective_wildcard_stats = self._effective_wildcard_stats
+        if self.use_wildcard_conditioning and wildcards and rule in effective_wildcard_stats:
+            rule_wc_stats = effective_wildcard_stats[rule]
 
             # Find the most predictive wildcard key for this rule
             best_key = WildcardTimingStats.get_most_predictive_key(rule_wc_stats)
@@ -474,29 +539,35 @@ class TimeEstimator:
                     rule_var = (
                         value_stats.std_dev**2
                         if value_stats.count > 1
-                        else (rule_mean * 0.2) ** 2  # Tighter variance for wildcard match
+                        else (rule_mean * self.config.variance.exact_wildcard_match) ** 2
                     )
                     return rule_mean, rule_var
 
         # Fall back to rule-level stats
-        if rule in self.rule_stats:
-            stats = self.rule_stats[rule]
+        effective_stats = self._effective_rule_stats
+        if rule in effective_stats:
+            stats = effective_stats[rule]
 
             # Try size-scaled estimate if input size is available
             if input_size is not None and input_size > 0:
                 scaled_est, confidence = self._get_size_scaled_estimate(stats, input_size)
-                if confidence > 0.3:  # Only use if we have reasonable confidence
+                size_conf_threshold = self.config.confidence_thresholds.size_scaling_min
+                if confidence > size_conf_threshold:
                     # Reduce variance for size-scaled estimates
                     rule_var = (
                         stats.std_dev**2 * (1 - confidence * 0.5)
                         if stats.count > 1
-                        else (scaled_est * 0.25) ** 2
+                        else (scaled_est * self.config.variance.size_scaled) ** 2
                     )
                     return scaled_est, rule_var
 
             # Standard rule-level estimate
             rule_mean = self._get_weighted_mean(stats)
-            rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.3) ** 2
+            rule_var = (
+                stats.std_dev**2
+                if stats.count > 1
+                else (rule_mean * self.config.variance.rule_fallback) ** 2
+            )
             return rule_mean, rule_var
 
         # Try fuzzy matching for renamed/similar rules before falling back to global mean
@@ -505,11 +576,15 @@ class TimeEstimator:
             matched_rule, stats = similar
             rule_mean = self._get_weighted_mean(stats)
             # Wider variance for fuzzy matches due to uncertainty
-            rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.4) ** 2
+            rule_var = (
+                stats.std_dev**2
+                if stats.count > 1
+                else (rule_mean * self.config.variance.fuzzy_match) ** 2
+            )
             return rule_mean, rule_var
 
         # No data available, use global mean
-        return global_mean, (global_mean * 0.5) ** 2
+        return global_mean, (global_mean * self.config.variance.global_fallback) ** 2
 
     def global_mean_duration(self) -> float:
         """
@@ -518,10 +593,11 @@ class TimeEstimator:
         Used as a fallback when a specific rule has no historical data.
 
         Returns:
-            Average duration in seconds, or 60.0 if no data available.
+            Average duration in seconds, or config.default_global_mean if no data.
         """
-        all_durations = [d for stats in self.rule_stats.values() for d in stats.durations]
-        return mean(all_durations) if all_durations else 60.0
+        effective_stats = self._effective_rule_stats
+        all_durations = [d for stats in effective_stats.values() for d in stats.durations]
+        return mean(all_durations) if all_durations else self.config.default_global_mean
 
     def estimate_remaining(
         self,
@@ -570,7 +646,7 @@ class TimeEstimator:
             return self._estimate_no_progress(progress)
 
         # Try weighted estimation with historical data
-        if self.rule_stats:
+        if self._effective_rule_stats:
             return self._estimate_weighted(progress, running_elapsed)
 
         # Fall back to simple estimation
@@ -595,9 +671,9 @@ class TimeEstimator:
 
         return TimeEstimate(
             seconds_remaining=estimate,
-            lower_bound=estimate * 0.2,
-            upper_bound=estimate * 3.0,
-            confidence=0.05,
+            lower_bound=estimate * self.config.bootstrap_lower_multiplier,
+            upper_bound=estimate * self.config.bootstrap_upper_multiplier,
+            confidence=self.config.confidence_thresholds.bootstrap_confidence,
             method="bootstrap",
         )
 
@@ -662,8 +738,9 @@ class TimeEstimator:
 
         # Only augment with historical counts if we don't have expected_job_counts
         # (to avoid skewing proportional inference with historical execution counts)
+        effective_stats = self._effective_rule_stats
         if not self.expected_job_counts:
-            for rule, stats in self.rule_stats.items():
+            for rule, stats in effective_stats.items():
                 if rule not in rule_completed:
                     rule_completed[rule] = stats.count
 
@@ -680,14 +757,18 @@ class TimeEstimator:
         global_mean = self.global_mean_duration()
 
         for rule, count in pending_rules.items():
-            if rule in self.rule_stats:
-                stats = self.rule_stats[rule]
+            if rule in effective_stats:
+                stats = effective_stats[rule]
                 rule_mean = self._get_weighted_mean(stats)
-                rule_var = stats.std_dev**2 if stats.count > 1 else (rule_mean * 0.3) ** 2
+                rule_var = (
+                    stats.std_dev**2
+                    if stats.count > 1
+                    else (rule_mean * self.config.variance.rule_fallback) ** 2
+                )
             else:
                 # Unknown rule: use global mean with higher uncertainty
                 rule_mean = global_mean
-                rule_var = (global_mean * 0.5) ** 2
+                rule_var = (global_mean * self.config.variance.global_fallback) ** 2
 
             total_expected += count * rule_mean
             total_variance += count * rule_var
@@ -729,20 +810,22 @@ class TimeEstimator:
         effective_time = total_expected / parallelism
 
         # Calculate confidence bounds
-        std_dev = math.sqrt(total_variance) if total_variance > 0 else effective_time * 0.3
+        fallback_std = effective_time * self.config.variance.rule_fallback
+        std_dev = math.sqrt(total_variance) if total_variance > 0 else fallback_std
         lower = max(0, effective_time - 2 * std_dev)
         upper = effective_time + 2 * std_dev
 
         # Confidence based on data quality, recency, and consistency
-        data_coverage = len(rule_completed) / max(1, len(self.rule_stats))
-        sample_confidence = min(1.0, sum(s.count for s in self.rule_stats.values()) / 10)
+        data_coverage = len(rule_completed) / max(1, len(effective_stats))
+        total_samples = sum(s.count for s in effective_stats.values())
+        sample_confidence = min(1.0, total_samples / self.config.min_samples_for_confidence)
 
         # Calculate average recency and consistency across rules with data
         recency_scores: list[float] = []
         consistency_scores: list[float] = []
         for rule in rule_completed:
-            if rule in self.rule_stats:
-                stats = self.rule_stats[rule]
+            if rule in effective_stats:
+                stats = effective_stats[rule]
                 recency_scores.append(self._get_recency_factor(stats))
                 consistency_scores.append(stats.recent_consistency())
 
@@ -751,14 +834,15 @@ class TimeEstimator:
             sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.5
         )
 
-        # Combine factors: 40% sample size, 30% recency, 20% consistency, 10% coverage
+        # Combine factors using configured weights
+        weights = self.config.confidence_weights
         base_confidence = (
-            0.4 * sample_confidence
-            + 0.3 * avg_recency
-            + 0.2 * avg_consistency
-            + 0.1 * data_coverage
+            weights.sample_size * sample_confidence
+            + weights.recency * avg_recency
+            + weights.consistency * avg_consistency
+            + weights.data_coverage * data_coverage
         )
-        confidence = min(0.9, base_confidence)
+        confidence = min(self.config.confidence_thresholds.max_confidence, base_confidence)
 
         return TimeEstimate(
             seconds_remaining=effective_time,
