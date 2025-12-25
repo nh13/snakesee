@@ -31,7 +31,6 @@ from snakesee.state.paths import WorkflowPaths
 from snakesee.state.rule_registry import RuleRegistry
 from snakesee.state.rule_registry import RuleStatistics
 from snakesee.state.workflow_state import WorkflowState
-from snakesee.state.workflow_state import WorkflowStatus
 
 __all__ = [
     # Clock
@@ -59,5 +58,5 @@ __all__ = [
     "RuleStatistics",
     # Workflow State
     "WorkflowState",
-    "WorkflowStatus",
+    # Note: WorkflowStatus is in snakesee.models, not here
 ]

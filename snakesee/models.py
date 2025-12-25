@@ -1,5 +1,6 @@
 """Data models for workflow monitoring."""
 
+import logging
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -11,6 +12,8 @@ from typing import Literal
 
 from snakesee.state.clock import get_clock
 
+logger = logging.getLogger(__name__)
+
 # Weighting strategy type for timing estimates
 WeightingStrategy = Literal["time", "index"]
 
@@ -18,11 +21,13 @@ WeightingStrategy = Literal["time", "index"]
 class WorkflowStatus(Enum):
     """Current status of a workflow."""
 
+    UNKNOWN = "unknown"
+    NOT_STARTED = "not_started"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     INCOMPLETE = "incomplete"
-    UNKNOWN = "unknown"
+    STALE = "stale"  # No activity for extended period
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,15 @@ class JobInfo:
         if self.start_time is None:
             return None
         end = self.end_time or get_clock().now()
-        return end - self.start_time
+        elapsed = end - self.start_time
+        if elapsed < 0:
+            logger.warning(
+                "Negative elapsed time detected for job %s: %.2fs (clock skew?)",
+                self.rule,
+                elapsed,
+            )
+            return 0.0
+        return elapsed
 
     @property
     def duration(self) -> float | None:
@@ -71,10 +84,18 @@ class JobInfo:
         Total duration in seconds (only for completed jobs).
 
         Returns:
-            Duration in seconds, or None if job not completed.
+            Duration in seconds (always >= 0), or None if job not completed.
         """
         if self.start_time is not None and self.end_time is not None:
-            return self.end_time - self.start_time
+            duration = self.end_time - self.start_time
+            if duration < 0:
+                logger.warning(
+                    "Negative duration detected for job %s: %.2fs (clock skew?)",
+                    self.rule,
+                    duration,
+                )
+                return 0.0
+            return duration
         return None
 
 

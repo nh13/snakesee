@@ -168,6 +168,22 @@ class EstimationConfig:
     bootstrap_lower_multiplier: float = 0.2
     bootstrap_upper_multiplier: float = 3.0
 
+    def __post_init__(self) -> None:
+        """Validate configuration parameters."""
+        if self.half_life_logs <= 0:
+            raise ValueError(f"half_life_logs must be > 0, got {self.half_life_logs}")
+        if self.half_life_days <= 0:
+            raise ValueError(f"half_life_days must be > 0, got {self.half_life_days}")
+        if self.parallelism_max < self.parallelism_min:
+            raise ValueError(
+                f"parallelism_max ({self.parallelism_max}) must be >= "
+                f"parallelism_min ({self.parallelism_min})"
+            )
+        if self.parallelism_min <= 0:
+            raise ValueError(f"parallelism_min must be > 0, got {self.parallelism_min}")
+        if self.default_global_mean <= 0:
+            raise ValueError(f"default_global_mean must be > 0, got {self.default_global_mean}")
+
 
 # Global default instance
 DEFAULT_CONFIG = EstimationConfig()
