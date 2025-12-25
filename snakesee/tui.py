@@ -443,6 +443,11 @@ class WorkflowMonitorTUI:
         file is detected, allowing comparison between event-based and
         parsed state to find bugs in either approach.
         """
+        # Close existing validation logger to prevent file handle leaks
+        if self._validation_logger is not None:
+            self._validation_logger.close()
+            self._validation_logger = None
+
         event_file = get_event_file_path(self.workflow_dir)
         if event_file.exists():
             self._event_accumulator = EventAccumulator()
@@ -1407,6 +1412,23 @@ class WorkflowMonitorTUI:
         progress = parse_tool_progress(job.rule, log_path)
         self._tool_progress_cache[cache_key] = (now, progress)
         return progress
+
+    def _cleanup_tool_progress_cache(self) -> None:
+        """Remove expired entries from tool progress cache.
+
+        Should be called periodically to prevent unbounded memory growth
+        in long-running workflows.
+        """
+        now = time.time()
+        # Remove entries that have been stale for 10x the TTL
+        max_age = self._tool_progress_cache_ttl * 10
+        expired = [
+            key
+            for key, (cached_time, _) in self._tool_progress_cache.items()
+            if now - cached_time > max_age
+        ]
+        for key in expired:
+            del self._tool_progress_cache[key]
 
     def _build_running_job_data(
         self, jobs: list[JobInfo]
@@ -2436,6 +2458,9 @@ class WorkflowMonitorTUI:
         estimate = None
         if self._estimator is not None:
             estimate = self._estimator.estimate_remaining(progress)
+
+        # Periodically clean up stale cache entries
+        self._cleanup_tool_progress_cache()
 
         return progress, estimate
 

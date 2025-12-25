@@ -6,6 +6,7 @@ replacing the scattered job tracking across multiple components.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -139,6 +140,7 @@ class JobRegistry:
 
     def __init__(self) -> None:
         """Initialize empty registry."""
+        self._lock = threading.RLock()
         self._jobs: dict[str, Job] = {}
         self._by_job_id: dict[str, str] = {}  # job_id -> key
         self._by_status: dict[JobStatus, set[str]] = {status: set() for status in JobStatus}
@@ -146,20 +148,24 @@ class JobRegistry:
 
     def __len__(self) -> int:
         """Return number of jobs in registry."""
-        return len(self._jobs)
+        with self._lock:
+            return len(self._jobs)
 
     def __contains__(self, key: str) -> bool:
         """Check if job exists by key."""
-        return key in self._jobs
+        with self._lock:
+            return key in self._jobs
 
     def get(self, key: str) -> Job | None:
         """Get job by key."""
-        return self._jobs.get(key)
+        with self._lock:
+            return self._jobs.get(key)
 
     def get_by_job_id(self, job_id: str) -> Job | None:
         """Get job by Snakemake job_id."""
-        key = self._by_job_id.get(job_id)
-        return self._jobs.get(key) if key else None
+        with self._lock:
+            key = self._by_job_id.get(job_id)
+            return self._jobs.get(key) if key else None
 
     def get_or_create(self, key: str, rule: str) -> tuple[Job, bool]:
         """Get existing job or create a new one.
@@ -171,19 +177,21 @@ class JobRegistry:
         Returns:
             Tuple of (job, created) where created is True if job was new.
         """
-        if key in self._jobs:
-            return self._jobs[key], False
+        with self._lock:
+            if key in self._jobs:
+                return self._jobs[key], False
 
-        job = Job(key=key, rule=rule)
-        self._add(job)
-        return job, True
+            job = Job(key=key, rule=rule)
+            self._add_unlocked(job)
+            return job, True
 
     def add(self, job: Job) -> None:
         """Add a job to the registry."""
-        self._add(job)
+        with self._lock:
+            self._add_unlocked(job)
 
-    def _add(self, job: Job) -> None:
-        """Internal add with index updates."""
+    def _add_unlocked(self, job: Job) -> None:
+        """Internal add with index updates (caller must hold lock)."""
         self._jobs[job.key] = job
         self._by_status[job.status].add(job.key)
 
@@ -201,6 +209,13 @@ class JobRegistry:
             job: The job that was updated.
             old_status: Previous status if status changed, for index update.
         """
+        with self._lock:
+            self._update_indexes_unlocked(job, old_status)
+
+    def _update_indexes_unlocked(
+        self, job: Job, old_status: JobStatus | None = None
+    ) -> None:
+        """Update indexes without acquiring lock (caller must hold lock)."""
         # Update job_id index if needed
         if job.job_id is not None and job.job_id not in self._by_job_id:
             self._by_job_id[job.job_id] = job.key
@@ -212,34 +227,41 @@ class JobRegistry:
 
     def set_status(self, job: Job, status: JobStatus) -> None:
         """Update job status and indexes."""
-        old_status = job.status
-        job.status = status
-        self.update_indexes(job, old_status)
+        with self._lock:
+            old_status = job.status
+            job.status = status
+            self._update_indexes_unlocked(job, old_status)
 
     def running(self) -> list[Job]:
         """Get all running jobs."""
-        return [self._jobs[key] for key in self._by_status[JobStatus.RUNNING]]
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.RUNNING]]
 
     def completed(self) -> list[Job]:
         """Get all completed jobs."""
-        return [self._jobs[key] for key in self._by_status[JobStatus.COMPLETED]]
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.COMPLETED]]
 
     def failed(self) -> list[Job]:
         """Get all failed jobs."""
-        return [self._jobs[key] for key in self._by_status[JobStatus.FAILED]]
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.FAILED]]
 
     def incomplete(self) -> list[Job]:
         """Get all incomplete jobs."""
-        return [self._jobs[key] for key in self._by_status[JobStatus.INCOMPLETE]]
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.INCOMPLETE]]
 
     def by_rule(self, rule: str) -> list[Job]:
         """Get all jobs for a specific rule."""
-        keys = self._by_rule.get(rule, set())
-        return [self._jobs[key] for key in keys]
+        with self._lock:
+            keys = self._by_rule.get(rule, set())
+            return [self._jobs[key] for key in keys]
 
     def all_jobs(self) -> list[Job]:
         """Get all jobs in the registry."""
-        return list(self._jobs.values())
+        with self._lock:
+            return list(self._jobs.values())
 
     def running_job_infos(self) -> list[JobInfo]:
         """Get running jobs as JobInfo for backward compatibility."""
@@ -255,11 +277,12 @@ class JobRegistry:
 
     def clear(self) -> None:
         """Clear all jobs from the registry."""
-        self._jobs.clear()
-        self._by_job_id.clear()
-        for status_set in self._by_status.values():
-            status_set.clear()
-        self._by_rule.clear()
+        with self._lock:
+            self._jobs.clear()
+            self._by_job_id.clear()
+            for status_set in self._by_status.values():
+                status_set.clear()
+            self._by_rule.clear()
 
     def apply_job_info(self, job_info: JobInfo, key: str | None = None) -> Job:
         """Add or update a job from a JobInfo.
@@ -271,41 +294,45 @@ class JobRegistry:
         Returns:
             The created or updated Job.
         """
-        # Determine key
-        if key is None:
-            key = job_info.job_id or f"{job_info.rule}:{hash(job_info)}"
+        with self._lock:
+            # Determine key
+            if key is None:
+                key = job_info.job_id or f"{job_info.rule}:{hash(job_info)}"
 
-        existing = self.get(key) or (
-            self.get_by_job_id(job_info.job_id) if job_info.job_id else None
-        )
+            # Look up existing job without additional lock acquisition
+            existing = self._jobs.get(key)
+            if existing is None and job_info.job_id:
+                existing_key = self._by_job_id.get(job_info.job_id)
+                if existing_key:
+                    existing = self._jobs.get(existing_key)
 
-        if existing:
-            # Update existing job
-            old_status = existing.status
-            if job_info.start_time is not None:
-                existing.start_time = job_info.start_time
-            if job_info.end_time is not None:
-                existing.end_time = job_info.end_time
-                existing.status = JobStatus.COMPLETED
-            elif job_info.start_time is not None:
-                existing.status = JobStatus.RUNNING
-            if job_info.threads is not None:
-                existing.threads = job_info.threads
-            if job_info.wildcards:
-                existing.wildcards = dict(job_info.wildcards)
-            if job_info.input_size is not None:
-                existing.input_size = job_info.input_size
-            if job_info.log_file is not None:
-                existing.log_file = job_info.log_file
-            if job_info.job_id is not None and existing.job_id is None:
-                existing.job_id = job_info.job_id
-            self.update_indexes(existing, old_status)
-            return existing
-        else:
-            # Create new job
-            job = Job.from_job_info(job_info, key)
-            self._add(job)
-            return job
+            if existing:
+                # Update existing job
+                old_status = existing.status
+                if job_info.start_time is not None:
+                    existing.start_time = job_info.start_time
+                if job_info.end_time is not None:
+                    existing.end_time = job_info.end_time
+                    existing.status = JobStatus.COMPLETED
+                elif job_info.start_time is not None:
+                    existing.status = JobStatus.RUNNING
+                if job_info.threads is not None:
+                    existing.threads = job_info.threads
+                if job_info.wildcards:
+                    existing.wildcards = dict(job_info.wildcards)
+                if job_info.input_size is not None:
+                    existing.input_size = job_info.input_size
+                if job_info.log_file is not None:
+                    existing.log_file = job_info.log_file
+                if job_info.job_id is not None and existing.job_id is None:
+                    existing.job_id = job_info.job_id
+                self._update_indexes_unlocked(existing, old_status)
+                return existing
+            else:
+                # Create new job
+                job = Job.from_job_info(job_info, key)
+                self._add_unlocked(job)
+                return job
 
     def apply_event(self, event: SnakeseeEvent) -> Job | None:
         """Apply a snakesee event to update job state.
@@ -318,42 +345,50 @@ class JobRegistry:
         """
         from snakesee.events import EventType
 
-        # Get rule name from event
-        rule_name = event.rule_name or "unknown"
+        with self._lock:
+            # Get rule name from event
+            rule_name = event.rule_name or "unknown"
 
-        # Use job_id as key if available (convert int to str for key)
-        job_id_str = str(event.job_id) if event.job_id is not None else None
-        key = job_id_str or f"{rule_name}:{event.timestamp}"
+            # Use job_id as key if available (convert int to str for key)
+            job_id_str = str(event.job_id) if event.job_id is not None else None
+            key = job_id_str or f"{rule_name}:{event.timestamp}"
 
-        job = self.get(key) or (self.get_by_job_id(job_id_str) if job_id_str else None)
+            # Look up job without additional lock acquisition
+            job = self._jobs.get(key)
+            if job is None and job_id_str:
+                existing_key = self._by_job_id.get(job_id_str)
+                if existing_key:
+                    job = self._jobs.get(existing_key)
 
-        if job is None:
-            # Create new job from event
-            job, _ = self.get_or_create(key, rule_name)
-            if job_id_str:
-                job.job_id = job_id_str
-            if event.wildcards:
-                job.wildcards = dict(event.wildcards)
-            if event.threads:
-                job.threads = event.threads
+            if job is None:
+                # Create new job from event
+                job = Job(key=key, rule=rule_name)
+                self._add_unlocked(job)
+                if job_id_str:
+                    job.job_id = job_id_str
+                    self._by_job_id[job_id_str] = key
+                if event.wildcards:
+                    job.wildcards = dict(event.wildcards)
+                if event.threads:
+                    job.threads = event.threads
 
-        old_status = job.status
+            old_status = job.status
 
-        # Update based on event type
-        if event.event_type == EventType.JOB_STARTED:
-            job.status = JobStatus.RUNNING
-            job.start_time = event.timestamp
-            if event.threads:
-                job.threads = event.threads
-        elif event.event_type == EventType.JOB_FINISHED:
-            job.status = JobStatus.COMPLETED
-            job.end_time = event.timestamp
-        elif event.event_type == EventType.JOB_ERROR:
-            job.status = JobStatus.FAILED
-            job.end_time = event.timestamp
+            # Update based on event type
+            if event.event_type == EventType.JOB_STARTED:
+                job.status = JobStatus.RUNNING
+                job.start_time = event.timestamp
+                if event.threads:
+                    job.threads = event.threads
+            elif event.event_type == EventType.JOB_FINISHED:
+                job.status = JobStatus.COMPLETED
+                job.end_time = event.timestamp
+            elif event.event_type == EventType.JOB_ERROR:
+                job.status = JobStatus.FAILED
+                job.end_time = event.timestamp
 
-        self.update_indexes(job, old_status)
-        return job
+            self._update_indexes_unlocked(job, old_status)
+            return job
 
     def store_threads(self, job_id: str, threads: int) -> None:
         """Store thread count for a job by job_id.
@@ -361,6 +396,9 @@ class JobRegistry:
         This is used when thread info comes from events before the job
         is fully tracked.
         """
-        job = self.get_by_job_id(job_id)
-        if job:
-            job.threads = threads
+        with self._lock:
+            key = self._by_job_id.get(job_id)
+            if key:
+                job = self._jobs.get(key)
+                if job:
+                    job.threads = threads

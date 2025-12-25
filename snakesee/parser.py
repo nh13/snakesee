@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import threading
 from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +113,48 @@ def _safe_mtime(p: Path) -> float:
         return p.stat().st_mtime
     except FileNotFoundError:
         return 0
+
+
+def _parse_positive_int(value: str, field_name: str = "value") -> int | None:
+    """Parse a string as a positive integer with validation.
+
+    Args:
+        value: String to parse.
+        field_name: Name of field for logging.
+
+    Returns:
+        Parsed integer if valid and positive, None otherwise.
+    """
+    try:
+        result = int(value)
+        if result <= 0:
+            logger.debug("Invalid %s: %d (must be positive)", field_name, result)
+            return None
+        return result
+    except ValueError:
+        logger.debug("Could not parse %s as integer: %s", field_name, value)
+        return None
+
+
+def _parse_non_negative_int(value: str, field_name: str = "value") -> int | None:
+    """Parse a string as a non-negative integer with validation.
+
+    Args:
+        value: String to parse.
+        field_name: Name of field for logging.
+
+    Returns:
+        Parsed integer if valid and >= 0, None otherwise.
+    """
+    try:
+        result = int(value)
+        if result < 0:
+            logger.debug("Invalid %s: %d (must be non-negative)", field_name, result)
+            return None
+        return result
+    except ValueError:
+        logger.debug("Could not parse %s as integer: %s", field_name, value)
+        return None
 
 
 def find_latest_log(snakemake_dir: Path) -> Path | None:
@@ -307,6 +353,7 @@ class IncrementalLogReader:
             log_path: Path to the Snakemake log file.
         """
         self.log_path = log_path
+        self._lock = threading.RLock()
         self._offset: int = 0
         self._inode: int | None = None
 
@@ -343,10 +390,8 @@ class IncrementalLogReader:
         Returns:
             True if the file was rotated and state was reset.
         """
-        if not self.log_path.exists():
-            return False
-
         try:
+            # Single stat() call avoids TOCTOU race with exists() check
             stat = self.log_path.stat()
             current_inode = stat.st_ino
             current_size = stat.st_size
@@ -355,12 +400,16 @@ class IncrementalLogReader:
             if self._inode is not None and (
                 current_inode != self._inode or current_size < self._offset
             ):
-                self.reset()
+                self._reset_unlocked()
                 return True
 
             self._inode = current_inode
             return False
+        except FileNotFoundError:
+            # File doesn't exist - no rotation detected
+            return False
         except OSError:
+            # Other OS errors (permissions, etc.) - log and continue
             return False
 
     def reset(self) -> None:
@@ -369,6 +418,24 @@ class IncrementalLogReader:
         Call this when switching to a different log file or to re-read
         from the beginning.
         """
+        with self._lock:
+            self._reset_unlocked()
+
+    def set_log_path(self, log_path: Path) -> None:
+        """Change the log file being monitored.
+
+        Resets all state if the path changes.
+
+        Args:
+            log_path: New log file path.
+        """
+        with self._lock:
+            if log_path != self.log_path:
+                self.log_path = log_path
+                self._reset_unlocked()
+
+    def _reset_unlocked(self) -> None:
+        """Reset state without acquiring lock (caller must hold lock)."""
         self._offset = 0
         self._inode = None
         self._completed = 0
@@ -386,18 +453,6 @@ class IncrementalLogReader:
         self._current_timestamp = None
         self._current_log_path = None
 
-    def set_log_path(self, log_path: Path) -> None:
-        """Change the log file being monitored.
-
-        Resets all state if the path changes.
-
-        Args:
-            log_path: New log file path.
-        """
-        if log_path != self.log_path:
-            self.log_path = log_path
-            self.reset()
-
     def read_new_lines(self) -> int:
         """Read and parse new lines from the log file.
 
@@ -410,20 +465,28 @@ class IncrementalLogReader:
         if not self.log_path.exists():
             return 0
 
-        self._check_rotation()
+        with self._lock:
+            self._check_rotation()
 
-        lines_processed = 0
-        try:
-            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
-                f.seek(self._offset)
-                for line in f:
-                    self._parse_line(line)
-                    lines_processed += 1
-                self._offset = f.tell()
-        except OSError:
-            pass
+            lines_processed = 0
+            try:
+                with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                    # Clamp offset to file bounds to handle truncation edge cases
+                    file_size = f.seek(0, 2)  # Seek to end, get size
+                    self._offset = min(self._offset, file_size)
+                    f.seek(self._offset)
+                    for line in f:
+                        self._parse_line(line)
+                        lines_processed += 1
+                    self._offset = f.tell()
+            except FileNotFoundError:
+                pass  # File may have been rotated/deleted
+            except PermissionError as e:
+                logger.debug("Permission denied reading log file %s: %s", self.log_path, e)
+            except OSError as e:
+                logger.debug("Error reading log file %s: %s", self.log_path, e)
 
-        return lines_processed
+            return lines_processed
 
     def _parse_line(self, line: str) -> None:
         """Parse a single log line and update state.
@@ -469,11 +532,13 @@ class IncrementalLogReader:
 
         # Capture threads within rule block
         if match := THREADS_PATTERN.match(line):
-            self._current_threads = int(match.group(1))
-            # Update already-stored job if threads comes after jobid
-            if self._current_jobid and self._current_jobid in self._started_jobs:
-                rule, ts, wc, _ = self._started_jobs[self._current_jobid]
-                self._started_jobs[self._current_jobid] = (rule, ts, wc, self._current_threads)
+            threads = _parse_positive_int(match.group(1), "threads")
+            if threads is not None:
+                self._current_threads = threads
+                # Update already-stored job if threads comes after jobid
+                if self._current_jobid and self._current_jobid in self._started_jobs:
+                    rule, ts, wc, _ = self._started_jobs[self._current_jobid]
+                    self._started_jobs[self._current_jobid] = (rule, ts, wc, self._current_threads)
             return
 
         # Capture log path within rule block - store by jobid for direct lookup
@@ -551,7 +616,8 @@ class IncrementalLogReader:
         Returns:
             Tuple of (completed_count, total_count).
         """
-        return self._completed, self._total
+        with self._lock:
+            return self._completed, self._total
 
     @property
     def running_jobs(self) -> list[JobInfo]:
@@ -560,22 +626,23 @@ class IncrementalLogReader:
         Returns:
             List of JobInfo for jobs that started but haven't finished.
         """
-        running: list[JobInfo] = []
-        for jobid, (rule, start_time, wildcards, threads) in self._started_jobs.items():
-            if jobid not in self._finished_jobids:
-                # Look up log by jobid - unique within this run
-                log_path = self._job_logs.get(jobid)
-                running.append(
-                    JobInfo(
-                        rule=rule,
-                        job_id=jobid,
-                        start_time=start_time,
-                        wildcards=wildcards,
-                        threads=threads,
-                        log_file=Path(log_path) if log_path else None,
+        with self._lock:
+            running: list[JobInfo] = []
+            for jobid, (rule, start_time, wildcards, threads) in self._started_jobs.items():
+                if jobid not in self._finished_jobids:
+                    # Look up log by jobid - unique within this run
+                    log_path = self._job_logs.get(jobid)
+                    running.append(
+                        JobInfo(
+                            rule=rule,
+                            job_id=jobid,
+                            start_time=start_time,
+                            wildcards=wildcards,
+                            threads=threads,
+                            log_file=Path(log_path) if log_path else None,
+                        )
                     )
-                )
-        return running
+            return running
 
     @property
     def completed_jobs(self) -> list[JobInfo]:
@@ -584,11 +651,12 @@ class IncrementalLogReader:
         Returns:
             List of JobInfo for completed jobs, sorted by end time (newest first).
         """
-        return sorted(
-            self._completed_jobs,
-            key=lambda j: j.end_time or 0,
-            reverse=True,
-        )
+        with self._lock:
+            return sorted(
+                self._completed_jobs,
+                key=lambda j: j.end_time or 0,
+                reverse=True,
+            )
 
     @property
     def failed_jobs(self) -> list[JobInfo]:
@@ -597,7 +665,8 @@ class IncrementalLogReader:
         Returns:
             List of JobInfo for jobs that encountered errors.
         """
-        return list(self._failed_jobs)
+        with self._lock:
+            return list(self._failed_jobs)
 
 
 def parse_progress_from_log(log_path: Path) -> tuple[int, int]:
@@ -688,7 +757,11 @@ def _iterate_metadata_files(
         try:
             data = json.loads(meta_file.read_text())
             yield meta_file, data
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError as e:
+            logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
+            continue
+        except OSError as e:
+            logger.debug("Error reading metadata file %s: %s", meta_file, e)
             continue
 
 
@@ -860,7 +933,14 @@ def collect_rule_code_hashes(
                     hash_to_rules[code_hash] = set()
                 hash_to_rules[code_hash].add(rule)
 
-        except (json.JSONDecodeError, OSError, KeyError):
+        except json.JSONDecodeError as e:
+            logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
+            continue
+        except OSError as e:
+            logger.debug("Error reading metadata file %s: %s", meta_file, e)
+            continue
+        except KeyError as e:
+            logger.debug("Missing key in metadata file %s: %s", meta_file, e)
             continue
 
     return hash_to_rules

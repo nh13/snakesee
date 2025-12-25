@@ -7,6 +7,7 @@ accurate and timely job status information than log parsing.
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -129,6 +130,7 @@ class EventReader:
         """
         self.event_file = event_file
         self._offset: int = 0
+        self._lock = threading.RLock()
 
     def read_new_events(self) -> list[SnakeseeEvent]:
         """Read events added since last call.
@@ -140,26 +142,27 @@ class EventReader:
             return []
 
         events: list[SnakeseeEvent] = []
-        try:
-            with open(self.event_file, "r", encoding="utf-8") as f:
-                f.seek(self._offset)
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            events.append(SnakeseeEvent.from_json(line))
-                        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
-                            # Skip malformed lines but log for debugging
-                            logger.debug(
-                                "Skipping malformed event line: %s... (%s)",
-                                line[:50],
-                                e,
-                            )
-                            continue
-                self._offset = f.tell()
-        except OSError as e:
-            # File access error - log and return empty list
-            logger.debug("Error reading event file %s: %s", self.event_file, e)
+        with self._lock:
+            try:
+                with open(self.event_file, "r", encoding="utf-8") as f:
+                    f.seek(self._offset)
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                events.append(SnakeseeEvent.from_json(line))
+                            except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                                # Skip malformed lines but log for debugging
+                                logger.debug(
+                                    "Skipping malformed event line: %s... (%s)",
+                                    line[:50],
+                                    e,
+                                )
+                                continue
+                    self._offset = f.tell()
+            except OSError as e:
+                # File access error - log and return empty list
+                logger.debug("Error reading event file %s: %s", self.event_file, e)
 
         return events
 
@@ -168,7 +171,8 @@ class EventReader:
 
         Call this to re-read all events from the beginning.
         """
-        self._offset = 0
+        with self._lock:
+            self._offset = 0
 
     @property
     def has_events(self) -> bool:

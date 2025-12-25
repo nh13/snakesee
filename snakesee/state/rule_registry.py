@@ -6,6 +6,7 @@ consolidating aggregate, thread-level, and wildcard-level statistics.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from dataclasses import field
 from typing import TYPE_CHECKING
@@ -140,21 +141,25 @@ class RuleRegistry:
         from snakesee.state.config import DEFAULT_CONFIG
 
         self.config = config or DEFAULT_CONFIG
+        self._lock = threading.RLock()
         self._rules: dict[str, RuleStatistics] = {}
         self._global_mean_cache: float | None = None
         self._cache_valid: bool = False
 
     def __len__(self) -> int:
         """Return number of rules in registry."""
-        return len(self._rules)
+        with self._lock:
+            return len(self._rules)
 
     def __contains__(self, rule: str) -> bool:
         """Check if rule exists in registry."""
-        return rule in self._rules
+        with self._lock:
+            return rule in self._rules
 
     def get(self, rule: str) -> RuleStatistics | None:
         """Get statistics for a rule."""
-        return self._rules.get(rule)
+        with self._lock:
+            return self._rules.get(rule)
 
     def get_or_create(self, rule: str) -> RuleStatistics:
         """Get existing statistics or create new ones.
@@ -165,10 +170,11 @@ class RuleRegistry:
         Returns:
             RuleStatistics for the rule.
         """
-        if rule not in self._rules:
-            self._rules[rule] = RuleStatistics(rule=rule)
-            self._cache_valid = False
-        return self._rules[rule]
+        with self._lock:
+            if rule not in self._rules:
+                self._rules[rule] = RuleStatistics(rule=rule)
+                self._cache_valid = False
+            return self._rules[rule]
 
     def record_completion(
         self,
@@ -189,9 +195,12 @@ class RuleRegistry:
             wildcards: Wildcard values.
             input_size: Input file size.
         """
-        stats = self.get_or_create(rule)
-        stats.record_completion(duration, timestamp, threads, wildcards, input_size)
-        self._cache_valid = False
+        with self._lock:
+            if rule not in self._rules:
+                self._rules[rule] = RuleStatistics(rule=rule)
+            stats = self._rules[rule]
+            stats.record_completion(duration, timestamp, threads, wildcards, input_size)
+            self._cache_valid = False
 
     def record_job_completion(self, job: Job) -> None:
         """Record completion from a Job object.
@@ -202,6 +211,7 @@ class RuleRegistry:
         if job.duration is None:
             return
 
+        # record_completion already acquires lock
         self.record_completion(
             rule=job.rule,
             duration=job.duration,
@@ -217,20 +227,21 @@ class RuleRegistry:
         Returns:
             Mean duration in seconds, or config default if no data.
         """
-        if self._cache_valid and self._global_mean_cache is not None:
+        with self._lock:
+            if self._cache_valid and self._global_mean_cache is not None:
+                return self._global_mean_cache
+
+            all_durations: list[float] = []
+            for stats in self._rules.values():
+                all_durations.extend(stats.aggregate.durations)
+
+            if all_durations:
+                self._global_mean_cache = sum(all_durations) / len(all_durations)
+            else:
+                self._global_mean_cache = self.config.default_global_mean
+
+            self._cache_valid = True
             return self._global_mean_cache
-
-        all_durations: list[float] = []
-        for stats in self._rules.values():
-            all_durations.extend(stats.aggregate.durations)
-
-        if all_durations:
-            self._global_mean_cache = sum(all_durations) / len(all_durations)
-        else:
-            self._global_mean_cache = self.config.default_global_mean
-
-        self._cache_valid = True
-        return self._global_mean_cache
 
     def set_expected_counts(self, counts: dict[str, int]) -> None:
         """Set expected job counts for rules.
@@ -238,37 +249,43 @@ class RuleRegistry:
         Args:
             counts: Dictionary of rule name to expected count.
         """
-        for rule, count in counts.items():
-            stats = self.get_or_create(rule)
-            stats.expected_count = count
+        with self._lock:
+            for rule, count in counts.items():
+                if rule not in self._rules:
+                    self._rules[rule] = RuleStatistics(rule=rule)
+                self._rules[rule].expected_count = count
 
     def clear(self) -> None:
         """Clear all statistics."""
-        self._rules.clear()
-        self._cache_valid = False
-        self._global_mean_cache = None
+        with self._lock:
+            self._rules.clear()
+            self._cache_valid = False
+            self._global_mean_cache = None
 
     # Backward compatibility methods
 
     def to_rule_stats_dict(self) -> dict[str, RuleTimingStats]:
         """Convert to dict for backward compatibility with TimeEstimator."""
-        return {name: stats.aggregate for name, stats in self._rules.items()}
+        with self._lock:
+            return {name: stats.aggregate for name, stats in self._rules.items()}
 
     def to_thread_stats_dict(self) -> dict[str, ThreadTimingStats]:
         """Convert to thread stats dict for backward compatibility."""
-        result: dict[str, ThreadTimingStats] = {}
-        for name, stats in self._rules.items():
-            if stats.by_threads is not None:
-                result[name] = stats.by_threads
-        return result
+        with self._lock:
+            result: dict[str, ThreadTimingStats] = {}
+            for name, stats in self._rules.items():
+                if stats.by_threads is not None:
+                    result[name] = stats.by_threads
+            return result
 
     def to_wildcard_stats_dict(self) -> dict[str, dict[str, WildcardTimingStats]]:
         """Convert to wildcard stats dict for backward compatibility."""
-        result: dict[str, dict[str, WildcardTimingStats]] = {}
-        for name, stats in self._rules.items():
-            if stats.by_wildcard:
-                result[name] = stats.by_wildcard
-        return result
+        with self._lock:
+            result: dict[str, dict[str, WildcardTimingStats]] = {}
+            for name, stats in self._rules.items():
+                if stats.by_wildcard:
+                    result[name] = stats.by_wildcard
+            return result
 
     def load_from_rule_stats(
         self,
@@ -283,26 +300,32 @@ class RuleRegistry:
             thread_stats: Thread-specific stats.
             wildcard_stats: Wildcard-specific stats.
         """
-        for rule, stats in rule_stats.items():
-            rule_stat = self.get_or_create(rule)
-            rule_stat.aggregate = stats
+        with self._lock:
+            for rule, stats in rule_stats.items():
+                if rule not in self._rules:
+                    self._rules[rule] = RuleStatistics(rule=rule)
+                self._rules[rule].aggregate = stats
 
-        if thread_stats:
-            for rule, tstats in thread_stats.items():
-                rule_stat = self.get_or_create(rule)
-                rule_stat.by_threads = tstats
+            if thread_stats:
+                for rule, tstats in thread_stats.items():
+                    if rule not in self._rules:
+                        self._rules[rule] = RuleStatistics(rule=rule)
+                    self._rules[rule].by_threads = tstats
 
-        if wildcard_stats:
-            for rule, wstats in wildcard_stats.items():
-                rule_stat = self.get_or_create(rule)
-                rule_stat.by_wildcard = wstats
+            if wildcard_stats:
+                for rule, wstats in wildcard_stats.items():
+                    if rule not in self._rules:
+                        self._rules[rule] = RuleStatistics(rule=rule)
+                    self._rules[rule].by_wildcard = wstats
 
-        self._cache_valid = False
+            self._cache_valid = False
 
     def all_rules(self) -> list[str]:
         """Get all rule names."""
-        return list(self._rules.keys())
+        with self._lock:
+            return list(self._rules.keys())
 
     def total_sample_count(self) -> int:
         """Get total number of samples across all rules."""
-        return sum(stats.aggregate.count for stats in self._rules.values())
+        with self._lock:
+            return sum(stats.aggregate.count for stats in self._rules.values())
