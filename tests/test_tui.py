@@ -396,15 +396,19 @@ class TestEventHandling:
         assert len(result.failed_jobs_list) == 1
 
     def test_handle_job_submitted_tracks_threads(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
-        """Test that submitted events track thread info in _job_threads."""
+        """Test that submitted events track thread info in JobRegistry."""
         event = make_snakesee_event(
             EventType.JOB_SUBMITTED, rule_name="align", job_id=123, threads=8
         )
+        # In production, apply_event is called first to create the job
+        tui_with_mocks._workflow_state.jobs.apply_event(event)
         # Pass empty running_jobs list as required by the method
         running_jobs: list[JobInfo] = []
         tui_with_mocks._handle_job_submitted_event(event, running_jobs)
-        assert "123" in tui_with_mocks._job_threads
-        assert tui_with_mocks._job_threads["123"] == 8
+        # Threads should be stored in JobRegistry
+        job = tui_with_mocks._workflow_state.jobs.get_by_job_id("123")
+        assert job is not None
+        assert job.threads == 8
 
 
 class TestPanelCreation:

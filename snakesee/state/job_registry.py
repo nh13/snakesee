@@ -58,6 +58,7 @@ class Job:
     threads: int | None = None
     input_size: int | None = None
     log_file: Path | None = None
+    stats_recorded: bool = False
 
     @property
     def elapsed(self) -> float | None:
