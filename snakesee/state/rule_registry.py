@@ -108,10 +108,12 @@ class RuleStatistics:
                         stats_by_value={},
                     )
                 wts = self.by_wildcard[wc_key]
-                value_stats = wts.get_stats_for_value(wc_value)
-                if value_stats is None:
-                    value_stats = RuleTimingStats(rule=f"{self.rule}:{wc_key}={wc_value}")
-                    wts.stats_by_value[wc_value] = value_stats
+                # Access stats_by_value directly (get_stats_for_value has min sample check)
+                if wc_value not in wts.stats_by_value:
+                    wts.stats_by_value[wc_value] = RuleTimingStats(
+                        rule=f"{self.rule}:{wc_key}={wc_value}"
+                    )
+                value_stats = wts.stats_by_value[wc_value]
                 value_stats.durations.append(duration)
                 value_stats.timestamps.append(timestamp)
 

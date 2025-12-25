@@ -209,14 +209,7 @@ class WorkflowMonitorTUI:
         self._validation_logger: ValidationLogger | None = None
         self._init_validation()
 
-        # Track job_ids already added to rule_stats (to avoid duplicates)
-        self._rule_stats_job_ids: set[str] = set()
-
-        # Track threads by job_id for event handlers
-        # (populated from JOB_SUBMITTED events, used to enrich JobInfo objects)
-        self._job_threads: dict[str, int] = {}
-
-        # Centralized workflow state (Phase 10+)
+        # Centralized workflow state
         self._workflow_state: WorkflowState = WorkflowState.create(
             workflow_dir=workflow_dir,
         )
@@ -258,9 +251,8 @@ class WorkflowMonitorTUI:
 
     def _init_estimator(self) -> None:
         """Initialize or reinitialize the time estimator with progress display."""
-        self._rule_stats_job_ids.clear()
-        self._job_threads.clear()
         self._workflow_state.rules.clear()
+        self._workflow_state.jobs.clear()
 
         if not self.use_estimation:
             self._estimator = None
@@ -507,8 +499,10 @@ class WorkflowMonitorTUI:
             return
         job_id_str = str(event.job_id)
         if event.threads is not None:
-            self._job_threads[job_id_str] = event.threads
-        threads = event.threads or self._job_threads.get(job_id_str)
+            self._workflow_state.jobs.store_threads(job_id_str, event.threads)
+        # Look up threads from JobRegistry (may have been set by apply_event or store_threads)
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
             if job.job_id == job_id_str:
                 running_jobs[i] = JobInfo(
@@ -532,7 +526,8 @@ class WorkflowMonitorTUI:
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
-        threads = event.threads or self._job_threads.get(job_id_str)
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
             if job.job_id == job_id_str:
                 running_jobs[i] = JobInfo(
@@ -556,7 +551,8 @@ class WorkflowMonitorTUI:
         if event.job_id is None or event.duration is None:
             return
         job_id_str = str(event.job_id)
-        threads = event.threads or self._job_threads.get(job_id_str)
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(completions):
             if job.job_id == job_id_str:
                 completions[i] = JobInfo(
@@ -572,6 +568,37 @@ class WorkflowMonitorTUI:
                     threads=threads or job.threads,
                 )
                 break
+
+    def _record_job_stats_from_event(self, event: SnakeseeEvent) -> None:
+        """Record job stats to RuleRegistry from a JOB_FINISHED event.
+
+        Uses JobRegistry to track which jobs have had stats recorded
+        to avoid duplicates across poll cycles.
+        """
+        if event.job_id is None or event.duration is None or event.rule_name is None:
+            return
+
+        # Check if we've already recorded stats for this job
+        job_key = str(event.job_id)
+        job = self._workflow_state.jobs.get(job_key)
+        if job is not None and job.stats_recorded:
+            return
+
+        # Get threads from event or JobRegistry
+        threads = event.threads or (job.threads if job else None)
+
+        # Record to RuleRegistry
+        self._workflow_state.rules.record_completion(
+            rule=event.rule_name,
+            duration=event.duration,
+            timestamp=event.timestamp,
+            threads=threads,
+            wildcards=event.wildcards_dict,
+        )
+
+        # Mark as recorded
+        if job is not None:
+            job.stats_recorded = True
 
     def _handle_job_error_event(
         self,
@@ -635,6 +662,8 @@ class WorkflowMonitorTUI:
                 self._handle_job_started_event(event, new_running_jobs)
             elif event.event_type == EventType.JOB_FINISHED:
                 self._handle_job_finished_event(event, new_completions)
+                # Record stats to RuleRegistry for newly completed jobs
+                self._record_job_stats_from_event(event)
             elif event.event_type == EventType.JOB_ERROR:
                 new_failed = self._handle_job_error_event(event, new_failed_list)
 
@@ -642,7 +671,8 @@ class WorkflowMonitorTUI:
         # (log-parsed jobs may not have threads if the line order varies)
         for i, job in enumerate(new_running_jobs):
             if job.job_id and (job.threads is None or job.wildcards is None):
-                stored_threads = self._job_threads.get(job.job_id)
+                registry_job = self._workflow_state.jobs.get_by_job_id(job.job_id)
+                stored_threads = registry_job.threads if registry_job else None
                 if job.threads is None and stored_threads is not None:
                     new_running_jobs[i] = JobInfo(
                         rule=job.rule,
@@ -673,32 +703,29 @@ class WorkflowMonitorTUI:
     def _update_rule_stats_from_completions(self, progress: WorkflowProgress) -> None:
         """Update rule_stats with newly completed jobs from recent_completions.
 
-        This ensures the Rule Statistics panel shows data from jobs that completed
-        during this monitoring session, not just historical data from startup.
+        This handles log-parsed completions that don't go through the event path.
+        Event-based completions are handled by _record_job_stats_from_event().
         """
         if self._estimator is None:
             return
 
         for job in progress.recent_completions:
-            # Create a unique key for deduplication
-            # Use job_id if available, otherwise use (rule, end_time) tuple
+            # Get or create job in registry for deduplication tracking
+            registry_job = None
             if job.job_id is not None:
-                dedup_key = f"id:{job.job_id}"
-            elif job.end_time is not None:
-                dedup_key = f"time:{job.rule}:{int(job.end_time)}"
-            else:
-                # Can't deduplicate without job_id or end_time, skip
-                continue
-
-            if dedup_key in self._rule_stats_job_ids:
-                continue
+                registry_job = self._workflow_state.jobs.get(job.job_id)
+                if registry_job is None:
+                    # Create job in registry from JobInfo
+                    registry_job = self._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+                if registry_job.stats_recorded:
+                    continue
 
             # Skip if we don't have a valid duration
             duration = job.duration
             if duration is None:
                 continue
 
-            # Record to centralized RuleRegistry (includes thread info)
+            # Record stats to RuleRegistry
             self._workflow_state.rules.record_completion(
                 rule=job.rule,
                 duration=duration,
@@ -708,8 +735,9 @@ class WorkflowMonitorTUI:
                 input_size=job.input_size,
             )
 
-            # Mark this job as processed
-            self._rule_stats_job_ids.add(dedup_key)
+            # Mark as recorded for deduplication
+            if registry_job is not None:
+                registry_job.stats_recorded = True
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""

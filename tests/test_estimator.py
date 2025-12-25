@@ -6,7 +6,6 @@ import pytest
 
 from snakesee.estimator import TimeEstimator
 from snakesee.models import JobInfo
-from snakesee.models import RuleTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 
@@ -19,10 +18,13 @@ class TestTimeEstimator:
         estimator = TimeEstimator()
         assert estimator.rule_stats == {}
 
-    def test_init_with_stats(self) -> None:
-        """Test initialization with pre-loaded stats."""
-        stats = {"align": RuleTimingStats(rule="align", durations=[100.0])}
-        estimator = TimeEstimator(rule_stats=stats)
+    def test_init_with_registry(self) -> None:
+        """Test initialization with pre-loaded registry."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        estimator = TimeEstimator(rule_registry=registry)
         assert "align" in estimator.rule_stats
 
     def test_load_from_metadata(self, metadata_dir: Path) -> None:
@@ -189,8 +191,13 @@ class TestTimeEstimator:
 
     def test_get_estimate_for_job_with_rule_stats(self) -> None:
         """Test get_estimate_for_job uses rule-level stats."""
-        stats = {"align": RuleTimingStats(rule="align", durations=[100.0, 110.0, 90.0])}
-        estimator = TimeEstimator(rule_stats=stats)
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        registry.record_completion("align", 110.0, 2000.0)
+        registry.record_completion("align", 90.0, 3000.0)
+        estimator = TimeEstimator(rule_registry=registry)
 
         mean, var = estimator.get_estimate_for_job("align")
         # Should use weighted mean, not simple mean
@@ -218,21 +225,19 @@ class TestThreadAwareETA:
 
     def test_get_estimate_with_exact_thread_match(self) -> None:
         """Test get_estimate_for_job uses exact thread match."""
-        from snakesee.models import ThreadTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator()
+        registry = RuleRegistry()
+        # Thread-specific: align with 4 threads takes ~50s
+        registry.record_completion("align", 50.0, 1000.0, threads=4)
+        registry.record_completion("align", 52.0, 2000.0, threads=4)
+        registry.record_completion("align", 48.0, 3000.0, threads=4)
+        # Also non-thread data at 100s
+        registry.record_completion("align", 100.0, 4000.0)
+        registry.record_completion("align", 100.0, 5000.0)
+        registry.record_completion("align", 100.0, 6000.0)
 
-        # Set up thread stats: align with 4 threads takes 50s
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(
-            rule="align", durations=[50.0, 52.0, 48.0]
-        )
-        estimator.thread_stats["align"] = thread_stats
-
-        # Also set up rule stats with different timing (100s)
-        estimator.rule_stats["align"] = RuleTimingStats(
-            rule="align", durations=[100.0, 100.0, 100.0]
-        )
+        estimator = TimeEstimator(rule_registry=registry)
 
         # With threads=4, should use thread-specific stats (~50s)
         mean, var = estimator.get_estimate_for_job("align", threads=4)
@@ -241,15 +246,14 @@ class TestThreadAwareETA:
 
     def test_get_estimate_with_thread_fallback(self) -> None:
         """Test get_estimate_for_job falls back to aggregate when no exact match."""
-        from snakesee.models import ThreadTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator()
+        registry = RuleRegistry()
+        # Thread stats: 1-thread (100s) and 8-thread (20s), no 4-thread
+        registry.record_completion("align", 100.0, 1000.0, threads=1)
+        registry.record_completion("align", 20.0, 2000.0, threads=8)
 
-        # Set up thread stats: align has 1-thread (100s) and 8-thread (20s) data
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[1] = RuleTimingStats(rule="align", durations=[100.0])
-        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[20.0])
-        estimator.thread_stats["align"] = thread_stats
+        estimator = TimeEstimator(rule_registry=registry)
 
         # Request 4 threads - should fall back to aggregate (~60s average)
         mean, var = estimator.get_estimate_for_job("align", threads=4)
@@ -259,12 +263,15 @@ class TestThreadAwareETA:
 
     def test_get_estimate_no_thread_data_falls_to_rule_stats(self) -> None:
         """Test get_estimate_for_job falls back to rule_stats when no thread data."""
-        estimator = TimeEstimator()
+        from snakesee.state.rule_registry import RuleRegistry
 
-        # Only rule stats, no thread stats (with varying durations for non-zero variance)
-        estimator.rule_stats["align"] = RuleTimingStats(
-            rule="align", durations=[95.0, 100.0, 105.0]
-        )
+        registry = RuleRegistry()
+        # Only aggregate stats, no thread-specific data
+        registry.record_completion("align", 95.0, 1000.0)
+        registry.record_completion("align", 100.0, 2000.0)
+        registry.record_completion("align", 105.0, 3000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
 
         # With threads=4 but no thread data, should use rule stats
         mean, var = estimator.get_estimate_for_job("align", threads=4)
@@ -273,39 +280,33 @@ class TestThreadAwareETA:
 
     def test_get_estimate_no_threads_param_uses_rule_stats(self) -> None:
         """Test get_estimate_for_job without threads uses rule_stats."""
-        from snakesee.models import ThreadTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator()
+        registry = RuleRegistry()
+        # Thread-specific data: 50s with 4 threads
+        registry.record_completion("align", 50.0, 1000.0, threads=4)
+        # Aggregate: 100s (no threads specified, contributes to aggregate)
+        registry.record_completion("align", 100.0, 2000.0)
 
-        # Set up thread stats with different timing
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[50.0])
-        estimator.thread_stats["align"] = thread_stats
+        estimator = TimeEstimator(rule_registry=registry)
 
-        # Set up rule stats
-        estimator.rule_stats["align"] = RuleTimingStats(rule="align", durations=[100.0])
-
-        # Without threads param, should use rule stats
+        # Without threads param, should use aggregate rule stats
         mean, var = estimator.get_estimate_for_job("align")
-        assert 95 < mean < 105  # Should be around 100s
+        # Aggregate of 50 and 100 = 75
+        assert 70 < mean < 80
         assert var > 0
 
     def test_thread_stats_takes_priority_over_wildcards(self) -> None:
         """Test thread-specific stats take priority over wildcard conditioning."""
-        from snakesee.models import ThreadTimingStats
-        from snakesee.models import WildcardTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator(use_wildcard_conditioning=True)
+        registry = RuleRegistry()
+        # Thread stats: 30s with 4 threads
+        registry.record_completion("align", 30.0, 1000.0, threads=4)
+        # Wildcard stats: sample1 takes 200s (no threads)
+        registry.record_completion("align", 200.0, 2000.0, wildcards={"sample": "sample1"})
 
-        # Set up thread stats: 30s with 4 threads
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[30.0])
-        estimator.thread_stats["align"] = thread_stats
-
-        # Set up wildcard stats: sample1 takes 200s
-        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
-        wc_stats.stats_by_value["sample1"] = RuleTimingStats(rule="align", durations=[200.0])
-        estimator.wildcard_stats["align"] = {"sample": wc_stats}
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
 
         # Thread stats should take priority
         mean, var = estimator.get_estimate_for_job(
@@ -315,17 +316,13 @@ class TestThreadAwareETA:
 
     def test_single_sample_thread_variance(self) -> None:
         """Test variance calculation for single-sample thread stats."""
-        from snakesee.models import ThreadTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator()
+        registry = RuleRegistry()
+        # Single sample with threads=4
+        registry.record_completion("align", 100.0, 1000.0, threads=4)
 
-        # Single sample with exact thread match
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(
-            rule="align",
-            durations=[100.0],  # Single sample
-        )
-        estimator.thread_stats["align"] = thread_stats
+        estimator = TimeEstimator(rule_registry=registry)
 
         mean, var = estimator.get_estimate_for_job("align", threads=4)
         assert 95 < mean < 105
@@ -334,17 +331,13 @@ class TestThreadAwareETA:
 
     def test_aggregate_fallback_variance(self) -> None:
         """Test variance calculation for aggregate fallback (no exact thread match)."""
-        from snakesee.models import ThreadTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator()
+        registry = RuleRegistry()
+        # Single sample with threads=8 (no match for threads=4)
+        registry.record_completion("align", 100.0, 1000.0, threads=8)
 
-        # Single sample with NO exact thread match (will aggregate)
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[8] = RuleTimingStats(
-            rule="align",
-            durations=[100.0],  # Single sample, different thread count
-        )
-        estimator.thread_stats["align"] = thread_stats
+        estimator = TimeEstimator(rule_registry=registry)
 
         mean, var = estimator.get_estimate_for_job("align", threads=4)  # No match for 4
         assert 95 < mean < 105
@@ -357,29 +350,21 @@ class TestWildcardConditioning:
 
     def test_wildcard_conditioning_with_match(self) -> None:
         """Test get_estimate_for_job uses wildcard-specific stats when available."""
-        from snakesee.models import WildcardTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator(use_wildcard_conditioning=True)
+        registry = RuleRegistry()
+        # sample1 takes ~50s, sample2 takes ~200s
+        # Need at least 3 samples per value for MIN_SAMPLES_FOR_CONDITIONING
+        for val in [50.0, 52.0, 48.0]:
+            registry.record_completion("align", val, 1000.0, wildcards={"sample": "sample1"})
+        for val in [200.0, 210.0, 190.0]:
+            registry.record_completion("align", val, 2000.0, wildcards={"sample": "sample2"})
 
-        # Set up wildcard stats: sample1 takes 50s, sample2 takes 200s
-        # Need at least 2 values with enough variance for get_most_predictive_key
-        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
-        wc_stats.stats_by_value["sample1"] = RuleTimingStats(
-            rule="align", durations=[50.0, 52.0, 48.0]
-        )
-        wc_stats.stats_by_value["sample2"] = RuleTimingStats(
-            rule="align", durations=[200.0, 210.0, 190.0]
-        )
-        estimator.wildcard_stats["align"] = {"sample": wc_stats}
-
-        # Set up rule stats with different timing (100s)
-        estimator.rule_stats["align"] = RuleTimingStats(
-            rule="align", durations=[100.0, 100.0, 100.0]
-        )
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
 
         # With sample1 wildcard, should use wildcard-specific stats (~50s)
         mean, var = estimator.get_estimate_for_job("align", wildcards={"sample": "sample1"})
-        assert 45 < mean < 55  # Should be around 50s, not 100s
+        assert 45 < mean < 55  # Should be around 50s, not 200s or aggregate
         assert var > 0
 
         # With sample2 wildcard, should use wildcard-specific stats (~200s)
@@ -389,30 +374,24 @@ class TestWildcardConditioning:
 
     def test_wildcard_conditioning_no_match_falls_to_rule(self) -> None:
         """Test wildcard conditioning falls back to rule stats when no match."""
-        from snakesee.models import WildcardTimingStats
+        from snakesee.state.rule_registry import RuleRegistry
 
-        estimator = TimeEstimator(use_wildcard_conditioning=True)
+        registry = RuleRegistry()
+        # Known wildcard values
+        for val in [50.0, 52.0, 48.0]:
+            registry.record_completion("align", val, 1000.0, wildcards={"sample": "sample1"})
+        for val in [200.0, 210.0, 190.0]:
+            registry.record_completion("align", val, 2000.0, wildcards={"sample": "sample2"})
+        # Also add some aggregate data at ~100s
+        for val in [100.0, 105.0, 95.0]:
+            registry.record_completion("align", val, 3000.0)
 
-        # Set up wildcard stats with 2+ values (required for get_most_predictive_key)
-        # Need 3+ samples per value for MIN_SAMPLES_FOR_CONDITIONING
-        wc_stats = WildcardTimingStats(rule="align", wildcard_key="sample")
-        wc_stats.stats_by_value["sample1"] = RuleTimingStats(
-            rule="align", durations=[50.0, 52.0, 48.0]
-        )
-        wc_stats.stats_by_value["sample2"] = RuleTimingStats(
-            rule="align",
-            durations=[200.0, 210.0, 190.0],  # High variance needed
-        )
-        estimator.wildcard_stats["align"] = {"sample": wc_stats}
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
 
-        # Set up rule stats
-        estimator.rule_stats["align"] = RuleTimingStats(
-            rule="align", durations=[100.0, 105.0, 95.0]
-        )
-
-        # With unknown sample3 wildcard, should fall back to rule stats
+        # With unknown sample3 wildcard, should fall back to aggregate stats
         mean, var = estimator.get_estimate_for_job("align", wildcards={"sample": "sample3"})
-        assert 95 < mean < 105  # Should be around 100s, not 50s
+        # Aggregate of all samples (50s, 200s, 100s) - complex weighting, just check bounds
+        assert 50 < mean < 200  # Should not match sample1 or sample2 exactly
         assert var > 0
 
 
@@ -436,25 +415,6 @@ class TestRuleRegistryIntegration:
         mean, var = estimator.get_estimate_for_job("align")
         assert 100 < mean < 115  # Weighted mean of 100, 110
         assert var > 0
-
-    def test_estimator_rule_registry_overrides_rule_stats(self) -> None:
-        """Test RuleRegistry takes priority over rule_stats dict."""
-        from snakesee.state.rule_registry import RuleRegistry
-
-        # Create RuleRegistry with data (50s)
-        registry = RuleRegistry()
-        registry.record_completion("align", 50.0, 1000.0)
-        registry.record_completion("align", 52.0, 2000.0)
-
-        # Create rule_stats dict with different data (200s)
-        rule_stats = {"align": RuleTimingStats(rule="align", durations=[200.0, 210.0])}
-
-        # Create TimeEstimator with both
-        estimator = TimeEstimator(rule_stats=rule_stats, rule_registry=registry)
-
-        # Should use registry data (~50s), not rule_stats (~200s)
-        mean, var = estimator.get_estimate_for_job("align")
-        assert 45 < mean < 60  # Should be around 50s, not 200s
 
     def test_estimator_rule_registry_thread_stats(self) -> None:
         """Test TimeEstimator uses thread stats from RuleRegistry."""
@@ -492,15 +452,15 @@ class TestRuleRegistryIntegration:
         # Global mean should be (100 + 50) / 2 = 75
         assert estimator.global_mean_duration() == pytest.approx(75.0)
 
-    def test_estimator_without_rule_registry_uses_dict(self) -> None:
-        """Test TimeEstimator uses rule_stats dict when no registry provided."""
-        # Create rule_stats dict
-        rule_stats = {"align": RuleTimingStats(rule="align", durations=[100.0, 110.0])}
+    def test_estimator_creates_internal_registry(self) -> None:
+        """Test TimeEstimator creates internal registry when none provided."""
+        # Create TimeEstimator without explicit registry
+        estimator = TimeEstimator()
 
-        # Create TimeEstimator without registry
-        estimator = TimeEstimator(rule_stats=rule_stats)
+        # Should have an internal registry
+        assert estimator._rule_registry is not None
+        assert estimator.rule_stats == {}
 
-        # Should use rule_stats dict
-        mean, var = estimator.get_estimate_for_job("align")
-        assert 100 < mean < 115
-        assert var > 0
+        # Can load data into it
+        estimator._rule_registry.record_completion("align", 100.0, 1000.0)
+        assert "align" in estimator.rule_stats

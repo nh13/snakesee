@@ -70,7 +70,6 @@ class TimeEstimator:
 
     def __init__(
         self,
-        rule_stats: dict[str, RuleTimingStats] | None = None,
         use_wildcard_conditioning: bool = False,
         half_life_days: float | None = None,
         weighting_strategy: WeightingStrategy | None = None,
@@ -82,35 +81,29 @@ class TimeEstimator:
         Initialize the estimator.
 
         Args:
-            rule_stats: Pre-loaded rule timing statistics. If None, must call
-                load_from_metadata() before estimating.
             use_wildcard_conditioning: Whether to use wildcard-specific timing.
             half_life_days: Half-life in days for time-based weighting.
                            After this many days, a run's weight is halved.
                            Only used when weighting_strategy="time".
-                           Deprecated: Use config parameter instead.
             weighting_strategy: Strategy for weighting historical data.
                               "time" - decay based on wall-clock time (good for stable pipelines)
                               "index" - decay based on run count (good for active development)
-                              Deprecated: Use config parameter instead.
             half_life_logs: Half-life in log count for index-based weighting.
                            After this many runs, a run's weight is halved.
                            Only used when weighting_strategy="index".
-                           Deprecated: Use config parameter instead.
             config: Centralized estimation configuration. If not provided, uses
                    DEFAULT_CONFIG with any explicit parameters overriding it.
-            rule_registry: Optional RuleRegistry for centralized statistics.
-                          When provided, property accessors will delegate to the registry.
+            rule_registry: RuleRegistry for centralized statistics. If not provided,
+                          creates an internal registry.
         """
+        from snakesee.state.rule_registry import RuleRegistry
+
         # Use provided config or default
         self.config = config if config is not None else DEFAULT_CONFIG
 
-        # Centralized registry (Phase 11) - when provided, property accessors use it
-        self._rule_registry: "RuleRegistry | None" = rule_registry
+        # Centralized registry - create internal one if not provided
+        self._rule_registry: RuleRegistry = rule_registry or RuleRegistry(config=self.config)
 
-        self.rule_stats: dict[str, RuleTimingStats] = rule_stats or {}
-        self.thread_stats: dict[str, ThreadTimingStats] = {}
-        self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
         self.current_rules: set[str] | None = None  # Rules in current workflow (for filtering)
         self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
         self.expected_job_counts: dict[str, int] | None = None  # Expected counts from Job stats
@@ -128,37 +121,30 @@ class TimeEstimator:
         )
 
     @property
-    def _effective_rule_stats(self) -> dict[str, RuleTimingStats]:
-        """Get rule stats from registry or fallback to direct dict.
+    def rule_stats(self) -> dict[str, RuleTimingStats]:
+        """Get rule stats dict from the registry.
 
-        When a RuleRegistry is provided, delegates to it for centralized stats.
-        Otherwise, uses the local rule_stats dict for backward compatibility.
+        Returns a dict view for backward compatibility with code that reads rule_stats.
         """
-        if self._rule_registry is not None:
-            return self._rule_registry.to_rule_stats_dict()
-        return self.rule_stats
+        return self._rule_registry.to_rule_stats_dict()
+
+    @rule_stats.setter
+    def rule_stats(self, value: dict[str, RuleTimingStats]) -> None:
+        """Set rule stats by loading into the registry.
+
+        Supports backward compatibility with code that sets rule_stats directly.
+        """
+        self._rule_registry.load_from_rule_stats(value)
 
     @property
-    def _effective_thread_stats(self) -> dict[str, ThreadTimingStats]:
-        """Get thread stats from registry or fallback to direct dict.
-
-        When a RuleRegistry is provided, delegates to it for centralized stats.
-        Otherwise, uses the local thread_stats dict for backward compatibility.
-        """
-        if self._rule_registry is not None:
-            return self._rule_registry.to_thread_stats_dict()
-        return self.thread_stats
+    def thread_stats(self) -> dict[str, ThreadTimingStats]:
+        """Get thread stats dict from the registry."""
+        return self._rule_registry.to_thread_stats_dict()
 
     @property
-    def _effective_wildcard_stats(self) -> dict[str, dict[str, WildcardTimingStats]]:
-        """Get wildcard stats from registry or fallback to direct dict.
-
-        When a RuleRegistry is provided, delegates to it for centralized stats.
-        Otherwise, uses the local wildcard_stats dict for backward compatibility.
-        """
-        if self._rule_registry is not None:
-            return self._rule_registry.to_wildcard_stats_dict()
-        return self.wildcard_stats
+    def wildcard_stats(self) -> dict[str, dict[str, WildcardTimingStats]]:
+        """Get wildcard stats dict from the registry."""
+        return self._rule_registry.to_wildcard_stats_dict()
 
     def load_from_metadata(
         self,
@@ -170,93 +156,46 @@ class TimeEstimator:
 
         Uses a single-pass parser for efficiency - reads each metadata file
         only once to collect timing stats, code hashes, and wildcard stats.
+        Data is recorded directly into the RuleRegistry.
 
         Args:
             metadata_dir: Path to .snakemake/metadata/ directory.
             progress_callback: Optional callback(current, total) for progress reporting.
         """
-        # Collect all data in temporary structures
-        # rule -> [(duration, end_time, input_size), ...]
-        jobs_by_rule: dict[str, list[tuple[float, float, int | None]]] = {}
-        # code_hash -> set of rule names
+        # code_hash -> set of rule names (kept for fuzzy matching)
         hash_to_rules: dict[str, set[str]] = {}
-        # rule -> wildcard_key -> wildcard_value -> [(duration, end_time), ...]
-        wildcard_data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
 
-        # Single pass through all metadata files
+        # Single pass through all metadata files - record directly to registry
         for record in parse_metadata_files_full(metadata_dir, progress_callback):
             duration = record.duration
             end_time = record.end_time
 
-            # Collect timing stats
+            # Record timing stats directly to registry
             if duration is not None and end_time is not None:
-                if record.rule not in jobs_by_rule:
-                    jobs_by_rule[record.rule] = []
-                jobs_by_rule[record.rule].append((duration, end_time, record.input_size))
+                wildcards = record.wildcards if self.use_wildcard_conditioning else None
+                self._rule_registry.record_completion(
+                    rule=record.rule,
+                    duration=duration,
+                    timestamp=end_time,
+                    wildcards=wildcards,
+                    input_size=record.input_size,
+                )
 
-                # Collect wildcard stats if enabled
-                if self.use_wildcard_conditioning and record.wildcards:
-                    if record.rule not in wildcard_data:
-                        wildcard_data[record.rule] = {}
-                    for wc_key, wc_value in record.wildcards.items():
-                        if wc_key not in wildcard_data[record.rule]:
-                            wildcard_data[record.rule][wc_key] = {}
-                        if wc_value not in wildcard_data[record.rule][wc_key]:
-                            wildcard_data[record.rule][wc_key][wc_value] = []
-                        wildcard_data[record.rule][wc_key][wc_value].append((duration, end_time))
-
-            # Collect code hashes
+            # Collect code hashes for fuzzy matching
             if record.code_hash:
                 if record.code_hash not in hash_to_rules:
                     hash_to_rules[record.code_hash] = set()
                 hash_to_rules[record.code_hash].add(record.rule)
 
-        # Build RuleTimingStats from collected data
-        self.rule_stats = {}
-        for rule, timing_tuples in jobs_by_rule.items():
-            timing_tuples.sort(key=lambda x: x[1])  # Sort by end_time
-            durations = [t[0] for t in timing_tuples]
-            timestamps = [t[1] for t in timing_tuples]
-            input_sizes = [t[2] for t in timing_tuples]
-            self.rule_stats[rule] = RuleTimingStats(
-                rule=rule,
-                durations=durations,
-                timestamps=timestamps,
-                input_sizes=input_sizes,
-            )
-
         # Store code hashes
         self.code_hash_to_rules = hash_to_rules
 
-        # Build WildcardTimingStats if enabled
-        if self.use_wildcard_conditioning:
-            self.wildcard_stats = {}
-            for rule, wc_keys in wildcard_data.items():
-                self.wildcard_stats[rule] = {}
-                for wc_key, wc_values in wc_keys.items():
-                    stats_by_value: dict[str, RuleTimingStats] = {}
-                    for wc_value, timing_pairs in wc_values.items():
-                        timing_pairs.sort(key=lambda x: x[1])
-                        durations = [pair[0] for pair in timing_pairs]
-                        timestamps = [pair[1] for pair in timing_pairs]
-                        stats_by_value[wc_value] = RuleTimingStats(
-                            rule=f"{rule}:{wc_key}={wc_value}",
-                            durations=durations,
-                            timestamps=timestamps,
-                        )
-                    self.wildcard_stats[rule][wc_key] = WildcardTimingStats(
-                        rule=rule,
-                        wildcard_key=wc_key,
-                        stats_by_value=stats_by_value,
-                    )
-
-    def load_from_events(self, events_file: Path) -> None:  # noqa: C901
+    def load_from_events(self, events_file: Path) -> None:
         """
         Load historical execution times from a snakesee events file.
 
         Parses the .snakesee_events.jsonl file to extract job durations from
-        job_finished events. This complements or replaces metadata-based loading.
-        Also builds wildcard-specific timing stats for accurate per-sample estimates.
+        job_finished events. Data is recorded directly into the RuleRegistry.
 
         Args:
             events_file: Path to .snakesee_events.jsonl file.
@@ -266,11 +205,7 @@ class TimeEstimator:
         if not events_file.exists():
             return
 
-        # Collect timing data: rule -> [(duration, timestamp), ...]
-        jobs_by_rule: dict[str, list[tuple[float, float]]] = {}
-        # Collect wildcard data: rule -> wildcard_key -> wildcard_value -> [(duration, timestamp)]
-        wildcard_data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
-
+        has_wildcards = False
         try:
             for line in events_file.read_text().splitlines():
                 if not line.strip():
@@ -291,94 +226,23 @@ class TimeEstimator:
                 if duration is None or timestamp is None or rule_name is None:
                     continue
 
-                if rule_name not in jobs_by_rule:
-                    jobs_by_rule[rule_name] = []
-                jobs_by_rule[rule_name].append((duration, timestamp))
+                # Record directly to registry
+                wc_dict = wildcards if isinstance(wildcards, dict) else None
+                self._rule_registry.record_completion(
+                    rule=rule_name,
+                    duration=duration,
+                    timestamp=timestamp,
+                    wildcards=wc_dict,
+                )
 
-                # Collect wildcard-specific timing
-                if wildcards and isinstance(wildcards, dict):
-                    if rule_name not in wildcard_data:
-                        wildcard_data[rule_name] = {}
-                    for wc_key, wc_value in wildcards.items():
-                        if wc_key not in wildcard_data[rule_name]:
-                            wildcard_data[rule_name][wc_key] = {}
-                        if wc_value not in wildcard_data[rule_name][wc_key]:
-                            wildcard_data[rule_name][wc_key][wc_value] = []
-                        wildcard_data[rule_name][wc_key][wc_value].append((duration, timestamp))
+                if wc_dict:
+                    has_wildcards = True
 
         except OSError:
             return
 
-        # Merge into rule_stats (add to existing or create new)
-        for rule, timing_tuples in jobs_by_rule.items():
-            timing_tuples.sort(key=lambda x: x[1])  # Sort by timestamp
-            durations = [t[0] for t in timing_tuples]
-            timestamps = [t[1] for t in timing_tuples]
-
-            if rule in self.rule_stats:
-                # Merge with existing stats
-                existing = self.rule_stats[rule]
-                # Combine and re-sort by timestamp
-                combined = list(zip(existing.durations, existing.timestamps, strict=False))
-                combined.extend(timing_tuples)
-                combined.sort(key=lambda x: x[1])
-                self.rule_stats[rule] = RuleTimingStats(
-                    rule=rule,
-                    durations=[t[0] for t in combined],
-                    timestamps=[t[1] for t in combined],
-                    input_sizes=existing.input_sizes,  # Preserve from metadata
-                )
-            else:
-                # Create new stats
-                self.rule_stats[rule] = RuleTimingStats(
-                    rule=rule,
-                    durations=durations,
-                    timestamps=timestamps,
-                )
-
-        # Build wildcard stats from events (enables wildcard conditioning)
-        for rule, wc_keys in wildcard_data.items():
-            if rule not in self.wildcard_stats:
-                self.wildcard_stats[rule] = {}
-            for wc_key, wc_values in wc_keys.items():
-                stats_by_value: dict[str, RuleTimingStats] = {}
-                for wc_value, timing_pairs in wc_values.items():
-                    timing_pairs.sort(key=lambda x: x[1])
-                    durations = [pair[0] for pair in timing_pairs]
-                    timestamps = [pair[1] for pair in timing_pairs]
-                    stats_by_value[wc_value] = RuleTimingStats(
-                        rule=f"{rule}:{wc_key}={wc_value}",
-                        durations=durations,
-                        timestamps=timestamps,
-                    )
-                # Merge or create WildcardTimingStats
-                if wc_key in self.wildcard_stats[rule]:
-                    # Merge with existing
-                    existing_wts = self.wildcard_stats[rule][wc_key]
-                    for wc_value, new_stats in stats_by_value.items():
-                        if wc_value in existing_wts.stats_by_value:
-                            # Combine durations/timestamps
-                            old = existing_wts.stats_by_value[wc_value]
-                            combined = list(zip(old.durations, old.timestamps, strict=False))
-                            new_pairs = zip(new_stats.durations, new_stats.timestamps, strict=False)
-                            combined.extend(new_pairs)
-                            combined.sort(key=lambda x: x[1])
-                            existing_wts.stats_by_value[wc_value] = RuleTimingStats(
-                                rule=f"{rule}:{wc_key}={wc_value}",
-                                durations=[t[0] for t in combined],
-                                timestamps=[t[1] for t in combined],
-                            )
-                        else:
-                            existing_wts.stats_by_value[wc_value] = new_stats
-                else:
-                    self.wildcard_stats[rule][wc_key] = WildcardTimingStats(
-                        rule=rule,
-                        wildcard_key=wc_key,
-                        stats_by_value=stats_by_value,
-                    )
-
         # Auto-enable wildcard conditioning if we have wildcard data
-        if wildcard_data:
+        if has_wildcards:
             self.use_wildcard_conditioning = True
 
     def _find_rules_by_code_hash(self, rule: str) -> list[str]:
@@ -395,7 +259,7 @@ class TimeEstimator:
             List of other rule names that share the same code hash.
             Empty list if no code hash data or no matches.
         """
-        effective_stats = self._effective_rule_stats
+        effective_stats = self.rule_stats
         for _code_hash, rules in self.code_hash_to_rules.items():
             if rule in rules:
                 # Return other rules in the same hash group
@@ -419,7 +283,7 @@ class TimeEstimator:
             Tuple of (matched_rule_name, stats) if a similar rule is found,
             None otherwise.
         """
-        effective_stats = self._effective_rule_stats
+        effective_stats = self.rule_stats
         if not effective_stats:
             return None
 
@@ -498,7 +362,7 @@ class TimeEstimator:
         global_mean = self.global_mean_duration()
 
         # Try thread-specific stats first (highest priority for running job ETA)
-        effective_thread_stats = self._effective_thread_stats
+        effective_thread_stats = self.thread_stats
         if threads is not None and rule in effective_thread_stats:
             thread_stats, matched_threads = effective_thread_stats[rule].get_best_match(threads)
             if thread_stats is not None:
@@ -521,7 +385,7 @@ class TimeEstimator:
                 return thread_mean, thread_var
 
         # Try wildcard-specific stats if enabled
-        effective_wildcard_stats = self._effective_wildcard_stats
+        effective_wildcard_stats = self.wildcard_stats
         if self.use_wildcard_conditioning and wildcards and rule in effective_wildcard_stats:
             rule_wc_stats = effective_wildcard_stats[rule]
 
@@ -544,7 +408,7 @@ class TimeEstimator:
                     return rule_mean, rule_var
 
         # Fall back to rule-level stats
-        effective_stats = self._effective_rule_stats
+        effective_stats = self.rule_stats
         if rule in effective_stats:
             stats = effective_stats[rule]
 
@@ -595,7 +459,7 @@ class TimeEstimator:
         Returns:
             Average duration in seconds, or config.default_global_mean if no data.
         """
-        effective_stats = self._effective_rule_stats
+        effective_stats = self.rule_stats
         all_durations = [d for stats in effective_stats.values() for d in stats.durations]
         return mean(all_durations) if all_durations else self.config.default_global_mean
 
@@ -646,7 +510,7 @@ class TimeEstimator:
             return self._estimate_no_progress(progress)
 
         # Try weighted estimation with historical data
-        if self._effective_rule_stats:
+        if self.rule_stats:
             return self._estimate_weighted(progress, running_elapsed)
 
         # Fall back to simple estimation
@@ -738,7 +602,7 @@ class TimeEstimator:
 
         # Only augment with historical counts if we don't have expected_job_counts
         # (to avoid skewing proportional inference with historical execution counts)
-        effective_stats = self._effective_rule_stats
+        effective_stats = self.rule_stats
         if not self.expected_job_counts:
             for rule, stats in effective_stats.items():
                 if rule not in rule_completed:
