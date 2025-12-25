@@ -414,3 +414,93 @@ class TestWildcardConditioning:
         mean, var = estimator.get_estimate_for_job("align", wildcards={"sample": "sample3"})
         assert 95 < mean < 105  # Should be around 100s, not 50s
         assert var > 0
+
+
+class TestRuleRegistryIntegration:
+    """Tests for TimeEstimator integration with RuleRegistry (Phase 11)."""
+
+    def test_estimator_with_rule_registry(self) -> None:
+        """Test TimeEstimator uses RuleRegistry when provided."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        # Create RuleRegistry with data
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        registry.record_completion("align", 110.0, 2000.0)
+        registry.record_completion("sort", 50.0, 3000.0)
+
+        # Create TimeEstimator with registry
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # Should use registry data via _effective_rule_stats
+        mean, var = estimator.get_estimate_for_job("align")
+        assert 100 < mean < 115  # Weighted mean of 100, 110
+        assert var > 0
+
+    def test_estimator_rule_registry_overrides_rule_stats(self) -> None:
+        """Test RuleRegistry takes priority over rule_stats dict."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        # Create RuleRegistry with data (50s)
+        registry = RuleRegistry()
+        registry.record_completion("align", 50.0, 1000.0)
+        registry.record_completion("align", 52.0, 2000.0)
+
+        # Create rule_stats dict with different data (200s)
+        rule_stats = {"align": RuleTimingStats(rule="align", durations=[200.0, 210.0])}
+
+        # Create TimeEstimator with both
+        estimator = TimeEstimator(rule_stats=rule_stats, rule_registry=registry)
+
+        # Should use registry data (~50s), not rule_stats (~200s)
+        mean, var = estimator.get_estimate_for_job("align")
+        assert 45 < mean < 60  # Should be around 50s, not 200s
+
+    def test_estimator_rule_registry_thread_stats(self) -> None:
+        """Test TimeEstimator uses thread stats from RuleRegistry."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        # Create RuleRegistry with thread-specific data
+        registry = RuleRegistry()
+        registry.record_completion("align", 50.0, 1000.0, threads=4)
+        registry.record_completion("align", 52.0, 2000.0, threads=4)
+        registry.record_completion("align", 100.0, 3000.0, threads=1)
+
+        # Create TimeEstimator with registry
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # With threads=4, should use thread-specific stats (~50s)
+        mean4, _ = estimator.get_estimate_for_job("align", threads=4)
+        assert 45 < mean4 < 60
+
+        # With threads=1, should use thread-specific stats (~100s)
+        mean1, _ = estimator.get_estimate_for_job("align", threads=1)
+        assert 95 < mean1 < 110
+
+    def test_estimator_rule_registry_global_mean(self) -> None:
+        """Test TimeEstimator global_mean_duration uses RuleRegistry."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        # Create RuleRegistry with data
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        registry.record_completion("sort", 50.0, 2000.0)
+
+        # Create TimeEstimator with registry
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # Global mean should be (100 + 50) / 2 = 75
+        assert estimator.global_mean_duration() == pytest.approx(75.0)
+
+    def test_estimator_without_rule_registry_uses_dict(self) -> None:
+        """Test TimeEstimator uses rule_stats dict when no registry provided."""
+        # Create rule_stats dict
+        rule_stats = {"align": RuleTimingStats(rule="align", durations=[100.0, 110.0])}
+
+        # Create TimeEstimator without registry
+        estimator = TimeEstimator(rule_stats=rule_stats)
+
+        # Should use rule_stats dict
+        mean, var = estimator.get_estimate_for_job("align")
+        assert 100 < mean < 115
+        assert var > 0

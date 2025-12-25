@@ -27,7 +27,6 @@ from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
-from snakesee.models import ThreadTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WorkflowProgress
@@ -37,6 +36,8 @@ from snakesee.parser import IncrementalLogReader
 from snakesee.parser import parse_workflow_state
 from snakesee.plugins import parse_tool_progress
 from snakesee.plugins.base import ToolProgress
+from snakesee.state.clock import get_clock
+from snakesee.state.workflow_state import WorkflowState
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
@@ -211,11 +212,14 @@ class WorkflowMonitorTUI:
         # Track job_ids already added to rule_stats (to avoid duplicates)
         self._rule_stats_job_ids: set[str] = set()
 
-        # Track threads by job_id (populated from JOB_SUBMITTED events)
+        # Track threads by job_id for event handlers
+        # (populated from JOB_SUBMITTED events, used to enrich JobInfo objects)
         self._job_threads: dict[str, int] = {}
 
-        # Thread-grouped timing stats: rule -> ThreadTimingStats
-        self._thread_stats: dict[str, ThreadTimingStats] = {}
+        # Centralized workflow state (Phase 10+)
+        self._workflow_state: WorkflowState = WorkflowState.create(
+            workflow_dir=workflow_dir,
+        )
 
         self._init_estimator()
 
@@ -256,7 +260,7 @@ class WorkflowMonitorTUI:
         """Initialize or reinitialize the time estimator with progress display."""
         self._rule_stats_job_ids.clear()
         self._job_threads.clear()
-        self._thread_stats.clear()
+        self._workflow_state.rules.clear()
 
         if not self.use_estimation:
             self._estimator = None
@@ -267,6 +271,7 @@ class WorkflowMonitorTUI:
             weighting_strategy=self.weighting_strategy,
             half_life_logs=self.half_life_logs,
             half_life_days=self.half_life_days,
+            rule_registry=self._workflow_state.rules,
         )
 
         metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
@@ -337,15 +342,14 @@ class WorkflowMonitorTUI:
             # Parse current rules (fast, no progress needed)
             self._init_current_rules_from_log()
 
-        # Share thread stats with estimator for thread-aware ETA
-        self._estimator.thread_stats = self._thread_stats
-
     def _init_thread_stats_from_log(
         self,
         log_paths: list[Path] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         """Initialize thread stats from all log files (metadata doesn't have threads).
+
+        Populates the centralized RuleRegistry with thread-specific timing data.
 
         Args:
             log_paths: Optional list of log paths to process (avoids re-discovering).
@@ -369,17 +373,15 @@ class WorkflowMonitorTUI:
             for job in parse_completed_jobs_from_log(log_path):
                 if job.threads is None or job.duration is None:
                     continue
-                if job.rule not in self._thread_stats:
-                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
-                thread_stats = self._thread_stats[job.rule]
-                if job.threads not in thread_stats.stats_by_threads:
-                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
-                ts = thread_stats.stats_by_threads[job.threads]
-                ts.durations.append(job.duration)
-                if job.end_time is not None:
-                    ts.timestamps.append(job.end_time)
-                if job.input_size is not None:
-                    ts.input_sizes.append(job.input_size)
+                # Record to centralized RuleRegistry (includes thread info)
+                self._workflow_state.rules.record_completion(
+                    rule=job.rule,
+                    duration=job.duration,
+                    timestamp=job.end_time or 0.0,
+                    threads=job.threads,
+                    wildcards=dict(job.wildcards) if job.wildcards else None,
+                    input_size=job.input_size,
+                )
 
     def _init_current_rules_from_log(self) -> None:
         """Parse current rules and job counts from the latest log."""
@@ -618,9 +620,13 @@ class WorkflowMonitorTUI:
 
         # Process events to update state
         for event in events:
+            # Route event through centralized JobRegistry (Phase 10)
+            self._workflow_state.jobs.apply_event(event)
+
             if event.event_type == EventType.PROGRESS:
                 if event.total_jobs is not None:
                     new_total = event.total_jobs
+                    self._workflow_state.total_jobs = event.total_jobs
                 if event.completed_jobs is not None:
                     new_completed = event.completed_jobs
             elif event.event_type == EventType.JOB_SUBMITTED:
@@ -692,30 +698,15 @@ class WorkflowMonitorTUI:
             if duration is None:
                 continue
 
-            # Add to rule_stats
-            if job.rule not in self._estimator.rule_stats:
-                self._estimator.rule_stats[job.rule] = RuleTimingStats(rule=job.rule)
-
-            stats = self._estimator.rule_stats[job.rule]
-            stats.durations.append(duration)
-            if job.end_time is not None:
-                stats.timestamps.append(job.end_time)
-            if job.input_size is not None:
-                stats.input_sizes.append(job.input_size)
-
-            # Also update thread stats if thread info is available
-            if job.threads is not None:
-                if job.rule not in self._thread_stats:
-                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
-                thread_stats = self._thread_stats[job.rule]
-                if job.threads not in thread_stats.stats_by_threads:
-                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
-                ts = thread_stats.stats_by_threads[job.threads]
-                ts.durations.append(duration)
-                if job.end_time is not None:
-                    ts.timestamps.append(job.end_time)
-                if job.input_size is not None:
-                    ts.input_sizes.append(job.input_size)
+            # Record to centralized RuleRegistry (includes thread info)
+            self._workflow_state.rules.record_completion(
+                rule=job.rule,
+                duration=duration,
+                timestamp=job.end_time or 0.0,
+                threads=job.threads,
+                wildcards=dict(job.wildcards) if job.wildcards else None,
+                input_size=job.input_size,
+            )
 
             # Mark this job as processed
             self._rule_stats_job_ids.add(dedup_key)
@@ -2108,18 +2099,19 @@ class WorkflowMonitorTUI:
         # Limit total rows to 8 (not rules) to handle thread expansion
         max_rows = 8
         rows: list[tuple[str, str, RuleTimingStats]] = []
+        thread_stats_dict = self._workflow_state.rules.to_thread_stats_dict()
         for stats in stats_list:
             if len(rows) >= max_rows:
                 break
             rule = stats.rule
-            if rule in self._thread_stats and self._thread_stats[rule].stats_by_threads:
+            if rule in thread_stats_dict and thread_stats_dict[rule].stats_by_threads:
                 # Has thread-specific data - show each thread count
-                thread_stats = self._thread_stats[rule]
-                sorted_threads = sorted(thread_stats.stats_by_threads.keys())
+                rule_thread_stats = thread_stats_dict[rule]
+                sorted_threads = sorted(rule_thread_stats.stats_by_threads.keys())
                 for i, threads in enumerate(sorted_threads):
                     if len(rows) >= max_rows:
                         break
-                    ts = thread_stats.stats_by_threads[threads]
+                    ts = rule_thread_stats.stats_by_threads[threads]
                     # First row shows rule name, subsequent rows show blank
                     rule_display = rule if i == 0 else ""
                     rows.append((rule_display, str(threads), ts))
@@ -2417,7 +2409,7 @@ class WorkflowMonitorTUI:
                 refresh_per_second=1,
                 screen=True,
             ) as live:
-                last_update = time.time()
+                last_update = get_clock().now()
 
                 while self._running:
                     # Check for keyboard input (non-blocking)
@@ -2455,7 +2447,7 @@ class WorkflowMonitorTUI:
                             break
 
                     # Refresh at the specified rate or if forced (unless paused)
-                    now = time.time()
+                    now = get_clock().now()
                     should_refresh = self._force_refresh or (
                         not self._paused and now - last_update >= self.refresh_rate
                     )

@@ -658,7 +658,6 @@ class TestRuleStatsUpdate:
     ) -> None:
         """Test stats update with job_id deduplication."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         progress = make_workflow_progress(
             recent_completions=[
@@ -667,16 +666,16 @@ class TestRuleStatsUpdate:
         )
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should have added stats for align rule
-        assert "align" in tui_with_mocks._estimator.rule_stats
-        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+        # Should have added stats to RuleRegistry
+        rule_stats = tui_with_mocks._workflow_state.rules.get("align")
+        assert rule_stats is not None
+        assert rule_stats.aggregate.count == 1
 
     def test_update_stats_deduplication(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that duplicate jobs are not counted twice."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
         progress = make_workflow_progress(recent_completions=[job])
@@ -685,15 +684,16 @@ class TestRuleStatsUpdate:
         tui_with_mocks._update_rule_stats_from_completions(progress)
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should only count once
-        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+        # Should only count once (deduplication via _rule_stats_job_ids)
+        rule_stats = tui_with_mocks._workflow_state.rules.get("align")
+        assert rule_stats is not None
+        assert rule_stats.aggregate.count == 1
 
     def test_update_stats_with_threads(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that thread stats are updated when job has threads."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         progress = make_workflow_progress(
             recent_completions=[
@@ -704,16 +704,16 @@ class TestRuleStatsUpdate:
         )
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should have thread stats
-        assert "align" in tui_with_mocks._thread_stats
-        assert 4 in tui_with_mocks._thread_stats["align"].stats_by_threads
+        # Should have thread stats in RuleRegistry
+        thread_stats_dict = tui_with_mocks._workflow_state.rules.to_thread_stats_dict()
+        assert "align" in thread_stats_dict
+        assert 4 in thread_stats_dict["align"].stats_by_threads
 
     def test_update_stats_skips_no_duration(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that jobs without duration are skipped."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         # Job with no end_time means no duration
         progress = make_workflow_progress(
@@ -724,7 +724,7 @@ class TestRuleStatsUpdate:
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
         # Should not have added stats
-        assert "align" not in tui_with_mocks._estimator.rule_stats
+        assert tui_with_mocks._workflow_state.rules.get("align") is None
 
 
 class TestStatsPanel:
@@ -763,18 +763,15 @@ class TestStatsPanel:
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test stats panel displays thread-specific statistics."""
-        from snakesee.models import RuleTimingStats
-        from snakesee.models import ThreadTimingStats
-
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {
-            "align": RuleTimingStats(rule="align", durations=[100.0]),
-        }
-        # Add thread stats
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[100.0])
-        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[60.0])
-        tui_with_mocks._thread_stats["align"] = thread_stats
+
+        # Populate RuleRegistry with thread-specific data
+        tui_with_mocks._workflow_state.rules.record_completion(
+            rule="align", duration=100.0, timestamp=1000.0, threads=4
+        )
+        tui_with_mocks._workflow_state.rules.record_completion(
+            rule="align", duration=60.0, timestamp=2000.0, threads=8
+        )
 
         panel = tui_with_mocks._make_stats_panel()
         assert panel is not None
