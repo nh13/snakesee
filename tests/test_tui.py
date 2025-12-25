@@ -828,7 +828,7 @@ class TestJobLogPanel:
             ]
         )
         panel = tui_with_mocks._make_job_log_panel(progress)
-        assert "No log file found" in str(panel.renderable)
+        assert "No log file for" in str(panel.renderable)
 
 
 class TestInitMethods:
