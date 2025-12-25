@@ -38,6 +38,7 @@ class JobInfo:
         wildcards: Dictionary of wildcard names to values (e.g., {"sample": "A", "batch": "1"}).
         input_size: Total size of input files in bytes (None if unknown).
         threads: Number of threads allocated to this job (None if unknown).
+        log_file: Path to the job's log file (parsed from snakemake log directive).
     """
 
     rule: str
@@ -48,6 +49,7 @@ class JobInfo:
     wildcards: dict[str, str] | None = None
     input_size: int | None = None
     threads: int | None = None
+    log_file: Path | None = None
 
     @property
     def elapsed(self) -> float | None:

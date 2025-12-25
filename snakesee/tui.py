@@ -35,7 +35,6 @@ from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
 from snakesee.parser import IncrementalLogReader
 from snakesee.parser import parse_workflow_state
-from snakesee.plugins import find_rule_log
 from snakesee.plugins import parse_tool_progress
 from snakesee.plugins.base import ToolProgress
 from snakesee.validation import EventAccumulator
@@ -1326,9 +1325,11 @@ class WorkflowMonitorTUI:
         Returns:
             ToolProgress if parseable, None otherwise.
         """
-        # Find the log file for this job
-        log_path = find_rule_log(job.rule, job.job_id, self.workflow_dir, job.wildcards)
-        if log_path is None:
+        # Use job.log_file (parsed from snakemake log, keyed by job_id)
+        if job.log_file is None:
+            return None
+        log_path = self.workflow_dir / job.log_file
+        if not log_path.exists():
             return None
 
         # Try to parse progress from the log
@@ -1394,7 +1395,7 @@ class WorkflowMonitorTUI:
         header_style = "bold magenta on dark_blue" if is_sorting else "bold magenta"
 
         table = Table(expand=True, show_header=True, header_style=header_style)
-        table.add_column("#", justify="right", style="dim", width=3)
+        table.add_column("#", justify="right", style="dim", width=5)
         table.add_column(f"Rule{self._sort_indicator('running', 0)}", style="cyan", no_wrap=True)
         table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Started{self._sort_indicator('running', 1)}", justify="right")
@@ -1461,9 +1462,9 @@ class WorkflowMonitorTUI:
                     rule_style = "bold cyan on dark_blue"
 
             threads_str = str(job.threads) if job.threads is not None else "-"
-            row_num = str(actual_idx + 1)  # 1-indexed row number
+            job_id_str = str(job.job_id) if job.job_id else str(actual_idx + 1)
             table.add_row(
-                row_num,
+                job_id_str,
                 Text(job.rule, style=rule_style),
                 threads_str,
                 started_str,
@@ -1501,7 +1502,7 @@ class WorkflowMonitorTUI:
 
         table = Table(expand=True, show_header=True, header_style=header_style)
         ind = self._sort_indicator
-        table.add_column("#", justify="right", style="dim", width=3)
+        table.add_column("#", justify="right", style="dim", width=5)
         table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
         table.add_column(f"Thr{ind('completions', 1)}", justify="right")
         table.add_column(f"Duration{ind('completions', 2)}", justify="right")
@@ -1575,9 +1576,9 @@ class WorkflowMonitorTUI:
             if is_selecting and actual_idx == self._selected_completion_index:
                 rule_style = "bold cyan on dark_blue" if not is_failed else "bold red on dark_blue"
 
-            row_num = str(actual_idx + 1)  # 1-indexed row number
+            job_id_str = str(job.job_id) if job.job_id else str(actual_idx + 1)
             table.add_row(
-                row_num,
+                job_id_str,
                 Text(job.rule, style=rule_style),
                 threads_str,
                 duration_str,
@@ -1781,15 +1782,18 @@ class WorkflowMonitorTUI:
                 border_style=FG_BLUE,
             )
 
-        # Find log file using existing plugin infrastructure
-        log_path = find_rule_log(
-            selected_job.rule,
-            selected_job.job_id,
-            self.workflow_dir,
-            selected_job.wildcards,
-        )
+        # Use job.log_file (parsed from snakemake log, keyed by job_id)
+        if selected_job.log_file is None:
+            status_suffix = f" [{job_status}]" if job_status else ""
+            return Panel(
+                f"[dim]No log file for {selected_job.rule} (job {selected_job.job_id})[/dim]",
+                title=f"Job Log: {selected_job.rule}{status_suffix}",
+                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                border_style=FG_BLUE,
+            )
+        log_path = self.workflow_dir / selected_job.log_file
 
-        if log_path is None:
+        if not log_path.exists():
             status_suffix = f" [{job_status}]" if job_status else ""
             return Panel(
                 f"[dim]No log file found for {selected_job.rule}[/dim]",
