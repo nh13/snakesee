@@ -79,6 +79,9 @@ WILDCARDS_PATTERN = re.compile(r"\s+wildcards:\s*(.+)")
 # Pattern for threads line: "    threads: 4"
 THREADS_PATTERN = re.compile(r"\s+threads:\s*(\d+)")
 
+# Pattern for log line: "    log: logs/sample.log"
+LOG_PATTERN = re.compile(r"\s+log:\s*(.+)")
+
 
 def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
     """
@@ -245,6 +248,9 @@ class IncrementalLogReader:
         self._finished_jobids: set[str] = set()
         self._completed_jobs: list[JobInfo] = []
 
+        # Job log paths: jobid -> log_path (separate lookup for clarity)
+        self._job_logs: dict[str, str] = {}
+
         # Failed job tracking
         self._failed_jobs: list[JobInfo] = []
         self._seen_failures: set[tuple[str, str | None]] = set()
@@ -255,6 +261,7 @@ class IncrementalLogReader:
         self._current_wildcards: dict[str, str] | None = None
         self._current_threads: int | None = None
         self._current_timestamp: float | None = None
+        self._current_log_path: str | None = None
 
     def _check_rotation(self) -> bool:
         """Check if the log file has been rotated or truncated.
@@ -295,6 +302,7 @@ class IncrementalLogReader:
         self._started_jobs.clear()
         self._finished_jobids.clear()
         self._completed_jobs.clear()
+        self._job_logs.clear()
         self._failed_jobs.clear()
         self._seen_failures.clear()
         self._current_rule = None
@@ -302,6 +310,7 @@ class IncrementalLogReader:
         self._current_wildcards = None
         self._current_threads = None
         self._current_timestamp = None
+        self._current_log_path = None
 
     def set_log_path(self, log_path: Path) -> None:
         """Change the log file being monitored.
@@ -367,6 +376,7 @@ class IncrementalLogReader:
             self._current_jobid = None
             self._current_wildcards = None
             self._current_threads = None
+            self._current_log_path = None
             return
 
         # Capture wildcards within rule block
@@ -383,6 +393,14 @@ class IncrementalLogReader:
                 self._started_jobs[self._current_jobid] = (rule, ts, wc, self._current_threads)
             return
 
+        # Capture log path within rule block - store by jobid for direct lookup
+        if match := LOG_PATTERN.match(line):
+            self._current_log_path = match.group(1).strip()
+            # Store log by jobid if we already have it
+            if self._current_jobid:
+                self._job_logs[self._current_jobid] = self._current_log_path
+            return
+
         # Capture jobid within rule block
         if match := JOBID_PATTERN.match(line):
             self._current_jobid = match.group(1)
@@ -393,6 +411,9 @@ class IncrementalLogReader:
                     self._current_wildcards,
                     self._current_threads,
                 )
+            # Store log by jobid if we already captured it
+            if self._current_log_path:
+                self._job_logs[self._current_jobid] = self._current_log_path
             return
 
         # Track finished jobs
@@ -403,6 +424,7 @@ class IncrementalLogReader:
             # Create completed job entry if we have start info
             if jobid in self._started_jobs:
                 rule, start_time, wildcards, threads = self._started_jobs[jobid]
+                log_path = self._job_logs.get(jobid)
                 self._completed_jobs.append(
                     JobInfo(
                         rule=rule,
@@ -411,6 +433,7 @@ class IncrementalLogReader:
                         end_time=self._current_timestamp,
                         wildcards=wildcards,
                         threads=threads,
+                        log_file=Path(log_path) if log_path else None,
                     )
                 )
             return
@@ -422,6 +445,8 @@ class IncrementalLogReader:
             jobid = self._current_jobid if self._current_rule == rule else None
             wildcards = self._current_wildcards if self._current_rule == rule else None
             threads = self._current_threads if self._current_rule == rule else None
+            # Look up log by jobid
+            log_path = self._job_logs.get(jobid) if jobid else None
             key = (rule, jobid)
 
             if key not in self._seen_failures:
@@ -432,6 +457,7 @@ class IncrementalLogReader:
                         job_id=jobid,
                         wildcards=wildcards,
                         threads=threads,
+                        log_file=Path(log_path) if log_path else None,
                     )
                 )
 
@@ -454,6 +480,8 @@ class IncrementalLogReader:
         running: list[JobInfo] = []
         for jobid, (rule, start_time, wildcards, threads) in self._started_jobs.items():
             if jobid not in self._finished_jobids:
+                # Look up log by jobid - unique within this run
+                log_path = self._job_logs.get(jobid)
                 running.append(
                     JobInfo(
                         rule=rule,
@@ -461,6 +489,7 @@ class IncrementalLogReader:
                         start_time=start_time,
                         wildcards=wildcards,
                         threads=threads,
+                        log_file=Path(log_path) if log_path else None,
                     )
                 )
         return running
@@ -768,12 +797,15 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
     """
     # Track started jobs: jobid -> (rule, start_line_num, wildcards, threads)
     started_jobs: dict[str, tuple[str, int, dict[str, str] | None, int | None]] = {}
+    # Job logs: jobid -> log_path (separate lookup by unique jobid)
+    job_logs: dict[str, str] = {}
     finished_jobids: set[str] = set()
 
     current_rule: str | None = None
     current_jobid: str | None = None
     current_wildcards: dict[str, str] | None = None
     current_threads: int | None = None
+    current_log_path: str | None = None
 
     try:
         lines = log_path.read_text().splitlines()
@@ -784,6 +816,7 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
                 current_jobid = None  # Reset jobid for new rule block
                 current_wildcards = None
                 current_threads = None
+                current_log_path = None
 
             # Capture wildcards within rule block
             elif match := WILDCARDS_PATTERN.match(line):
@@ -797,6 +830,12 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
                     rule, ln, wc, _ = started_jobs[current_jobid]
                     started_jobs[current_jobid] = (rule, ln, wc, current_threads)
 
+            # Capture log path within rule block - store by jobid
+            elif match := LOG_PATTERN.match(line):
+                current_log_path = match.group(1).strip()
+                if current_jobid:
+                    job_logs[current_jobid] = current_log_path
+
             # Capture jobid within rule block
             elif match := JOBID_PATTERN.match(line):
                 current_jobid = match.group(1)
@@ -807,6 +846,9 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
                         current_wildcards,
                         current_threads,
                     )
+                # Store log by jobid if we already captured it
+                if current_log_path:
+                    job_logs[current_jobid] = current_log_path
 
             # Track finished jobs
             elif match := FINISHED_JOB_PATTERN.search(line):
@@ -821,7 +863,8 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
 
     for jobid, (rule, _line_num, wildcards, threads) in started_jobs.items():
         if jobid not in finished_jobids:
-            # Estimate start time from log modification time (approximate)
+            # Look up log by jobid - unique within this run
+            job_log = job_logs.get(jobid)
             running.append(
                 JobInfo(
                     rule=rule,
@@ -829,6 +872,7 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
                     start_time=log_mtime,  # Approximate; could improve with timestamps
                     wildcards=wildcards,
                     threads=threads,
+                    log_file=Path(job_log) if job_log else None,
                 )
             )
 
@@ -1004,11 +1048,14 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
 
     # Track started jobs: jobid -> (rule, start_time, wildcards, threads)
     started_jobs: dict[str, tuple[str, float, dict[str, str] | None, int | None]] = {}
+    # Job logs: jobid -> log_path (separate lookup by unique jobid)
+    job_logs: dict[str, str] = {}
     current_rule: str | None = None
     current_timestamp: float | None = None
     current_wildcards: dict[str, str] | None = None
     current_threads: int | None = None
     current_jobid: str | None = None
+    current_log_path: str | None = None
 
     try:
         lines = log_path.read_text().splitlines()
@@ -1023,6 +1070,7 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                 current_wildcards = None
                 current_threads = None
                 current_jobid = None
+                current_log_path = None
 
             # Capture wildcards within rule block
             elif match := WILDCARDS_PATTERN.match(line):
@@ -1036,6 +1084,12 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                     rule, ts, wc, _ = started_jobs[current_jobid]
                     started_jobs[current_jobid] = (rule, ts, wc, current_threads)
 
+            # Capture log path within rule block - store by jobid
+            elif match := LOG_PATTERN.match(line):
+                current_log_path = match.group(1).strip()
+                if current_jobid:
+                    job_logs[current_jobid] = current_log_path
+
             # Capture jobid within rule block
             elif match := JOBID_PATTERN.match(line):
                 current_jobid = match.group(1)
@@ -1046,12 +1100,17 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                         current_wildcards,
                         current_threads,
                     )
+                # Store log by jobid if we already captured it
+                if current_log_path:
+                    job_logs[current_jobid] = current_log_path
 
             # Track finished jobs
             elif match := FINISHED_JOB_PATTERN.search(line):
                 jobid = match.group(1)
                 if jobid in started_jobs and current_timestamp is not None:
                     rule, start_time, wildcards, threads = started_jobs[jobid]
+                    # Look up log by jobid - unique within this run
+                    job_log = job_logs.get(jobid)
                     completed_jobs.append(
                         JobInfo(
                             rule=rule,
@@ -1060,6 +1119,7 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                             end_time=current_timestamp,
                             wildcards=wildcards,
                             threads=threads,
+                            log_file=Path(job_log) if job_log else None,
                         )
                     )
 
