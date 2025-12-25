@@ -23,6 +23,7 @@ Example usage:
         assert calculate_elapsed(900.0) == 150.0
 """
 
+import threading
 import time as _time
 from typing import Protocol
 
@@ -154,7 +155,8 @@ class OffsetClock:
         return _time.monotonic()
 
 
-# Default global clock instance
+# Default global clock instance with thread-safe access
+_clock_lock = threading.RLock()
 _default_clock: Clock = SystemClock()
 
 
@@ -164,7 +166,8 @@ def get_clock() -> Clock:
     Returns:
         The currently configured clock instance.
     """
-    return _default_clock
+    with _clock_lock:
+        return _default_clock
 
 
 def set_clock(clock: Clock) -> None:
@@ -174,10 +177,12 @@ def set_clock(clock: Clock) -> None:
         clock: Clock instance to use as default.
     """
     global _default_clock
-    _default_clock = clock
+    with _clock_lock:
+        _default_clock = clock
 
 
 def reset_clock() -> None:
     """Reset the default clock to SystemClock."""
     global _default_clock
-    _default_clock = SystemClock()
+    with _clock_lock:
+        _default_clock = SystemClock()
