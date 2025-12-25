@@ -94,6 +94,7 @@ class TimeEstimator:
         self.wildcard_stats: dict[str, dict[str, WildcardTimingStats]] = {}
         self.current_rules: set[str] | None = None  # Rules in current workflow (for filtering)
         self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
+        self.expected_job_counts: dict[str, int] | None = None  # Expected counts from Job stats
         self.use_wildcard_conditioning = use_wildcard_conditioning
         self.weighting_strategy = weighting_strategy
         self.half_life_days = half_life_days
@@ -188,6 +189,137 @@ class TimeEstimator:
                         wildcard_key=wc_key,
                         stats_by_value=stats_by_value,
                     )
+
+    def load_from_events(self, events_file: Path) -> None:  # noqa: C901
+        """
+        Load historical execution times from a snakesee events file.
+
+        Parses the .snakesee_events.jsonl file to extract job durations from
+        job_finished events. This complements or replaces metadata-based loading.
+        Also builds wildcard-specific timing stats for accurate per-sample estimates.
+
+        Args:
+            events_file: Path to .snakesee_events.jsonl file.
+        """
+        import json
+
+        if not events_file.exists():
+            return
+
+        # Collect timing data: rule -> [(duration, timestamp), ...]
+        jobs_by_rule: dict[str, list[tuple[float, float]]] = {}
+        # Collect wildcard data: rule -> wildcard_key -> wildcard_value -> [(duration, timestamp)]
+        wildcard_data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
+
+        try:
+            for line in events_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Only process job_finished events with duration
+                if event.get("event_type") != "job_finished":
+                    continue
+                duration = event.get("duration")
+                timestamp = event.get("timestamp")
+                rule_name = event.get("rule_name")
+                wildcards = event.get("wildcards")
+
+                if duration is None or timestamp is None or rule_name is None:
+                    continue
+
+                if rule_name not in jobs_by_rule:
+                    jobs_by_rule[rule_name] = []
+                jobs_by_rule[rule_name].append((duration, timestamp))
+
+                # Collect wildcard-specific timing
+                if wildcards and isinstance(wildcards, dict):
+                    if rule_name not in wildcard_data:
+                        wildcard_data[rule_name] = {}
+                    for wc_key, wc_value in wildcards.items():
+                        if wc_key not in wildcard_data[rule_name]:
+                            wildcard_data[rule_name][wc_key] = {}
+                        if wc_value not in wildcard_data[rule_name][wc_key]:
+                            wildcard_data[rule_name][wc_key][wc_value] = []
+                        wildcard_data[rule_name][wc_key][wc_value].append((duration, timestamp))
+
+        except OSError:
+            return
+
+        # Merge into rule_stats (add to existing or create new)
+        for rule, timing_tuples in jobs_by_rule.items():
+            timing_tuples.sort(key=lambda x: x[1])  # Sort by timestamp
+            durations = [t[0] for t in timing_tuples]
+            timestamps = [t[1] for t in timing_tuples]
+
+            if rule in self.rule_stats:
+                # Merge with existing stats
+                existing = self.rule_stats[rule]
+                # Combine and re-sort by timestamp
+                combined = list(zip(existing.durations, existing.timestamps, strict=False))
+                combined.extend(timing_tuples)
+                combined.sort(key=lambda x: x[1])
+                self.rule_stats[rule] = RuleTimingStats(
+                    rule=rule,
+                    durations=[t[0] for t in combined],
+                    timestamps=[t[1] for t in combined],
+                    input_sizes=existing.input_sizes,  # Preserve from metadata
+                )
+            else:
+                # Create new stats
+                self.rule_stats[rule] = RuleTimingStats(
+                    rule=rule,
+                    durations=durations,
+                    timestamps=timestamps,
+                )
+
+        # Build wildcard stats from events (enables wildcard conditioning)
+        for rule, wc_keys in wildcard_data.items():
+            if rule not in self.wildcard_stats:
+                self.wildcard_stats[rule] = {}
+            for wc_key, wc_values in wc_keys.items():
+                stats_by_value: dict[str, RuleTimingStats] = {}
+                for wc_value, timing_pairs in wc_values.items():
+                    timing_pairs.sort(key=lambda x: x[1])
+                    durations = [pair[0] for pair in timing_pairs]
+                    timestamps = [pair[1] for pair in timing_pairs]
+                    stats_by_value[wc_value] = RuleTimingStats(
+                        rule=f"{rule}:{wc_key}={wc_value}",
+                        durations=durations,
+                        timestamps=timestamps,
+                    )
+                # Merge or create WildcardTimingStats
+                if wc_key in self.wildcard_stats[rule]:
+                    # Merge with existing
+                    existing_wts = self.wildcard_stats[rule][wc_key]
+                    for wc_value, new_stats in stats_by_value.items():
+                        if wc_value in existing_wts.stats_by_value:
+                            # Combine durations/timestamps
+                            old = existing_wts.stats_by_value[wc_value]
+                            combined = list(zip(old.durations, old.timestamps, strict=False))
+                            new_pairs = zip(new_stats.durations, new_stats.timestamps, strict=False)
+                            combined.extend(new_pairs)
+                            combined.sort(key=lambda x: x[1])
+                            existing_wts.stats_by_value[wc_value] = RuleTimingStats(
+                                rule=f"{rule}:{wc_key}={wc_value}",
+                                durations=[t[0] for t in combined],
+                                timestamps=[t[1] for t in combined],
+                            )
+                        else:
+                            existing_wts.stats_by_value[wc_value] = new_stats
+                else:
+                    self.wildcard_stats[rule][wc_key] = WildcardTimingStats(
+                        rule=rule,
+                        wildcard_key=wc_key,
+                        stats_by_value=stats_by_value,
+                    )
+
+        # Auto-enable wildcard conditioning if we have wildcard data
+        if wildcard_data:
+            self.use_wildcard_conditioning = True
 
     def _find_rules_by_code_hash(self, rule: str) -> list[str]:
         """
@@ -523,16 +655,24 @@ class TimeEstimator:
         for job in progress.recent_completions:
             rule_completed[job.rule] = rule_completed.get(job.rule, 0) + 1
 
-        # Augment with historical rule stats for rules not in recent completions
-        # This ensures pending rules can be inferred even early in the workflow
-        for rule, stats in self.rule_stats.items():
-            if rule not in rule_completed:
-                rule_completed[rule] = stats.count
+        # Count running jobs by rule
+        running_by_rule: dict[str, int] = {}
+        for job in progress.running_jobs:
+            running_by_rule[job.rule] = running_by_rule.get(job.rule, 0) + 1
 
-        # Estimate pending rule distribution (assume proportional to completed)
-        # Filter by current_rules to exclude deleted rules from historical data
+        # Only augment with historical counts if we don't have expected_job_counts
+        # (to avoid skewing proportional inference with historical execution counts)
+        if not self.expected_job_counts:
+            for rule, stats in self.rule_stats.items():
+                if rule not in rule_completed:
+                    rule_completed[rule] = stats.count
+
+        # Estimate pending rule distribution
+        # If expected_job_counts is set, _infer_pending_rules will use exact calculation
         pending = progress.total_jobs - progress.completed_jobs - len(progress.running_jobs)
-        pending_rules = self._infer_pending_rules(rule_completed, pending, self.current_rules)
+        pending_rules = self._infer_pending_rules(
+            rule_completed, pending, self.current_rules, running_by_rule
+        )
 
         # Calculate expected remaining time
         total_expected = 0.0
@@ -552,21 +692,21 @@ class TimeEstimator:
             total_expected += count * rule_mean
             total_variance += count * rule_var
 
-        # Add time for running jobs (subtract elapsed time)
-        for rule, elapsed in running_elapsed.items():
-            if rule in self.rule_stats:
-                expected = self._get_weighted_mean(self.rule_stats[rule])
-            else:
-                expected = global_mean
+        # Add time for running jobs - use wildcard-specific estimates when available
+        for job in progress.running_jobs:
+            # Use get_estimate_for_job which handles wildcard conditioning
+            expected, variance = self.get_estimate_for_job(
+                rule=job.rule,
+                wildcards=job.wildcards,
+                input_size=job.input_size,
+                threads=job.threads,
+            )
+
+            # Use actual elapsed time if available
+            elapsed = job.elapsed or 0.0
             remaining = max(0, expected - elapsed)
             total_expected += remaining
-            total_variance += (expected * 0.3) ** 2  # Uncertainty for running jobs
-
-        # Add time for running jobs we don't have elapsed info for
-        unknown_running = len(progress.running_jobs) - len(running_elapsed)
-        if unknown_running > 0:
-            total_expected += unknown_running * global_mean * 0.5  # Assume halfway done
-            total_variance += unknown_running * (global_mean * 0.5) ** 2
+            total_variance += variance
 
         # Estimate parallelism from historical completion rate (more stable than current)
         # Use a conservative parallelism estimate based on completed jobs and elapsed time
@@ -633,12 +773,14 @@ class TimeEstimator:
         completed_by_rule: dict[str, int],
         pending_count: int,
         current_rules: set[str] | None = None,
+        running_by_rule: dict[str, int] | None = None,
     ) -> dict[str, int]:
         """
         Infer the composition of pending rules.
 
-        Assumes pending jobs follow the same proportion as completed jobs.
-        This works well for regular workflows (e.g., same rules per sample).
+        If expected_job_counts is available (from Job stats table), uses exact
+        calculation: pending = expected - completed - running.
+        Otherwise falls back to proportional inference.
 
         Args:
             completed_by_rule: Count of completed jobs per rule.
@@ -646,11 +788,29 @@ class TimeEstimator:
             current_rules: Optional set of rules that exist in the current workflow.
                 If provided, only rules in this set will be included in inference.
                 This filters out deleted rules from historical data.
+            running_by_rule: Optional count of running jobs per rule.
 
         Returns:
             Estimated count of pending jobs per rule.
         """
-        if not completed_by_rule or pending_count <= 0:
+        if pending_count <= 0:
+            return {}
+
+        running_by_rule = running_by_rule or {}
+
+        # If we have expected job counts from Job stats table, use exact calculation
+        if self.expected_job_counts:
+            pending_rules: dict[str, int] = {}
+            for rule, expected in self.expected_job_counts.items():
+                completed = completed_by_rule.get(rule, 0)
+                running = running_by_rule.get(rule, 0)
+                remaining = expected - completed - running
+                if remaining > 0:
+                    pending_rules[rule] = remaining
+            return pending_rules
+
+        # Fall back to proportional inference
+        if not completed_by_rule:
             return {}
 
         # Filter out deleted rules if current_rules is provided
@@ -661,7 +821,7 @@ class TimeEstimator:
         if total_completed == 0:
             return {}
 
-        pending_rules: dict[str, int] = {}
+        pending_rules = {}
         for rule, count in completed_by_rule.items():
             proportion = count / total_completed
             estimated = round(pending_count * proportion)
