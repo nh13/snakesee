@@ -895,11 +895,14 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     failed_jobs: list[JobInfo] = []
     seen_failures: set[tuple[str, str | None]] = set()  # (rule, jobid) pairs
 
-    # Track context: rule, jobid, wildcards, and threads for each job block
+    # Track context: rule, jobid, wildcards, threads, and log for each job block
     current_rule: str | None = None
     current_jobid: str | None = None
     current_wildcards: dict[str, str] | None = None
     current_threads: int | None = None
+    current_log_path: str | None = None
+    # Job logs: jobid -> log_path (separate lookup by unique jobid)
+    job_logs: dict[str, str] = {}
 
     try:
         lines = log_path.read_text().splitlines()
@@ -910,6 +913,7 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                 current_jobid = None
                 current_wildcards = None
                 current_threads = None
+                current_log_path = None
 
             # Capture wildcards
             elif match := WILDCARDS_PATTERN.match(line):
@@ -919,17 +923,28 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
             elif match := THREADS_PATTERN.match(line):
                 current_threads = int(match.group(1))
 
+            # Capture log path within rule block - store by jobid
+            elif match := LOG_PATTERN.match(line):
+                current_log_path = match.group(1).strip()
+                if current_jobid:
+                    job_logs[current_jobid] = current_log_path
+
             # Capture jobid
             elif match := JOBID_PATTERN.match(line):
                 current_jobid = match.group(1)
+                # Store log by jobid if we already captured it
+                if current_log_path:
+                    job_logs[current_jobid] = current_log_path
 
             # Detect errors
             elif match := ERROR_IN_RULE_PATTERN.search(line):
                 rule = match.group(1)
-                # Use context jobid/wildcards/threads if the error rule matches current context
+                # Use context jobid/wildcards/threads/log if the error rule matches current context
                 jobid = current_jobid if current_rule == rule else None
                 wildcards = current_wildcards if current_rule == rule else None
                 threads = current_threads if current_rule == rule else None
+                # Look up log by jobid - unique within this run
+                job_log = job_logs.get(jobid) if jobid else None
                 key = (rule, jobid)
 
                 if key not in seen_failures:
@@ -940,6 +955,7 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
                             job_id=jobid,
                             wildcards=wildcards,
                             threads=threads,
+                            log_file=Path(job_log) if job_log else None,
                         )
                     )
 
