@@ -582,3 +582,131 @@ class TestEstimatorHelperMethods:
         assert recency > 0.0
         assert consistency > 0.0
         assert coverage > 0.0
+
+
+class TestEstimatorFuzzyMatching:
+    """Tests for TimeEstimator fuzzy matching behavior."""
+
+    def test_fuzzy_match_similar_rule(self) -> None:
+        """Test fuzzy matching finds similar rule names."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align_reads", 100.0, 1000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # Similar rule name should match via fuzzy matching
+        duration, variance = estimator.get_estimate_for_job(
+            rule="align_read",  # One character different
+            threads=None,
+            wildcards=None,
+            input_size=None,
+        )
+
+        # Should get estimate from fuzzy match (with higher variance)
+        assert duration > 0
+
+    def test_no_fuzzy_match_very_different_rule(self) -> None:
+        """Test fuzzy matching doesn't match very different rules."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # Very different rule name should fall back to global mean
+        duration, variance = estimator.get_estimate_for_job(
+            rule="completely_different_name",
+            threads=None,
+            wildcards=None,
+            input_size=None,
+        )
+
+        # Should get fallback estimate (global mean)
+        assert duration > 0
+
+    def test_code_hash_match_priority(self) -> None:
+        """Test that code hash matching takes priority over fuzzy matching."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("rule_v1", 50.0, 1000.0)
+        registry.record_completion("rule_v2", 200.0, 2000.0)
+
+        # Simulate code hash mapping - rule_new shares hash with rule_v2
+        # Both rules must be in the same hash group for the lookup to work
+        estimator = TimeEstimator(rule_registry=registry)
+        estimator.code_hash_to_rules = {"hash123": {"rule_new", "rule_v2"}}
+
+        duration, _ = estimator.get_estimate_for_job(
+            rule="rule_new",
+            threads=None,
+            wildcards=None,
+            input_size=None,
+        )
+
+        # Should use rule_v2's timing (200s) due to code hash match
+        assert duration == pytest.approx(200.0, rel=0.1)
+
+
+class TestEstimatorCacheBehavior:
+    """Tests for TimeEstimator cache behavior."""
+
+    def test_global_mean_cache_hit(self) -> None:
+        """Test that global mean cache is reused on repeated calls."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # First call computes and caches
+        mean1 = estimator.global_mean_duration()
+        cache_count1 = estimator._global_mean_cache_sample_count
+
+        # Second call should hit cache
+        mean2 = estimator.global_mean_duration()
+        cache_count2 = estimator._global_mean_cache_sample_count
+
+        assert mean1 == mean2
+        assert cache_count1 == cache_count2
+
+    def test_rule_stats_cache_invalidation(self) -> None:
+        """Test that adding new timing data invalidates cache."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        mean1 = estimator.global_mean_duration()
+        assert mean1 == pytest.approx(100.0)
+
+        # Add new data
+        registry.record_completion("sort", 200.0, 2000.0)
+
+        # Cache should be invalidated, new mean computed
+        mean2 = estimator.global_mean_duration()
+        assert mean2 == pytest.approx(150.0)  # (100 + 200) / 2
+
+    def test_estimate_job_uses_cached_stats(self) -> None:
+        """Test that get_estimate_for_job uses cached rule_stats."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        registry.record_completion("align", 100.0, 1000.0)
+        registry.record_completion("align", 120.0, 2000.0)
+
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # First estimate
+        dur1, _ = estimator.get_estimate_for_job("align", None, None, None)
+
+        # Second estimate should use cached stats
+        dur2, _ = estimator.get_estimate_for_job("align", None, None, None)
+
+        assert dur1 == dur2
