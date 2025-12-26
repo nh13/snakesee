@@ -1,22 +1,28 @@
-"""Parsers for Snakemake log files and metadata."""
+"""Parsers for Snakemake log files and job tracking.
+
+This module contains log file parsing functions for tracking running,
+completed, and failed jobs. Metadata parsing has been moved to
+snakesee.parser.metadata and statistics collection to snakesee.parser.stats.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from snakesee.constants import STALE_WORKFLOW_THRESHOLD_SECONDS
 from snakesee.models import JobInfo
-from snakesee.models import RuleTimingStats
-from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 from snakesee.parser.log_reader import IncrementalLogReader
+
+# Import from new focused modules for backward compatibility
+from snakesee.parser.metadata import MetadataRecord
+from snakesee.parser.metadata import collect_rule_code_hashes
+from snakesee.parser.metadata import parse_metadata_files
+from snakesee.parser.metadata import parse_metadata_files_full
 
 # Import regex patterns from single source of truth
 from snakesee.parser.patterns import ERROR_IN_RULE_PATTERN
@@ -28,115 +34,53 @@ from snakesee.parser.patterns import RULE_START_PATTERN
 from snakesee.parser.patterns import THREADS_PATTERN
 from snakesee.parser.patterns import TIMESTAMP_PATTERN
 from snakesee.parser.patterns import WILDCARDS_PATTERN
-from snakesee.utils import iterate_metadata_files
+from snakesee.parser.stats import collect_rule_timing_stats
+from snakesee.parser.stats import collect_wildcard_timing_stats
+from snakesee.parser.utils import _parse_non_negative_int
+from snakesee.parser.utils import _parse_positive_int
+from snakesee.parser.utils import _parse_timestamp
+from snakesee.parser.utils import _parse_wildcards
+from snakesee.parser.utils import calculate_input_size
+from snakesee.parser.utils import estimate_input_size_from_output
 
 if TYPE_CHECKING:
-    from snakesee.types import ProgressCallback
+    pass
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True)
-class MetadataRecord:
-    """Single metadata file parsed data for efficient single-pass collection.
-
-    Contains all fields needed by various collection functions so we only
-    read each metadata file once.
-    """
-
-    rule: str
-    start_time: float | None = None
-    end_time: float | None = None
-    wildcards: dict[str, str] | None = None
-    input_size: int | None = None
-    code_hash: str | None = None
-
-    @property
-    def duration(self) -> float | None:
-        """Calculate duration from start and end times."""
-        if self.start_time is not None and self.end_time is not None:
-            return self.end_time - self.start_time
-        return None
-
-    def to_job_info(self) -> JobInfo:
-        """Convert to JobInfo for compatibility with existing code."""
-        return JobInfo(
-            rule=self.rule,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            wildcards=self.wildcards,
-            input_size=self.input_size,
-        )
+# Re-export for backward compatibility
+__all__ = [
+    # From metadata module
+    "MetadataRecord",
+    "parse_metadata_files",
+    "parse_metadata_files_full",
+    "collect_rule_code_hashes",
+    # From stats module
+    "collect_rule_timing_stats",
+    "collect_wildcard_timing_stats",
+    # From utils module
+    "_parse_wildcards",
+    "_parse_positive_int",
+    "_parse_non_negative_int",
+    "_parse_timestamp",
+    "calculate_input_size",
+    "estimate_input_size_from_output",
+    # Local functions
+    "parse_job_stats_from_log",
+    "parse_job_stats_counts_from_log",
+    "parse_progress_from_log",
+    "parse_rules_from_log",
+    "parse_running_jobs_from_log",
+    "parse_failed_jobs_from_log",
+    "parse_incomplete_jobs",
+    "parse_completed_jobs_from_log",
+    "parse_threads_from_log",
+    "is_workflow_running",
+    "parse_workflow_state",
+]
 
 
-def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
-    """
-    Parse a wildcards string into a dictionary.
-
-    Args:
-        wildcards_str: String like "sample=A, batch=1"
-
-    Returns:
-        Dictionary like {"sample": "A", "batch": "1"}
-
-    Examples:
-        >>> _parse_wildcards("sample=A, batch=1")
-        {'sample': 'A', 'batch': '1'}
-        >>> _parse_wildcards("id=test_123")
-        {'id': 'test_123'}
-        >>> _parse_wildcards("key=value=with=equals")
-        {'key': 'value=with=equals'}
-    """
-    wildcards: dict[str, str] = {}
-    # Split by comma, then parse key=value pairs
-    for part in wildcards_str.split(","):
-        part = part.strip()
-        if "=" in part:
-            key, value = part.split("=", 1)
-            wildcards[key.strip()] = value.strip()
-    return wildcards
-
-
-def _parse_positive_int(value: str, field_name: str = "value") -> int | None:
-    """Parse a string as a positive integer with validation.
-
-    Args:
-        value: String to parse.
-        field_name: Name of field for logging.
-
-    Returns:
-        Parsed integer if valid and positive, None otherwise.
-    """
-    try:
-        result = int(value)
-        if result <= 0:
-            logger.debug("Invalid %s: %d (must be positive)", field_name, result)
-            return None
-        return result
-    except ValueError:
-        logger.debug("Could not parse %s as integer: %s", field_name, value)
-        return None
-
-
-def _parse_non_negative_int(value: str, field_name: str = "value") -> int | None:
-    """Parse a string as a non-negative integer with validation.
-
-    Args:
-        value: String to parse.
-        field_name: Name of field for logging.
-
-    Returns:
-        Parsed integer if valid and >= 0, None otherwise.
-    """
-    try:
-        result = int(value)
-        if result < 0:
-            logger.debug("Invalid %s: %d (must be non-negative)", field_name, result)
-            return None
-        return result
-    except ValueError:
-        logger.debug("Could not parse %s as integer: %s", field_name, value)
-        return None
+# --- Job parsing functions (remain in this module) ---
 
 
 def parse_job_stats_from_log(log_path: Path) -> set[str]:
@@ -329,187 +273,6 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
         pass
 
     return rule_counts
-
-
-def _calculate_input_size(input_files: list[str] | None) -> int | None:
-    """Calculate total input size from file list.
-
-    Args:
-        input_files: List of input file paths from metadata.
-
-    Returns:
-        Total size in bytes, or None if not a valid list or any file is missing.
-    """
-    if not isinstance(input_files, list) or not input_files:
-        return None
-
-    total_size = 0
-    for f in input_files:
-        try:
-            total_size += Path(f).stat().st_size
-        except OSError:
-            return None
-    return total_size
-
-
-def parse_metadata_files(
-    metadata_dir: Path,
-    progress_callback: ProgressCallback | None = None,
-) -> Iterator[JobInfo]:
-    """
-    Parse completed job information from Snakemake metadata files.
-
-    Reads JSON metadata files from .snakemake/metadata/ to extract
-    timing information for completed jobs, including input file sizes.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Yields:
-        JobInfo instances for each completed job found.
-    """
-    for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
-        try:
-            rule = data.get("rule")
-            starttime = data.get("starttime")
-            endtime = data.get("endtime")
-
-            if rule is not None and starttime is not None and endtime is not None:
-                # Extract wildcards if present (Snakemake stores as dict)
-                wildcards_data = data.get("wildcards")
-                wildcards: dict[str, str] | None = None
-                if isinstance(wildcards_data, dict):
-                    wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
-
-                yield JobInfo(
-                    rule=rule,
-                    start_time=starttime,
-                    end_time=endtime,
-                    wildcards=wildcards,
-                    input_size=_calculate_input_size(data.get("input")),
-                )
-        except KeyError:
-            continue
-
-
-def parse_metadata_files_full(
-    metadata_dir: Path,
-    progress_callback: ProgressCallback | None = None,
-) -> Iterator[MetadataRecord]:
-    """
-    Parse all metadata from Snakemake metadata files in a single pass.
-
-    This is more efficient than calling parse_metadata_files and
-    collect_rule_code_hashes separately, as it reads each file only once.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Yields:
-        MetadataRecord instances containing timing and code hash data.
-    """
-    for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
-        try:
-            rule = data.get("rule")
-            if rule is None:
-                continue
-
-            # Extract timing data
-            starttime = data.get("starttime")
-            endtime = data.get("endtime")
-
-            # Extract wildcards if present
-            wildcards_data = data.get("wildcards")
-            wildcards: dict[str, str] | None = None
-            if isinstance(wildcards_data, dict):
-                wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
-
-            # Extract and hash code
-            code_hash: str | None = None
-            code = data.get("code")
-            if code:
-                normalized_code = " ".join(code.split())
-                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
-
-            yield MetadataRecord(
-                rule=rule,
-                start_time=starttime,
-                end_time=endtime,
-                wildcards=wildcards,
-                input_size=_calculate_input_size(data.get("input")),
-                code_hash=code_hash,
-            )
-        except KeyError:
-            continue
-
-
-def collect_rule_code_hashes(
-    metadata_dir: Path,
-    progress_callback: ProgressCallback | None = None,
-) -> dict[str, set[str]]:
-    """
-    Collect code hashes for each rule from metadata files.
-
-    This enables detection of renamed rules by matching their shell code.
-    If two rules have the same code hash, they are likely the same rule
-    that was renamed.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Returns:
-        Dictionary mapping code_hash -> set of rule names that use that code.
-    """
-    hash_to_rules: dict[str, set[str]] = {}
-
-    if not metadata_dir.exists():
-        return hash_to_rules
-
-    # Get file list - count upfront if progress is requested
-    if progress_callback is not None:
-        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
-        total = len(files)
-    else:
-        files = None
-        total = 0
-
-    file_iter = files if files is not None else metadata_dir.rglob("*")
-
-    for i, meta_file in enumerate(file_iter):
-        if files is None and not meta_file.is_file():
-            continue
-
-        if progress_callback is not None:
-            progress_callback(i + 1, total)
-
-        try:
-            data = json.loads(meta_file.read_text())
-            rule = data.get("rule")
-            code = data.get("code")
-
-            if rule and code:
-                # Normalize whitespace before hashing to handle formatting differences
-                normalized_code = " ".join(code.split())
-                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
-
-                if code_hash not in hash_to_rules:
-                    hash_to_rules[code_hash] = set()
-                hash_to_rules[code_hash].add(rule)
-
-        except json.JSONDecodeError as e:
-            logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
-            continue
-        except OSError as e:
-            logger.debug("Error reading metadata file %s: %s", meta_file, e)
-            continue
-        except KeyError as e:
-            logger.debug("Missing key in metadata file %s: %s", meta_file, e)
-            continue
-
-    return hash_to_rules
 
 
 def parse_running_jobs_from_log(
@@ -757,18 +520,6 @@ def parse_incomplete_jobs(
                 continue
 
 
-def _parse_timestamp(timestamp_str: str) -> float | None:
-    """Parse a snakemake log timestamp into Unix time."""
-    from datetime import datetime
-
-    try:
-        # Format: "Mon Dec 15 22:34:30 2025"
-        dt = datetime.strptime(timestamp_str, "%a %b %d %H:%M:%S %Y")
-        return dt.timestamp()
-    except ValueError:
-        return None
-
-
 def _get_first_log_timestamp(
     log_path: Path,
     *,
@@ -1013,140 +764,7 @@ def is_workflow_running(
         return True
 
 
-def collect_rule_timing_stats(
-    metadata_dir: Path,
-    progress_callback: ProgressCallback | None = None,
-) -> dict[str, RuleTimingStats]:
-    """
-    Collect historical timing statistics per rule from metadata.
-
-    Aggregates all completed job timings by rule name, sorted chronologically
-    by end time. Includes timestamps for time-based weighted estimation.
-    Input sizes are included when available from job metadata.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Returns:
-        Dictionary mapping rule names to their timing statistics.
-    """
-    # First, collect all jobs with their timing info
-    # rule -> [(duration, end_time, input_size), ...]
-    jobs_by_rule: dict[str, list[tuple[float, float, int | None]]] = {}
-
-    for job in parse_metadata_files(metadata_dir, progress_callback=progress_callback):
-        duration = job.duration
-        end_time = job.end_time
-        if duration is None or end_time is None:
-            continue
-
-        if job.rule not in jobs_by_rule:
-            jobs_by_rule[job.rule] = []
-        jobs_by_rule[job.rule].append((duration, end_time, job.input_size))
-
-    # Build stats with sorted durations, timestamps, and input sizes
-    stats: dict[str, RuleTimingStats] = {}
-    for rule, timing_tuples in jobs_by_rule.items():
-        # Sort by end_time (oldest first) for consistent ordering
-        timing_tuples.sort(key=lambda x: x[1])
-
-        durations = [t[0] for t in timing_tuples]
-        timestamps = [t[1] for t in timing_tuples]
-        input_sizes = [t[2] for t in timing_tuples]
-
-        stats[rule] = RuleTimingStats(
-            rule=rule,
-            durations=durations,
-            timestamps=timestamps,
-            input_sizes=input_sizes,
-        )
-
-    return stats
-
-
-def _build_wildcard_stats_for_key(
-    rule: str,
-    wc_key: str,
-    wc_values: dict[str, list[tuple[float, float]]],
-) -> WildcardTimingStats:
-    """Build WildcardTimingStats from collected timing pairs.
-
-    Args:
-        rule: Rule name.
-        wc_key: Wildcard key name.
-        wc_values: Dict of wildcard value -> list of (duration, timestamp) pairs.
-
-    Returns:
-        WildcardTimingStats for this wildcard key.
-    """
-    stats_by_value: dict[str, RuleTimingStats] = {}
-
-    for wc_value, timing_pairs in wc_values.items():
-        # Sort by end_time
-        timing_pairs.sort(key=lambda x: x[1])
-        durations = [pair[0] for pair in timing_pairs]
-        timestamps = [pair[1] for pair in timing_pairs]
-
-        stats_by_value[wc_value] = RuleTimingStats(
-            rule=f"{rule}:{wc_key}={wc_value}",
-            durations=durations,
-            timestamps=timestamps,
-        )
-
-    return WildcardTimingStats(
-        rule=rule,
-        wildcard_key=wc_key,
-        stats_by_value=stats_by_value,
-    )
-
-
-def collect_wildcard_timing_stats(
-    metadata_dir: Path,
-    progress_callback: ProgressCallback | None = None,
-) -> dict[str, dict[str, WildcardTimingStats]]:
-    """Collect timing statistics per rule, conditioned on wildcards.
-
-    Groups execution times by (rule, wildcard_key, wildcard_value) for rules
-    that have wildcards in their metadata.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Returns:
-        Nested dictionary: rule -> wildcard_key -> WildcardTimingStats
-    """
-    # Collect all jobs with wildcards
-    # Structure: rule -> wildcard_key -> wildcard_value -> [(duration, end_time), ...]
-    data: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = {}
-
-    for job in parse_metadata_files(metadata_dir, progress_callback=progress_callback):
-        duration = job.duration
-        end_time = job.end_time
-        if duration is None or end_time is None or not job.wildcards:
-            continue
-
-        if job.rule not in data:
-            data[job.rule] = {}
-
-        for wc_key, wc_value in job.wildcards.items():
-            if wc_key not in data[job.rule]:
-                data[job.rule][wc_key] = {}
-            if wc_value not in data[job.rule][wc_key]:
-                data[job.rule][wc_key][wc_value] = []
-
-            data[job.rule][wc_key][wc_value].append((duration, end_time))
-
-    # Build WildcardTimingStats objects
-    result: dict[str, dict[str, WildcardTimingStats]] = {}
-    for rule, wc_keys in data.items():
-        result[rule] = {
-            wc_key: _build_wildcard_stats_for_key(rule, wc_key, wc_values)
-            for wc_key, wc_values in wc_keys.items()
-        }
-
-    return result
+# --- Workflow state helper functions ---
 
 
 def _filter_completions_by_timeframe(
@@ -1467,73 +1085,3 @@ def parse_workflow_state(
         start_time=start_time,
         log_file=log_path,
     )
-
-
-def calculate_input_size(file_paths: list[Path]) -> int | None:
-    """
-    Calculate total size of input files.
-
-    Args:
-        file_paths: List of input file paths.
-
-    Returns:
-        Total size in bytes, or None if any file doesn't exist.
-    """
-    total_size = 0
-    for path in file_paths:
-        try:
-            total_size += path.stat().st_size
-        except OSError:
-            return None  # File doesn't exist or can't be accessed
-    return total_size if file_paths else None
-
-
-def estimate_input_size_from_output(
-    output_path: Path,
-    workflow_dir: Path,
-) -> int | None:
-    """
-    Try to estimate input size by looking for related input files.
-
-    This is a heuristic that works for common bioinformatics patterns where
-    output files are derived from inputs with predictable naming conventions.
-
-    Examples:
-        - sample.sorted.bam -> sample.bam
-        - sample.fastq.gz -> looks for sample.fq.gz, sample.fastq.gz
-        - sample.vcf.gz -> sample.bam
-
-    Args:
-        output_path: Path to the output file.
-        workflow_dir: Workflow root directory.
-
-    Returns:
-        Estimated input size in bytes, or None if not determinable.
-    """
-    # Common input file patterns relative to output
-    suffixes_to_strip = [
-        ".sorted.bam",
-        ".sorted",
-        ".trimmed",
-        ".filtered",
-        ".dedup",
-        ".aligned",
-    ]
-
-    name = output_path.name
-
-    # Try stripping common suffixes to find input
-    for suffix in suffixes_to_strip:
-        if name.endswith(suffix):
-            input_name = name[: -len(suffix)]
-            # Try common extensions
-            for ext in [".bam", ".fastq.gz", ".fq.gz", ".fa.gz", ".fasta.gz"]:
-                candidate = workflow_dir / (input_name + ext)
-                if candidate.exists():
-                    try:
-                        return candidate.stat().st_size
-                    except OSError:
-                        continue
-
-    # No input found
-    return None
