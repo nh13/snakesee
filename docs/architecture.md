@@ -154,6 +154,38 @@ SnakeseeError (base)
 
 Minimum coverage requirement: 65%
 
+## Future Refactoring Notes
+
+### parser/core.py Split (Recommended)
+The `parser/core.py` (1539 lines) could be split into focused modules:
+
+1. **parser/metadata.py**: Metadata file parsing
+   - `MetadataRecord`, `parse_metadata_files`, `parse_metadata_files_full`
+   - `collect_rule_code_hashes`, `_calculate_input_size`
+
+2. **parser/stats.py**: Timing statistics collection
+   - `collect_rule_timing_stats`, `collect_wildcard_timing_stats`
+   - `_build_wildcard_stats_for_key`
+
+3. **parser/workflow.py**: Workflow state assembly
+   - `parse_workflow_state`, `is_workflow_running`
+   - `_determine_final_workflow_status`, `_reconcile_job_lists`
+
+4. **parser/utils.py**: Utility functions
+   - `_parse_wildcards`, `_parse_positive_int`, `_parse_non_negative_int`
+   - `calculate_input_size`, `estimate_input_size_from_output`
+
+The `parser/__init__.py` already acts as a facade, so this split would be
+backward-compatible.
+
+### tui.py Split (Recommended)
+The `tui.py` (2620 lines) could be split using MVC pattern:
+
+1. **tui/model.py**: State and data management
+2. **tui/view.py**: Rich console rendering
+3. **tui/controller.py**: Keyboard and refresh handling
+4. **tui/__init__.py**: WorkflowMonitorTUI facade
+
 ## Security Considerations
 
 - **File size limits**: Prevent DoS from malicious files

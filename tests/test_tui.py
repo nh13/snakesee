@@ -1222,3 +1222,177 @@ class TestEscapeSequenceParsing:
         """Test that pressing Escape alone doesn't quit."""
         result = tui._handle_key("\x1b")  # Escape
         assert result is False
+
+
+class TestKeyboardEdgeCases:
+    """Tests for keyboard input edge cases."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_rapid_key_presses(self, tui: WorkflowMonitorTUI) -> None:
+        """Test handling of rapid key presses."""
+        initial_rate = tui.refresh_rate
+        # Simulate rapid + key presses
+        for _ in range(10):
+            tui._handle_key("+")
+        # Rate should increase but be capped at max
+        assert tui.refresh_rate <= MAX_REFRESH_RATE
+        assert tui.refresh_rate >= initial_rate
+
+    def test_refresh_rate_bounds(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate stays within bounds."""
+        # Decrease to minimum
+        for _ in range(100):
+            tui._handle_key("-")
+        assert tui.refresh_rate >= MIN_REFRESH_RATE
+
+        # Increase to maximum
+        for _ in range(100):
+            tui._handle_key("+")
+        assert tui.refresh_rate <= MAX_REFRESH_RATE
+
+    def test_filter_special_characters(self, tui: WorkflowMonitorTUI) -> None:
+        """Test filter mode handles special characters."""
+        tui._handle_key("/")  # Enter filter mode
+        assert tui._filter_mode is True
+
+        # Type special characters (stored in _filter_input during filter mode)
+        tui._handle_key("*")
+        tui._handle_key(".")
+        tui._handle_key("?")
+        assert "*" in tui._filter_input
+        assert "." in tui._filter_input
+        assert "?" in tui._filter_input
+
+    def test_filter_unicode_characters(self, tui: WorkflowMonitorTUI) -> None:
+        """Test filter mode handles unicode characters."""
+        tui._handle_key("/")
+        # Unicode characters should be accepted (stored in _filter_input)
+        tui._handle_key("α")
+        tui._handle_key("β")
+        assert "α" in tui._filter_input
+        assert "β" in tui._filter_input
+
+    def test_filter_backspace_empty(self, tui: WorkflowMonitorTUI) -> None:
+        """Test backspace on empty filter is safe."""
+        tui._handle_key("/")
+        assert tui._filter_input == ""
+        # Backspace on empty filter should be safe
+        tui._handle_key("\x7f")
+        assert tui._filter_input == ""
+
+    def test_filter_clear_on_escape(self, tui: WorkflowMonitorTUI) -> None:
+        """Test escape clears filter and exits filter mode."""
+        tui._handle_key("/")
+        tui._handle_key("t")
+        tui._handle_key("e")
+        tui._handle_key("s")
+        tui._handle_key("t")
+        assert tui._filter_input == "test"
+
+        tui._handle_key("\x1b")  # Escape
+        assert tui._filter_mode is False
+        assert tui._filter_input == ""
+
+    def test_job_selection_boundaries(self, tui: WorkflowMonitorTUI) -> None:
+        """Test job selection stays within bounds."""
+        # Navigate up at top should be safe (index stays >= 0)
+        for _ in range(10):
+            tui._handle_key("\x10")  # Ctrl+p (up)
+        assert tui._selected_job_index >= 0
+        assert tui._selected_completion_index >= 0
+
+        # Navigate down should work
+        tui._handle_key("\x0e")  # Ctrl+n (down)
+        assert tui._selected_job_index >= 0
+        assert tui._selected_completion_index >= 0
+
+    def test_layout_cycle_wraps(self, tui: WorkflowMonitorTUI) -> None:
+        """Test layout cycling wraps around correctly."""
+        initial_layout = tui._layout_mode
+        layouts_seen = [initial_layout]
+
+        # Cycle through all layouts (Tab key cycles layouts)
+        for _ in range(10):
+            tui._handle_key("\t")
+            layouts_seen.append(tui._layout_mode)
+
+        # Should have seen all layout modes
+        assert LayoutMode.FULL in layouts_seen
+        assert LayoutMode.COMPACT in layouts_seen
+        assert LayoutMode.MINIMAL in layouts_seen
+
+    def test_sort_cycle_wraps(self, tui: WorkflowMonitorTUI) -> None:
+        """Test sort table cycling wraps around."""
+        # s and S cycle through sort tables (running, completions, pending, stats)
+        tables_seen = [tui._sort_table]
+
+        # Cycle through sort options multiple times
+        for _ in range(10):
+            tui._handle_key("s")
+            tables_seen.append(tui._sort_table)
+
+        # Should have seen all sort tables
+        assert "running" in tables_seen
+        assert "completions" in tables_seen
+        assert "pending" in tables_seen
+        assert "stats" in tables_seen
+
+    def test_toggle_states_are_boolean(self, tui: WorkflowMonitorTUI) -> None:
+        """Test toggle states toggle properly."""
+        # Test pause toggle (p key)
+        initial_paused = tui._paused
+        tui._handle_key("p")
+        assert tui._paused != initial_paused
+        tui._handle_key("p")
+        assert tui._paused == initial_paused
+
+        # Test help toggle
+        initial_help = tui._show_help
+        tui._handle_key("?")
+        assert tui._show_help != initial_help
+        tui._handle_key("?")
+        assert tui._show_help == initial_help
+
+    def test_null_character_ignored(self, tui: WorkflowMonitorTUI) -> None:
+        """Test null character is ignored."""
+        result = tui._handle_key("\x00")
+        assert result is False
+
+    def test_unknown_control_char_ignored(self, tui: WorkflowMonitorTUI) -> None:
+        """Test unknown control characters are ignored."""
+        # Ctrl+C (ETX) is handled by KeyboardInterrupt, not _handle_key
+        # Test other control chars are safely ignored
+        result = tui._handle_key("\x01")  # Ctrl+A
+        assert result is False
+
+    def test_log_navigation_bounds(self, tui: WorkflowMonitorTUI) -> None:
+        """Test log navigation stays within bounds."""
+        # Navigate to older logs (should be safe even with no logs)
+        for _ in range(10):
+            tui._handle_key("[")
+
+        # Navigate to newer logs
+        for _ in range(10):
+            tui._handle_key("]")
+
+        # Should not crash and offset should be valid
+        assert tui._log_scroll_offset >= 0
