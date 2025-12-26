@@ -9,6 +9,7 @@ These tests are skipped by default in normal test runs.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -258,3 +259,279 @@ class TestTUIBenchmarks:
 
         result = benchmark(format_many)
         assert len(result) == 100
+
+
+class TestLineParserBenchmarks:
+    """Benchmarks for isolated line parsing performance."""
+
+    @pytest.fixture
+    def sample_log_lines(self) -> list[str]:
+        """Generate sample log lines for parsing."""
+        lines = []
+        for i in range(1000):
+            rule = f"rule_{i % 10}"
+            lines.extend(
+                [
+                    f"rule {rule}:",
+                    f"    jobid: {i}",
+                    f"    wildcards: sample=sample{i}, batch={i % 5}",
+                    f"    threads: {2 + i % 6}",
+                    f"    log: logs/{rule}_{i}.log",
+                    "[Mon Dec 16 10:00:00 2024]",
+                    f"Finished job {i}.",
+                    f"{i + 1} of 1000 steps ({(i + 1) / 10:.1f}%) done",
+                    "",  # Empty line
+                    f"Some random output line {i}",  # Non-matching line
+                ]
+            )
+        return lines
+
+    def test_benchmark_parse_line_all(
+        self, benchmark: BenchmarkFixture, sample_log_lines: list[str]
+    ) -> None:
+        """Benchmark parsing all line types."""
+        from snakesee.parser.line_parser import LogLineParser
+
+        def parse_all_lines() -> int:
+            parser = LogLineParser()
+            count = 0
+            for line in sample_log_lines:
+                if parser.parse_line(line) is not None:
+                    count += 1
+            return count
+
+        result = benchmark(parse_all_lines)
+        assert result > 0
+
+    def test_benchmark_parse_line_nonmatching(self, benchmark: BenchmarkFixture) -> None:
+        """Benchmark parsing lines that don't match any pattern (fast path)."""
+        from snakesee.parser.line_parser import LogLineParser
+
+        # Lines that should exit early via fast-path
+        nonmatching_lines = [
+            "Some random output",
+            "Another line of output",
+            "DEBUG: something happened",
+            "INFO: processing file",
+            "WARNING: low memory",
+        ] * 200  # 1000 lines
+
+        def parse_nonmatching() -> int:
+            parser = LogLineParser()
+            count = 0
+            for line in nonmatching_lines:
+                if parser.parse_line(line) is None:
+                    count += 1
+            return count
+
+        result = benchmark(parse_nonmatching)
+        assert result == 1000
+
+    def test_benchmark_parse_line_indented(self, benchmark: BenchmarkFixture) -> None:
+        """Benchmark parsing indented property lines."""
+        from snakesee.parser.line_parser import LogLineParser
+
+        indented_lines = [
+            "    wildcards: sample=A, batch=1",
+            "    threads: 4",
+            "    log: logs/test.log",
+            "    jobid: 123",
+            "    input: data/input.txt",  # Non-matching indented
+        ] * 200  # 1000 lines
+
+        def parse_indented() -> int:
+            parser = LogLineParser()
+            count = 0
+            for line in indented_lines:
+                if parser.parse_line(line) is not None:
+                    count += 1
+            return count
+
+        result = benchmark(parse_indented)
+        assert result > 0
+
+
+class TestDirectoryIterationBenchmarks:
+    """Benchmarks for directory iteration strategies."""
+
+    @pytest.fixture
+    def large_dir(self, tmp_path: Path) -> Path:
+        """Create a directory with many files."""
+        test_dir = tmp_path / "files"
+        test_dir.mkdir()
+        for i in range(500):
+            (test_dir / f"file_{i}.json").write_text('{"rule": "test"}')
+        return test_dir
+
+    def test_benchmark_rglob(self, benchmark: BenchmarkFixture, large_dir: Path) -> None:
+        """Benchmark Path.rglob() iteration."""
+
+        def iterate_rglob() -> int:
+            return len([f for f in large_dir.rglob("*") if f.is_file()])
+
+        result = benchmark(iterate_rglob)
+        assert result == 500
+
+    def test_benchmark_scandir(self, benchmark: BenchmarkFixture, large_dir: Path) -> None:
+        """Benchmark os.scandir() iteration."""
+
+        def iterate_scandir() -> int:
+            count = 0
+            with os.scandir(large_dir) as entries:
+                for entry in entries:
+                    if entry.is_file():
+                        count += 1
+            return count
+
+        result = benchmark(iterate_scandir)
+        assert result == 500
+
+    def test_benchmark_iterdir(self, benchmark: BenchmarkFixture, large_dir: Path) -> None:
+        """Benchmark Path.iterdir() iteration."""
+
+        def iterate_iterdir() -> int:
+            return len([f for f in large_dir.iterdir() if f.is_file()])
+
+        result = benchmark(iterate_iterdir)
+        assert result == 500
+
+
+class TestRuleRegistryBenchmarks:
+    """Benchmarks for rule registry operations."""
+
+    @pytest.fixture
+    def populated_registry(self) -> Any:
+        """Create a registry with historical data."""
+        from snakesee.state.job_registry import Job
+        from snakesee.state.job_registry import JobStatus
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        base_time = time.time() - 86400
+
+        # Add 1000 completions across 20 rules
+        for i in range(1000):
+            rule = f"rule_{i % 20}"
+            duration = 50 + (i % 100)
+            job = Job(
+                key=f"job_{i}",
+                rule=rule,
+                status=JobStatus.COMPLETED,
+                job_id=str(i),
+                start_time=base_time + i * 60,
+                end_time=base_time + i * 60 + duration,
+                threads=2 + (i % 4),
+                wildcards={"sample": f"sample{i % 50}"},
+            )
+            registry.record_job_completion(job)
+        return registry
+
+    def test_benchmark_record_completion(self, benchmark: BenchmarkFixture) -> None:
+        """Benchmark recording a completion."""
+        from snakesee.state.job_registry import Job
+        from snakesee.state.job_registry import JobStatus
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        base_time = time.time()
+
+        def record_many() -> int:
+            for i in range(100):
+                job = Job(
+                    key=f"job_{i}",
+                    rule=f"rule_{i % 10}",
+                    status=JobStatus.COMPLETED,
+                    job_id=str(i),
+                    start_time=base_time + i,
+                    end_time=base_time + i + 50 + i,
+                    threads=4,
+                    wildcards={"sample": f"s{i}"},
+                )
+                registry.record_job_completion(job)
+            return 100
+
+        result = benchmark(record_many)
+        assert result == 100
+
+    def test_benchmark_get_stats(
+        self, benchmark: BenchmarkFixture, populated_registry: Any
+    ) -> None:
+        """Benchmark getting stats from registry."""
+
+        def get_many_stats() -> int:
+            count = 0
+            for i in range(100):
+                rule = f"rule_{i % 20}"
+                stats = populated_registry.get(rule)
+                if stats is not None:
+                    count += 1
+            return count
+
+        result = benchmark(get_many_stats)
+        assert result == 100
+
+
+class TestTableBuildingBenchmarks:
+    """Benchmarks for TUI table building."""
+
+    @pytest.fixture
+    def many_jobs(self) -> list[Any]:
+        """Create a list of many JobInfo objects."""
+        from snakesee.models import JobInfo
+
+        jobs = []
+        base_time = time.time() - 3600
+        for i in range(100):
+            jobs.append(
+                JobInfo(
+                    rule=f"rule_{i % 10}",
+                    job_id=str(i),
+                    start_time=base_time + i * 30,
+                    end_time=base_time + i * 30 + 60 + (i % 120),
+                    wildcards={"sample": f"sample{i}", "batch": str(i % 5)},
+                    threads=2 + (i % 6),
+                )
+            )
+        return jobs
+
+    def test_benchmark_job_info_creation(self, benchmark: BenchmarkFixture) -> None:
+        """Benchmark JobInfo object creation."""
+        from snakesee.models import JobInfo
+
+        def create_many() -> int:
+            jobs = []
+            for i in range(500):
+                jobs.append(
+                    JobInfo(
+                        rule=f"rule_{i % 10}",
+                        job_id=str(i),
+                        start_time=time.time(),
+                        wildcards={"sample": f"s{i}"},
+                        threads=4,
+                    )
+                )
+            return len(jobs)
+
+        result = benchmark(create_many)
+        assert result == 500
+
+    def test_benchmark_filter_jobs(self, benchmark: BenchmarkFixture, many_jobs: list[Any]) -> None:
+        """Benchmark job filtering by rule name."""
+
+        def filter_jobs() -> int:
+            # Simulate filtering by rule pattern
+            filtered = [j for j in many_jobs if "rule_5" in j.rule]
+            return len(filtered)
+
+        result = benchmark(filter_jobs)
+        assert result == 10  # 100 jobs, 10 rules, so 10 match "rule_5"
+
+    def test_benchmark_sort_jobs(self, benchmark: BenchmarkFixture, many_jobs: list[Any]) -> None:
+        """Benchmark job sorting by start time."""
+
+        def sort_jobs() -> int:
+            sorted_jobs = sorted(many_jobs, key=lambda j: j.start_time or 0)
+            return len(sorted_jobs)
+
+        result = benchmark(sort_jobs)
+        assert result == 100

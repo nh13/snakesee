@@ -31,7 +31,7 @@ class WorkflowStatus(Enum):
     STALE = "stale"  # No activity for extended period
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JobInfo:
     """
     Information about a single job execution.
@@ -600,7 +600,7 @@ class ThreadTimingStats:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TimeEstimate:
     """
     Time remaining estimate with uncertainty bounds.

@@ -119,15 +119,15 @@ class TestWorkflowMonitorTUI:
         assert tui._show_help is True
 
     def test_handle_key_refresh_rate_decrease(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate decrease keys."""
+        """Test refresh rate decrease keys (- for fine, < for coarse)."""
         initial = tui.refresh_rate
-        tui._handle_key("j")
+        tui._handle_key("-")
         assert tui.refresh_rate == max(MIN_REFRESH_RATE, initial - 0.5)
 
     def test_handle_key_refresh_rate_increase(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate increase keys."""
+        """Test refresh rate increase keys (+ for fine, > for coarse)."""
         initial = tui.refresh_rate
-        tui._handle_key("k")
+        tui._handle_key("+")
         assert tui.refresh_rate == min(MAX_REFRESH_RATE, initial + 0.5)
 
     def test_handle_key_refresh_rate_reset(self, tui: WorkflowMonitorTUI) -> None:
@@ -136,10 +136,13 @@ class TestWorkflowMonitorTUI:
         tui._handle_key("0")
         assert tui.refresh_rate == DEFAULT_REFRESH_RATE
 
-    def test_handle_key_refresh_rate_minimum(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate minimum key."""
-        tui._handle_key("G")
-        assert tui.refresh_rate == MIN_REFRESH_RATE
+    def test_handle_key_refresh_rate_coarse(self, tui: WorkflowMonitorTUI) -> None:
+        """Test coarse refresh rate adjustment with < and >."""
+        tui.refresh_rate = 10.0
+        tui._handle_key("<")
+        assert tui.refresh_rate == 5.0  # -5s
+        tui._handle_key(">")
+        assert tui.refresh_rate == 10.0  # +5s
 
     def test_handle_key_layout_cycle(self, tui: WorkflowMonitorTUI) -> None:
         """Test layout cycle key."""
@@ -1027,16 +1030,16 @@ class TestKeyboardInput:
         assert tui.use_estimation is not original
 
     def test_handle_key_refresh_rate_increase(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate increase with 'k' (slower refresh)."""
+        """Test refresh rate increase with '+' (slower refresh)."""
         original_rate = tui.refresh_rate
-        tui._handle_key("k")
+        tui._handle_key("+")
         assert tui.refresh_rate > original_rate
 
     def test_handle_key_refresh_rate_decrease(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate decrease with 'j' (faster refresh)."""
+        """Test refresh rate decrease with '-' (faster refresh)."""
         tui.refresh_rate = 5.0  # Set to middle value
         original_rate = tui.refresh_rate
-        tui._handle_key("j")
+        tui._handle_key("-")
         assert tui.refresh_rate < original_rate
 
     def test_handle_key_help_toggle(self, tui: WorkflowMonitorTUI) -> None:
@@ -1075,15 +1078,15 @@ class TestKeyboardInput:
         assert tui._handle_key("@") is False
 
     def test_handle_key_navigation_up(self, tui: WorkflowMonitorTUI) -> None:
-        """Test navigation up with Ctrl+p."""
-        # Ctrl+p is mapped from up arrow - just verify no error
-        result = tui._handle_key("\x10")  # Ctrl+p
+        """Test navigation up with k (vim-style)."""
+        # k is mapped from up arrow - just verify no error
+        result = tui._handle_key("k")
         assert result is False  # Navigation doesn't quit
 
     def test_handle_key_navigation_down(self, tui: WorkflowMonitorTUI) -> None:
-        """Test navigation down with Ctrl+n."""
-        # Ctrl+n is mapped from down arrow
-        tui._handle_key("\x0e")  # Ctrl+n
+        """Test navigation down with j (vim-style)."""
+        # j is mapped from down arrow
+        tui._handle_key("j")
         # Just verify no error
 
     def test_handle_key_layout_cycle(self, tui: WorkflowMonitorTUI) -> None:
@@ -1205,17 +1208,17 @@ class TestEscapeSequenceParsing:
                 refresh_rate=2.0,
             )
 
-    def test_up_arrow_mapped_to_ctrl_p(self, tui: WorkflowMonitorTUI) -> None:
+    def test_up_arrow_mapped_to_k(self, tui: WorkflowMonitorTUI) -> None:
         """Test that up arrow escape sequence is recognized."""
         # The run loop parses \x1b[A or \x1bOA as up arrow
-        # and maps to \x10 (Ctrl+p) before calling _handle_key
+        # and maps to 'k' (vim up) before calling _handle_key
         # We test the _handle_key with the mapped value
-        result = tui._handle_key("\x10")  # Ctrl+p (mapped from up arrow)
+        result = tui._handle_key("k")  # k (mapped from up arrow)
         assert result is False  # Navigation doesn't quit
 
-    def test_down_arrow_mapped_to_ctrl_n(self, tui: WorkflowMonitorTUI) -> None:
+    def test_down_arrow_mapped_to_j(self, tui: WorkflowMonitorTUI) -> None:
         """Test that down arrow escape sequence is recognized."""
-        result = tui._handle_key("\x0e")  # Ctrl+n (mapped from down arrow)
+        result = tui._handle_key("j")  # j (mapped from down arrow)
         assert result is False
 
     def test_escape_alone_does_not_quit(self, tui: WorkflowMonitorTUI) -> None:
@@ -1316,12 +1319,12 @@ class TestKeyboardEdgeCases:
         """Test job selection stays within bounds."""
         # Navigate up at top should be safe (index stays >= 0)
         for _ in range(10):
-            tui._handle_key("\x10")  # Ctrl+p (up)
+            tui._handle_key("k")  # k (up)
         assert tui._selected_job_index >= 0
         assert tui._selected_completion_index >= 0
 
         # Navigate down should work
-        tui._handle_key("\x0e")  # Ctrl+n (down)
+        tui._handle_key("j")  # j (down)
         assert tui._selected_job_index >= 0
         assert tui._selected_completion_index >= 0
 
@@ -1497,8 +1500,8 @@ class TestJobSelectionModeKeyHandling:
         tui._log_source = "running"
         tui._selected_job_index = 5
 
-        # Ctrl+p should still navigate up
-        tui._handle_key("\x10")
+        # k should navigate up
+        tui._handle_key("k")
         assert tui._selected_job_index == 4
 
     def test_job_selection_mode_escape_still_exits(self, tui: WorkflowMonitorTUI) -> None:
@@ -1531,12 +1534,76 @@ class TestJobSelectionModeKeyHandling:
         tui._show_help = True
         tui._selected_job_index = 5
 
-        # Ctrl+p would normally navigate, but should just close help
-        tui._handle_key("\x10")
+        # k would normally navigate, but should just close help
+        tui._handle_key("k")
 
         assert tui._show_help is False
         # Job index should NOT have changed (key was consumed by help close)
         assert tui._selected_job_index == 5
+
+    def test_g_jumps_to_first_job_in_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first job in running table."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_job_index == 0
+
+    def test_g_jumps_to_first_job_in_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first job in completions table."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+        tui._selected_completion_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_completion_index == 0
+
+    def test_G_jumps_to_last_job_in_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last job in running table."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_job_index == 9  # num_jobs - 1
+
+    def test_G_jumps_to_last_job_in_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last job in completions table."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+        tui._selected_completion_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_completion_index == 9
+
+    def test_shift_tab_switches_from_running_to_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that shift-tab switches from running to completions."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+
+        result = tui._handle_table_navigation_key("\x1b[Z", num_jobs=10)
+
+        assert result is False
+        assert tui._log_source == "completions"
+
+    def test_shift_tab_switches_from_completions_to_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that shift-tab switches from completions to running."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+
+        result = tui._handle_table_navigation_key("\x1b[Z", num_jobs=10)
+
+        assert result is False
+        assert tui._log_source == "running"
 
 
 class TestJobIdColumnWidth:

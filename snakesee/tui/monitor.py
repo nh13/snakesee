@@ -191,8 +191,13 @@ class WorkflowMonitorTUI:
         # Cutoff time for historical view (updated in _poll_state)
         self._cutoff_time: float | None = None
 
-        # Job log viewer state
-        self._job_selection_mode: bool = False  # True when a job is selected
+        # Job log viewer state (two nested modes)
+        # Normal → [Enter] → Table Mode → [Enter] → Log Mode
+        #                        ↑                      |
+        #                        └──────── [Esc] ───────┘
+        #                    [Esc] → Normal
+        self._job_selection_mode: bool = False  # True when in table navigation mode
+        self._log_viewing_mode: bool = False  # True when viewing a job's log (nested)
         self._log_source: str | None = None  # "running" or "completions"
         self._selected_job_index: int = 0  # Index into running_jobs list
         self._selected_completion_index: int = 0  # Index into completions list
@@ -792,10 +797,14 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
             return False
 
-        # Handle job selection mode (before filter mode)
+        # Handle log viewing mode (nested inside job selection mode)
+        if self._log_viewing_mode:
+            return self._handle_log_viewing_key(key)
+
+        # Handle table navigation mode
         if self._job_selection_mode:
             # Use large number; actual bounds checked in _make_job_log_panel
-            return self._handle_job_selection_key(key, 1000)
+            return self._handle_table_navigation_key(key, 1000)
 
         # Handle filter input mode
         if self._filter_mode:
@@ -855,28 +864,28 @@ class WorkflowMonitorTUI:
         return False
 
     def _handle_refresh_rate_key(self, key: str) -> bool:
-        """Handle refresh rate keys (h/j/k/l, 0, G). Returns True if key was handled."""
-        if key == "j":
+        """Handle refresh rate keys (+/-, </>, 0). Returns True if key was handled."""
+        if key == "-":  # Fine decrease (-0.5s)
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 0.5)
             self._force_refresh = True
             return True
-        if key == "k":
+        if key == "+" or key == "=":  # Fine increase (+0.5s), = for unshifted +
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 0.5)
             self._force_refresh = True
             return True
-        if key == "h":
+        if key == "<" or key == ",":  # Coarse decrease (-5s), , for unshifted <
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 5.0)
             self._force_refresh = True
             return True
-        if key == "l":
+        if key == ">" or key == ".":  # Coarse increase (+5s), . for unshifted >
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 5.0)
             self._force_refresh = True
             return True
-        if key == "0":
+        if key == "0":  # Reset to default
             self.refresh_rate = DEFAULT_REFRESH_RATE
             self._force_refresh = True
             return True
-        if key == "G":
+        if key == "G":  # Set to minimum (fastest)
             self.refresh_rate = MIN_REFRESH_RATE
             self._force_refresh = True
             return True
@@ -884,21 +893,10 @@ class WorkflowMonitorTUI:
 
     def _handle_navigation_key(self, key: str) -> bool:
         """Handle navigation keys (Tab, /, n, N, Esc, Enter). Returns True if handled."""
-        if key == "\r" or key == "\n":  # Enter - toggle job selection mode
-            self._job_selection_mode = not self._job_selection_mode
-            if self._job_selection_mode:
-                # Entering selection mode - default to running jobs
-                self._log_source = "running"
-            else:
-                # Exiting selection mode - reset state
-                self._log_source = None
-                self._selected_job_index = 0
-                self._selected_completion_index = 0
-                self._running_scroll_offset = 0
-                self._completions_scroll_offset = 0
-                self._log_scroll_offset = 0
-                self._cached_log_path = None
-                self._cached_log_lines = []
+        if key == "\r" or key == "\n":  # Enter - enter table navigation mode
+            self._job_selection_mode = True
+            self._log_viewing_mode = False
+            self._log_source = "running"  # Default to running jobs table
             self._force_refresh = True
             return True
         if key == "\t":  # Tab - cycle layout
@@ -1018,19 +1016,31 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
         return False
 
-    def _handle_job_selection_key(self, key: str, num_jobs: int) -> bool:
-        """Handle keypress in job selection mode. Returns True if should quit."""
-        # Help key works in job selection mode
+    def _handle_table_navigation_key(self, key: str, num_jobs: int) -> bool:  # noqa: C901
+        """Handle keypress in table navigation mode. Returns True if should quit.
+
+        Table mode: Navigate between jobs in running/completions tables.
+        Press Enter to view a job's log, Esc to exit to normal mode.
+        """
+        # Help key works in table mode
         if key == "?":
             self._show_help = True
             self._force_refresh = True
             return False
 
-        # Sort keys work in job selection mode
+        # Sort keys work in table mode
         if self._handle_sort_key(key):
             return False
 
-        if key == "\x1b":  # Escape - exit selection mode
+        # Enter - view log for selected job (enter log viewing mode)
+        if key == "\r" or key == "\n":
+            self._log_viewing_mode = True
+            self._log_scroll_offset = 0  # Start at end of log
+            self._force_refresh = True
+            return False
+
+        # Escape - exit table navigation mode
+        if key == "\x1b":
             self._job_selection_mode = False
             self._log_source = None
             self._selected_job_index = 0
@@ -1043,58 +1053,180 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
             return False
 
-        # Tab - cycle between running and completions log sources
+        # Tab - cycle forward between running and completions tables
         if key == "\t":
             if self._log_source == "running":
                 self._log_source = "completions"
             else:
                 self._log_source = "running"
-            self._log_scroll_offset = 0  # Reset scroll on source change
             self._force_refresh = True
             return False
 
-        # Job navigation: Ctrl+p (up) or Ctrl+n (down)
-        # Use appropriate index based on log source
-        if key == "\x10":  # Ctrl+p - previous job
+        # Shift-Tab (backtab) - cycle backward between tables
+        if key == "\x1b[Z":
+            if self._log_source == "completions":
+                self._log_source = "running"
+            else:
+                self._log_source = "completions"
+            self._force_refresh = True
+            return False
+
+        # h/l for table switching (vim-style left/right)
+        if key == "h":  # h - switch to running (left table)
+            if self._log_source != "running":
+                self._log_source = "running"
+                self._force_refresh = True
+            return False
+
+        if key == "l":  # l - switch to completions (right table)
+            if self._log_source != "completions":
+                self._log_source = "completions"
+                self._force_refresh = True
+            return False
+
+        # Row navigation: k (up) or j (down) - vim-style
+        if key == "k":  # k - previous row (up)
             if self._log_source == "completions":
                 self._selected_completion_index = max(0, self._selected_completion_index - 1)
             else:
                 self._selected_job_index = max(0, self._selected_job_index - 1)
-            self._log_scroll_offset = 0  # Reset scroll on job change
             self._force_refresh = True
             return False
 
-        if key == "\x0e":  # Ctrl+n - next job
+        if key == "j":  # j - next row (down)
             if self._log_source == "completions":
                 self._selected_completion_index = min(
                     num_jobs - 1, self._selected_completion_index + 1
                 )
             else:
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
+            self._force_refresh = True
+            return False
+
+        # Half-page navigation: Ctrl+d (down) / Ctrl+u (up)
+        half_page = 5
+        if key == "\x04":  # Ctrl+d - half page down
+            if self._log_source == "completions":
+                self._selected_completion_index = min(
+                    num_jobs - 1, self._selected_completion_index + half_page
+                )
+            else:
+                self._selected_job_index = min(num_jobs - 1, self._selected_job_index + half_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x15":  # Ctrl+u - half page up
+            if self._log_source == "completions":
+                idx = max(0, self._selected_completion_index - half_page)
+                self._selected_completion_index = idx
+            else:
+                self._selected_job_index = max(0, self._selected_job_index - half_page)
+            self._force_refresh = True
+            return False
+
+        # Full-page navigation: Ctrl+f (forward/down) / Ctrl+b (back/up)
+        full_page = 10
+        if key == "\x06":  # Ctrl+f - full page down
+            if self._log_source == "completions":
+                self._selected_completion_index = min(
+                    num_jobs - 1, self._selected_completion_index + full_page
+                )
+            else:
+                self._selected_job_index = min(num_jobs - 1, self._selected_job_index + full_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x02":  # Ctrl+b - full page up
+            if self._log_source == "completions":
+                self._selected_completion_index = max(
+                    0, self._selected_completion_index - full_page
+                )
+            else:
+                self._selected_job_index = max(0, self._selected_job_index - full_page)
+            self._force_refresh = True
+            return False
+
+        # Jump to first/last row: g / G
+        if key == "g":  # g - first row
+            if self._log_source == "completions":
+                self._selected_completion_index = 0
+            else:
+                self._selected_job_index = 0
+            self._force_refresh = True
+            return False
+
+        if key == "G":  # G - last row
+            if self._log_source == "completions":
+                self._selected_completion_index = max(0, num_jobs - 1)
+            else:
+                self._selected_job_index = max(0, num_jobs - 1)
+            self._force_refresh = True
+            return False
+
+        return False
+
+    def _handle_log_viewing_key(self, key: str) -> bool:
+        """Handle keypress in log viewing mode. Returns True if should quit.
+
+        Log mode: Scroll through the selected job's log file.
+        Press Esc to return to table navigation mode.
+        """
+        # Help key works in log mode
+        if key == "?":
+            self._show_help = True
+            self._force_refresh = True
+            return False
+
+        # Escape - exit log viewing mode, return to table navigation
+        if key == "\x1b":
+            self._log_viewing_mode = False
             self._log_scroll_offset = 0
             self._force_refresh = True
             return False
 
-        # Log scrolling: Ctrl+u (up) or Ctrl+d (down)
-        if key == "\x15":  # Ctrl+u - scroll log up (show older)
-            self._log_scroll_offset += self._log_scroll_page_size
+        # Line-by-line scrolling: j (down/newer) / k (up/older)
+        if key == "j":  # j - scroll down (show newer lines)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - 1)
             self._force_refresh = True
             return False
 
-        if key == "\x04":  # Ctrl+d - scroll log down (show newer)
-            self._log_scroll_offset = max(0, self._log_scroll_offset - self._log_scroll_page_size)
+        if key == "k":  # k - scroll up (show older lines)
+            self._log_scroll_offset += 1
             self._force_refresh = True
             return False
 
-        # Jump to top/bottom of log
-        if key == "g":  # Jump to top of log
-            self._log_scroll_offset = max(
-                0, len(self._cached_log_lines) - self._log_scroll_page_size
-            )
+        # Half-page scrolling: Ctrl+d (down) / Ctrl+u (up)
+        half_page = max(1, self._log_scroll_page_size // 2)
+        if key == "\x04":  # Ctrl+d - half page down (newer)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - half_page)
             self._force_refresh = True
             return False
 
-        if key == "G":  # Jump to bottom (latest)
+        if key == "\x15":  # Ctrl+u - half page up (older)
+            self._log_scroll_offset += half_page
+            self._force_refresh = True
+            return False
+
+        # Full-page scrolling: Ctrl+f (forward/down) / Ctrl+b (back/up)
+        full_page = self._log_scroll_page_size
+        if key == "\x06":  # Ctrl+f - full page down (newer)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - full_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x02":  # Ctrl+b - full page up (older)
+            self._log_scroll_offset += full_page
+            self._force_refresh = True
+            return False
+
+        # Jump to start/end: g (start/oldest) / G (end/newest)
+        if key == "g":  # g - go to start of log (oldest, max offset)
+            # Set to a large number; will be clamped by display logic
+            self._log_scroll_offset = 999999
+            self._force_refresh = True
+            return False
+
+        if key == "G":  # G - go to end of log (newest, offset 0)
             self._log_scroll_offset = 0
             self._force_refresh = True
             return False
@@ -1187,11 +1319,9 @@ class WorkflowMonitorTUI:
         help_text.add_row("r", "Force refresh")
         help_text.add_row("Ctrl+r", "Hard refresh (reload historical data)")
         help_text.add_row("", "")
-        help_text.add_row("", "[bold]Refresh Rate (vim-style)[/bold]")
-        help_text.add_row("h", "Decrease by 5s (faster)")
-        help_text.add_row("j", "Decrease by 0.5s (faster)")
-        help_text.add_row("k", "Increase by 0.5s (slower)")
-        help_text.add_row("l", "Increase by 5s (slower)")
+        help_text.add_row("", "[bold]Refresh Rate[/bold]")
+        help_text.add_row("- / +", "Decrease/increase by 0.5s")
+        help_text.add_row("< / >", "Decrease/increase by 5s")
         help_text.add_row("0", f"Reset to default ({DEFAULT_REFRESH_RATE}s)")
         help_text.add_row("G", f"Set to minimum ({MIN_REFRESH_RATE}s, fastest)")
         help_text.add_row("", "")
@@ -1209,11 +1339,21 @@ class WorkflowMonitorTUI:
         help_text.add_row("s / S", "Cycle sort table (forward/backward)")
         help_text.add_row("1-4", "Sort by column (press again to reverse)")
         help_text.add_row("", "")
-        help_text.add_row("", "[bold]Job Log Viewer[/bold]")
-        help_text.add_row("Enter", "Toggle job log view")
-        help_text.add_row("Ctrl+p / Ctrl+n", "Select prev/next job")
-        help_text.add_row("Ctrl+u / Ctrl+d", "Scroll log up/down")
-        help_text.add_row("g / G", "Jump to top/bottom of log")
+        help_text.add_row("", "[bold]Table Navigation (Enter to start)[/bold]")
+        help_text.add_row("j / k", "Move down/up one row")
+        help_text.add_row("g / G", "Jump to first/last row")
+        help_text.add_row("Ctrl+d/u", "Move down/up half page")
+        help_text.add_row("Ctrl+f/b", "Move down/up full page")
+        help_text.add_row("h / l", "Switch to running/completions table")
+        help_text.add_row("Enter", "View selected job's log")
+        help_text.add_row("Esc", "Exit table navigation")
+        help_text.add_row("", "")
+        help_text.add_row("", "[bold]Log Viewing (Enter on job)[/bold]")
+        help_text.add_row("j / k", "Scroll down/up one line")
+        help_text.add_row("g / G", "Jump to start/end of log")
+        help_text.add_row("Ctrl+d/u", "Scroll down/up half page")
+        help_text.add_row("Ctrl+f/b", "Scroll down/up full page")
+        help_text.add_row("Esc", "Return to table navigation")
 
         return Panel(
             help_text,
@@ -1944,13 +2084,19 @@ class WorkflowMonitorTUI:
                 selected_job = completions[self._selected_completion_index]
                 job_status = "failed" if id(selected_job) in failed_ids else "completed"
 
+        # Determine subtitle based on mode
+        if self._log_viewing_mode:
+            mode_subtitle = "[dim]LOG: j/k scroll | g/G start/end | Ctrl-d/u page | Esc back[/dim]"
+        else:
+            mode_subtitle = "[dim]TABLE: j/k nav | h/l switch | Enter view log | Esc exit[/dim]"
+
         # Handle no jobs available
         if selected_job is None:
             source_name = "running jobs" if self._log_source == "running" else "completed jobs"
             return Panel(
                 f"[dim]No {source_name}[/dim]",
                 title="Job Log",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -1960,7 +2106,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 f"[dim]No log file for {selected_job.rule} (job {selected_job.job_id})[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
         log_path = self.workflow_dir / selected_job.log_file
@@ -1970,7 +2116,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 f"[dim]No log file found for {selected_job.rule}[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -1982,7 +2128,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 "[dim]Log file is empty[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -2021,13 +2167,12 @@ class WorkflowMonitorTUI:
 
         status_suffix = f" [{job_status}]" if job_status else ""
         title = f"Job Log: {selected_job.rule}{status_suffix}{scroll_indicator}"
-        subtitle = "[dim]Ctrl+u/d scroll | g/G top/bottom | Tab switch | Esc exit[/dim]"
 
         return Panel(
             content,
             title=title,
-            subtitle=subtitle,
-            border_style="cyan",
+            subtitle=mode_subtitle,
+            border_style="cyan" if self._log_viewing_mode else FG_BLUE,
         )
 
     def _make_pending_jobs_panel(self, progress: WorkflowProgress) -> Panel:
@@ -2582,11 +2727,11 @@ class WorkflowMonitorTUI:
                         key = chars[0]
                         if key == "\x1b" and len(chars) >= 3:
                             seq = chars[1:3]
-                            # Map known sequences to control characters
+                            # Map known sequences to vim-style keys
                             if seq in ("[A", "OA"):  # Up arrow
-                                key = "\x10"  # Map to Ctrl+p
+                                key = "k"  # Map to k (vim up)
                             elif seq in ("[B", "OB"):  # Down arrow
-                                key = "\x0e"  # Map to Ctrl+n
+                                key = "j"  # Map to j (vim down)
                             elif seq.startswith("[") or seq.startswith("O"):
                                 # Unknown escape sequence - discard
                                 continue
