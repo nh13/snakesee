@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+# Time conversion constants
+SECONDS_PER_MINUTE: int = 60
+SECONDS_PER_HOUR: int = 3600
+
 
 class StatusColor(str, Enum):
     """Standard colors for workflow/job status display."""
@@ -111,44 +115,44 @@ def format_duration(
         return "0s"
 
     if precision == "auto":
-        if seconds < 60:
+        if seconds < SECONDS_PER_MINUTE:
             return f"{int(seconds)}s"
-        if seconds < 3600:
-            minutes = int(seconds // 60)
-            secs = int(seconds % 60)
+        if seconds < SECONDS_PER_HOUR:
+            minutes = int(seconds // SECONDS_PER_MINUTE)
+            secs = int(seconds % SECONDS_PER_MINUTE)
             return f"{minutes}m {secs}s" if secs > 0 else f"{minutes}m"
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
+        hours = int(seconds // SECONDS_PER_HOUR)
+        minutes = int((seconds % SECONDS_PER_HOUR) // SECONDS_PER_MINUTE)
         return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
 
     if precision == "seconds":
-        if seconds < 60:
+        if seconds < SECONDS_PER_MINUTE:
             return f"{int(seconds)}s"
-        if seconds < 3600:
-            minutes = int(seconds // 60)
-            secs = int(seconds % 60)
+        if seconds < SECONDS_PER_HOUR:
+            minutes = int(seconds // SECONDS_PER_MINUTE)
+            secs = int(seconds % SECONDS_PER_MINUTE)
             return f"{minutes}m {secs}s"
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
+        hours = int(seconds // SECONDS_PER_HOUR)
+        minutes = int((seconds % SECONDS_PER_HOUR) // SECONDS_PER_MINUTE)
+        secs = int(seconds % SECONDS_PER_MINUTE)
         if secs > 0:
             return f"{hours}h {minutes}m {secs}s"
         return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
 
     if precision == "minutes":
-        if seconds < 60:
+        if seconds < SECONDS_PER_MINUTE:
             return f"{int(seconds)}s"
-        minutes = int(seconds // 60)
-        if seconds < 3600:
+        minutes = int(seconds // SECONDS_PER_MINUTE)
+        if seconds < SECONDS_PER_HOUR:
             return f"{minutes}m"
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
+        hours = int(seconds // SECONDS_PER_HOUR)
+        minutes = int((seconds % SECONDS_PER_HOUR) // SECONDS_PER_MINUTE)
         return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
 
     # precision == "hours"
-    if seconds < 3600:
-        return f"{int(seconds / 60)}m"
-    hours_float = seconds / 3600
+    if seconds < SECONDS_PER_HOUR:
+        return f"{int(seconds / SECONDS_PER_MINUTE)}m"
+    hours_float = seconds / SECONDS_PER_HOUR
     return f"{hours_float:.1f}h"
 
 

@@ -485,6 +485,10 @@ class TimeEstimator:
         if elapsed is None or elapsed <= 0:
             return self._estimate_no_progress(progress)
 
+        # Guard against division by zero when no jobs completed yet
+        if progress.completed_jobs <= 0:
+            return self._estimate_no_progress(progress)
+
         avg_time_per_step = elapsed / progress.completed_jobs
         remaining_steps = progress.total_jobs - progress.completed_jobs
         estimate = avg_time_per_step * remaining_steps
