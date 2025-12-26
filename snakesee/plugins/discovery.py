@@ -50,7 +50,8 @@ def discover_entry_point_plugins(
                 (d.metadata.get("Name", ""), d.metadata.get("Version", "")) for d in distributions()
             )
         )
-    except Exception:
+    except (TypeError, OSError) as e:
+        logger.debug("Failed to compute package version hash: %s", e)
         version_hash = 0
 
     # Invalidate cache if package versions changed

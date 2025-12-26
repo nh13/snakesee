@@ -329,3 +329,8 @@ class RuleRegistry:
         """Get total number of samples across all rules."""
         with self._lock:
             return sum(stats.aggregate.count for stats in self._rules.values())
+
+    def rule_count(self) -> int:
+        """Get number of rules in the registry."""
+        with self._lock:
+            return len(self._rules)

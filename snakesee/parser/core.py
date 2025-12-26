@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from snakesee.constants import STALE_WORKFLOW_THRESHOLD_SECONDS
 from snakesee.models import JobInfo
@@ -42,9 +41,6 @@ from snakesee.parser.utils import _parse_timestamp
 from snakesee.parser.utils import _parse_wildcards
 from snakesee.parser.utils import calculate_input_size
 from snakesee.parser.utils import estimate_input_size_from_output
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -511,7 +507,7 @@ def parse_incomplete_jobs(
                     decoded = base64.b64decode(marker.name).decode("utf-8")
                     output_file = Path(decoded)
                 except (ValueError, UnicodeDecodeError) as e:
-                    logger.debug("Failed to decode base64 marker filename %s: %s", marker.name, e)
+                    logger.warning("Failed to decode base64 marker filename %s: %s", marker.name, e)
 
                 # The marker's mtime is approximately when the job started
                 yield JobInfo(

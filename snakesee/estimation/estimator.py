@@ -78,9 +78,10 @@ class TimeEstimator:
         # Centralized registry - create internal one if not provided
         self._rule_registry: RuleRegistry = rule_registry or RuleRegistry(config=self.config)
 
-        # Cache for global_mean_duration (invalidated when sample count changes)
+        # Cache for global_mean_duration (invalidated when sample count or rule count changes)
         self._global_mean_cache: float | None = None
         self._global_mean_cache_sample_count: int = 0
+        self._global_mean_cache_rule_count: int = 0
 
         self.current_rules: set[str] | None = None  # Rules in current workflow (for filtering)
         self.code_hash_to_rules: dict[str, set[str]] = {}  # For renamed rule detection
@@ -447,16 +448,18 @@ class TimeEstimator:
         Get the global average duration across all known rules.
 
         Used as a fallback when a specific rule has no historical data.
-        Result is cached and invalidated when sample count changes.
+        Result is cached and invalidated when sample count or rule count changes.
 
         Returns:
             Average duration in seconds, or config.default_global_mean if no data.
         """
-        # Check cache validity using sample count as version indicator
+        # Check cache validity using sample count and rule count as version indicators
         current_sample_count = self._rule_registry.total_sample_count()
+        current_rule_count = self._rule_registry.rule_count()
         if (
             self._global_mean_cache is not None
             and current_sample_count == self._global_mean_cache_sample_count
+            and current_rule_count == self._global_mean_cache_rule_count
         ):
             return self._global_mean_cache
 
@@ -467,6 +470,7 @@ class TimeEstimator:
             mean(all_durations) if all_durations else self.config.default_global_mean
         )
         self._global_mean_cache_sample_count = current_sample_count
+        self._global_mean_cache_rule_count = current_rule_count
         return self._global_mean_cache
 
     def estimate_remaining(
