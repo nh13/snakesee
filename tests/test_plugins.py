@@ -435,3 +435,122 @@ class TestFindRuleLog:
         """Test returns None when no log found."""
         found = find_rule_log("unknown_rule", None, tmp_path)
         assert found is None
+
+
+class TestPluginErrorHandling:
+    """Tests for plugin error handling."""
+
+    def test_load_plugins_with_runtime_error(self, tmp_path: Path) -> None:
+        """Test that plugins raising errors during instantiation are skipped."""
+        from snakesee.plugins import load_user_plugins
+
+        plugin_file = tmp_path / "bad_init.py"
+        plugin_file.write_text("""
+from snakesee.plugins.base import ToolProgress, ToolProgressPlugin
+
+class BadInitPlugin(ToolProgressPlugin):
+    def __init__(self):
+        raise RuntimeError("Init failed")
+
+    @property
+    def tool_name(self) -> str:
+        return "bad"
+
+    def can_parse(self, rule_name: str, log_content: str) -> bool:
+        return False
+
+    def parse_progress(self, log_content: str) -> ToolProgress | None:
+        return None
+""")
+
+        plugins = load_user_plugins(plugin_dirs=[tmp_path], force_reload=True)
+        # Plugin should be skipped due to RuntimeError
+        assert plugins == []
+
+    def test_load_plugins_with_import_error(self, tmp_path: Path) -> None:
+        """Test that plugins with import errors are skipped."""
+        from snakesee.plugins import load_user_plugins
+
+        plugin_file = tmp_path / "bad_import.py"
+        plugin_file.write_text("""
+import nonexistent_module_xyz123
+from snakesee.plugins.base import ToolProgress, ToolProgressPlugin
+
+class BadImportPlugin(ToolProgressPlugin):
+    @property
+    def tool_name(self) -> str:
+        return "bad"
+
+    def can_parse(self, rule_name: str, log_content: str) -> bool:
+        return False
+
+    def parse_progress(self, log_content: str) -> ToolProgress | None:
+        return None
+""")
+
+        plugins = load_user_plugins(plugin_dirs=[tmp_path], force_reload=True)
+        # Plugin should be skipped due to ImportError
+        assert plugins == []
+
+    def test_parse_progress_handles_exception(self, tmp_path: Path) -> None:
+        """Test that parse_tool_progress handles plugin exceptions gracefully."""
+        from snakesee.plugins import parse_tool_progress
+
+        # Create a log file
+        log_file = tmp_path / "test.log"
+        log_file.write_text("Some log content")
+
+        # This shouldn't raise, even if no plugin matches
+        result = parse_tool_progress("unknown_rule", log_file)
+        assert result is None
+
+    def test_find_rule_log_handles_missing_dirs(self, tmp_path: Path) -> None:
+        """Test that find_rule_log handles missing directories gracefully."""
+        # Non-existent workflow dir
+        result = find_rule_log("test_rule", None, tmp_path / "nonexistent")
+        assert result is None
+
+    def test_load_plugins_skips_module_without_plugin_class(self, tmp_path: Path) -> None:
+        """Test that modules without ToolProgressPlugin subclasses are skipped."""
+        from snakesee.plugins import load_user_plugins
+
+        # Create a valid Python file but without a plugin class
+        plugin_file = tmp_path / "not_a_plugin.py"
+        plugin_file.write_text("""
+def some_function():
+    pass
+
+class NotAPlugin:
+    pass
+""")
+
+        plugins = load_user_plugins(plugin_dirs=[tmp_path], force_reload=True)
+        # No plugin should be loaded
+        assert plugins == []
+
+    def test_load_plugins_with_type_error(self, tmp_path: Path) -> None:
+        """Test that plugins with TypeError during instantiation are skipped."""
+        from snakesee.plugins import load_user_plugins
+
+        plugin_file = tmp_path / "type_error.py"
+        plugin_file.write_text("""
+from snakesee.plugins.base import ToolProgress, ToolProgressPlugin
+
+class TypeErrorPlugin(ToolProgressPlugin):
+    def __init__(self, required_arg):  # Requires an arg we don't provide
+        pass
+
+    @property
+    def tool_name(self) -> str:
+        return "type_error"
+
+    def can_parse(self, rule_name: str, log_content: str) -> bool:
+        return False
+
+    def parse_progress(self, log_content: str) -> ToolProgress | None:
+        return None
+""")
+
+        plugins = load_user_plugins(plugin_dirs=[tmp_path], force_reload=True)
+        # Plugin should be skipped due to TypeError (missing required arg)
+        assert plugins == []

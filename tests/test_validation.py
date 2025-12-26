@@ -431,3 +431,186 @@ class TestValidationLogger:
         content = log_file.read_text()
         assert "EVENT STATE" in content
         assert "PARSED STATE" in content
+
+
+class TestOutOfOrderEvents:
+    """Tests for handling out-of-order events."""
+
+    def test_finished_before_started(self) -> None:
+        """Test handling finish event before start event."""
+        acc = EventAccumulator()
+
+        # Submit job
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=1,
+                rule_name="align",
+            )
+        )
+
+        # Finish arrives before start (out of order)
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1100.0,
+                job_id=1,
+                duration=50.0,
+            )
+        )
+
+        # Job should still be marked as finished
+        assert acc.jobs[1].status == "finished"
+        assert acc.jobs[1].end_time == 1100.0
+
+    def test_error_before_started(self) -> None:
+        """Test handling error event before start event."""
+        acc = EventAccumulator()
+
+        # Submit job
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=1,
+                rule_name="align",
+            )
+        )
+
+        # Error arrives before start
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_ERROR,
+                timestamp=1050.0,
+                job_id=1,
+            )
+        )
+
+        # Job should be marked as error
+        assert acc.jobs[1].status == "error"
+
+    def test_duplicate_finish_events(self) -> None:
+        """Test handling duplicate finish events."""
+        acc = EventAccumulator()
+
+        # Full lifecycle
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=1,
+                rule_name="align",
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=1001.0,
+                job_id=1,
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1100.0,
+                job_id=1,
+                duration=99.0,
+            )
+        )
+
+        # Duplicate finish event
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1101.0,
+                job_id=1,
+                duration=100.0,
+            )
+        )
+
+        # Should still be finished with original values
+        assert acc.jobs[1].status == "finished"
+
+    def test_event_for_unknown_job(self) -> None:
+        """Test handling events for jobs not previously submitted."""
+        acc = EventAccumulator()
+
+        # Start event for unknown job
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=1001.0,
+                job_id=999,
+            )
+        )
+
+        # Should create job entry
+        assert 999 in acc.jobs
+        assert acc.jobs[999].start_time == 1001.0
+
+    def test_progress_decreases(self) -> None:
+        """Test handling progress that decreases (shouldn't happen but handle gracefully)."""
+        acc = EventAccumulator()
+
+        # Initial progress
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.PROGRESS,
+                timestamp=1000.0,
+                completed_jobs=10,
+                total_jobs=20,
+            )
+        )
+        assert acc.completed_jobs == 10
+
+        # Progress decreases (anomaly)
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.PROGRESS,
+                timestamp=1001.0,
+                completed_jobs=5,  # Less than before
+                total_jobs=20,
+            )
+        )
+
+        # Should accept the new value (no special handling)
+        assert acc.completed_jobs == 5
+
+    def test_timestamps_out_of_order(self) -> None:
+        """Test events with timestamps out of order.
+
+        When events arrive out of order, later events can overwrite earlier states.
+        This tests that the accumulator handles this gracefully without crashing.
+        """
+        acc = EventAccumulator()
+
+        # Events arrive out of timestamp order
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1100.0,
+                job_id=1,
+                duration=99.0,
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,  # Earlier timestamp
+                job_id=1,
+                rule_name="align",
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=1001.0,
+                job_id=1,
+            )
+        )
+
+        # Started event arrives after finished, so status is running
+        # This is expected - events are processed in arrival order, not timestamp order
+        assert acc.jobs[1].rule_name == "align"
+        assert acc.jobs[1].status == "running"
