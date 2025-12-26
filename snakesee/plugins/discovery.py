@@ -47,7 +47,9 @@ def discover_entry_point_plugins(
     try:
         version_hash = hash(
             tuple(
-                (d.metadata.get("Name", ""), d.metadata.get("Version", "")) for d in distributions()
+                (d.metadata["Name"], d.metadata["Version"])
+                for d in distributions()
+                if "Name" in d.metadata and "Version" in d.metadata
             )
         )
     except (TypeError, OSError) as e:
