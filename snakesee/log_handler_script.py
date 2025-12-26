@@ -344,12 +344,14 @@ def _handle_job_error(msg: dict[str, Any], timestamp: float) -> None:
     threads = None
     if jobid is not None:
         with _state_lock:
-            if rule_name is None:
-                rule_name = _job_rules.get(jobid)
             start_time = _job_start_times.pop(jobid, None)
             wildcards = _job_wildcards.pop(jobid, None)
             threads = _job_threads.pop(jobid, None)
-            _job_rules.pop(jobid, None)
+            # Use stored rule_name if not provided in the message
+            if rule_name is None:
+                rule_name = _job_rules.pop(jobid, None)
+            else:
+                _job_rules.pop(jobid, None)
 
     duration = timestamp - start_time if start_time else None
 

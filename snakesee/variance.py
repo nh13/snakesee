@@ -240,8 +240,8 @@ class VarianceCalculator:
     def calculate_simple_confidence(
         self,
         completed_jobs: int,
-        divisor: int = 20,
-        max_confidence: float = 0.7,
+        divisor: int | None = None,
+        max_confidence: float | None = None,
     ) -> float:
         """Calculate simple confidence based on completed job count.
 
@@ -249,12 +249,16 @@ class VarianceCalculator:
 
         Args:
             completed_jobs: Number of completed jobs.
-            divisor: Denominator for the confidence fraction.
-            max_confidence: Maximum confidence value.
+            divisor: Denominator for the confidence fraction. Uses config default.
+            max_confidence: Maximum confidence value. Uses config default.
 
         Returns:
             Confidence value.
         """
+        if divisor is None:
+            divisor = self.config.simple_estimate_jobs_divisor
+        if max_confidence is None:
+            max_confidence = self.config.simple_estimate_confidence_cap
         return min(max_confidence, completed_jobs / divisor)
 
     # =========================================================================

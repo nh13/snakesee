@@ -91,6 +91,9 @@ class RuleMatchingEngine:
     ) -> tuple[str, int] | None:
         """Find similar rule by Levenshtein distance.
 
+        When multiple rules have the same distance, returns the lexicographically
+        smallest one for deterministic behavior.
+
         Args:
             rule: Rule name to match.
             known_rules: Set of rules to search.
@@ -107,7 +110,10 @@ class RuleMatchingEngine:
 
         for known_rule in known_rules:
             distance = levenshtein_distance(rule, known_rule)
-            if distance < best_distance:
+            # Prefer lower distance, then lexicographically smaller name for ties
+            if distance < best_distance or (
+                distance == best_distance and best_match is not None and known_rule < best_match
+            ):
                 best_distance = distance
                 best_match = known_rule
 

@@ -257,6 +257,8 @@ def load_profile(path: Path) -> TimingProfile:
         )
     except KeyError as e:
         raise InvalidProfileError(path, f"Missing required field: {e}") from e
+    except TypeError as e:
+        raise InvalidProfileError(path, f"Invalid data structure: {e}") from e
 
 
 def find_profile(workflow_dir: Path) -> Path | None:

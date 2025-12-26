@@ -1,6 +1,7 @@
 """Tests for the CLI module."""
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -243,8 +244,6 @@ class TestStatusErrorPaths:
         self, snakemake_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Test status shows incomplete jobs."""
-        import time
-
         # Create log with progress
         log_file = snakemake_dir / "log" / "2024-01-01T120000.snakemake.log"
         log_file.write_text("5 of 10 steps (50%) done")

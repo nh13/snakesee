@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Literal
 
+from snakesee.constants import STALE_WORKFLOW_THRESHOLD_SECONDS
+
 WeightingStrategy = Literal["time", "index"]
 
 
@@ -107,8 +109,7 @@ class TimeConstants:
     seconds_per_day: int = 86400
     seconds_per_hour: int = 3600
     seconds_per_minute: int = 60
-    # SYNC: This value must match STALE_WORKFLOW_THRESHOLD_SECONDS in constants.py
-    stale_workflow_threshold: float = 1800.0  # 30 minutes
+    stale_workflow_threshold: float = STALE_WORKFLOW_THRESHOLD_SECONDS
     timing_mismatch_tolerance: float = 5.0  # seconds
 
 

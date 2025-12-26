@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import orjson
-
 from snakesee.models import JobInfo
 from snakesee.utils import iterate_metadata_files
 
@@ -188,45 +186,23 @@ def collect_rule_code_hashes(
     if not metadata_dir.exists():
         return hash_to_rules
 
-    # Get file list - count upfront if progress is requested
-    if progress_callback is not None:
-        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
-        total = len(files)
-    else:
-        files = None
-        total = 0
+    # Use optimized iterate_metadata_files (6-7x faster than rglob)
+    for _path, data in iterate_metadata_files(
+        metadata_dir,
+        progress_callback,
+        sort_by_mtime=False,  # Order doesn't matter for code hash collection
+        use_cache=False,  # We need to read code field which isn't cached
+    ):
+        rule = data.get("rule")
+        code = data.get("code")
 
-    file_iter = files if files is not None else metadata_dir.rglob("*")
+        if rule and code:
+            # Normalize whitespace before hashing to handle formatting differences
+            normalized_code = " ".join(code.split())
+            code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
 
-    for i, meta_file in enumerate(file_iter):
-        if files is None and not meta_file.is_file():
-            continue
-
-        if progress_callback is not None:
-            progress_callback(i + 1, total)
-
-        try:
-            data = orjson.loads(meta_file.read_bytes())
-            rule = data.get("rule")
-            code = data.get("code")
-
-            if rule and code:
-                # Normalize whitespace before hashing to handle formatting differences
-                normalized_code = " ".join(code.split())
-                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
-
-                if code_hash not in hash_to_rules:
-                    hash_to_rules[code_hash] = set()
-                hash_to_rules[code_hash].add(rule)
-
-        except orjson.JSONDecodeError as e:
-            logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
-            continue
-        except OSError as e:
-            logger.debug("Error reading metadata file %s: %s", meta_file, e)
-            continue
-        except KeyError as e:
-            logger.debug("Missing key in metadata file %s: %s", meta_file, e)
-            continue
+            if code_hash not in hash_to_rules:
+                hash_to_rules[code_hash] = set()
+            hash_to_rules[code_hash].add(rule)
 
     return hash_to_rules

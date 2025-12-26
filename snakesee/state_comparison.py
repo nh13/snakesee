@@ -55,7 +55,7 @@ def _get_max_jobs_config() -> int:
     return DEFAULT_MAX_JOBS
 
 
-@dataclass
+@dataclass(slots=True)
 class JobState:
     """Tracked state for a single job from events."""
 

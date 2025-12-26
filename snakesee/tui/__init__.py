@@ -40,8 +40,8 @@ __all__ = [
     "DEFAULT_REFRESH_RATE",
     "FG_BLUE",
     "FG_GREEN",
-    "LayoutMode",
     "MAX_REFRESH_RATE",
     "MIN_REFRESH_RATE",
+    "LayoutMode",
     "WorkflowMonitorTUI",
 ]

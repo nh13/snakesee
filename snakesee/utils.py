@@ -365,10 +365,11 @@ def _iterate_metadata_parallel(
     batch_size = max(max_workers * 4, 20)
     processed = 0
 
-    for batch_start in range(0, len(files), batch_size):
-        batch = files[batch_start : batch_start + batch_size]
+    # Reuse executor across batches to avoid repeated creation overhead
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for batch_start in range(0, len(files), batch_size):
+            batch = files[batch_start : batch_start + batch_size]
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all files in batch
             future_to_idx = {
                 executor.submit(_read_metadata_file, file_info, cache): i

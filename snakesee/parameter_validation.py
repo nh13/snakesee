@@ -42,6 +42,10 @@ def validate_positive(*param_names: str) -> Callable[[Callable[P, R]], Callable[
     Raises:
         InvalidParameterError: If any specified parameter is not positive.
 
+    Note:
+        None values are allowed and bypass validation, making this suitable
+        for optional parameters with None defaults.
+
     Example:
         @validate_positive("half_life_days", "half_life_logs")
         def weighted_mean(self, half_life_days=7.0, half_life_logs=10):
@@ -83,6 +87,10 @@ def validate_non_negative(*param_names: str) -> Callable[[Callable[P, R]], Calla
     Raises:
         InvalidParameterError: If any specified parameter is negative.
 
+    Note:
+        None values are allowed and bypass validation, making this suitable
+        for optional parameters with None defaults.
+
     Example:
         @validate_non_negative("timeout")
         def wait_for_job(self, timeout=30.0):
@@ -123,6 +131,10 @@ def validate_not_empty(*param_names: str) -> Callable[[Callable[P, R]], Callable
 
     Raises:
         InvalidParameterError: If any specified parameter is empty.
+
+    Note:
+        None values are allowed and bypass validation, making this suitable
+        for optional parameters with None defaults.
 
     Example:
         @validate_not_empty("durations")
@@ -170,6 +182,10 @@ def validate_in_range(
 
     Raises:
         InvalidParameterError: If the parameter is outside the range.
+
+    Note:
+        None values are allowed and bypass validation, making this suitable
+        for optional parameters with None defaults.
 
     Example:
         @validate_in_range("confidence", min_value=0.0, max_value=1.0)
