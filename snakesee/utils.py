@@ -6,12 +6,13 @@ to avoid duplication and ensure consistent behavior.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
+
+import orjson
 
 from snakesee.constants import MAX_METADATA_FILE_SIZE
 
@@ -19,6 +20,23 @@ if TYPE_CHECKING:
     from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
+
+
+def json_loads(data: str | bytes) -> Any:
+    """Parse JSON using orjson for better performance.
+
+    Args:
+        data: JSON string or bytes to parse.
+
+    Returns:
+        Parsed JSON data.
+
+    Raises:
+        orjson.JSONDecodeError: If the data is not valid JSON.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return orjson.loads(data)
 
 
 def safe_mtime(path: Path) -> float:
@@ -72,10 +90,10 @@ def safe_read_json(path: Path, default: dict[str, Any] | None = None) -> dict[st
         Parsed JSON as dict, or default if reading/parsing fails.
     """
     try:
-        content = path.read_text()
-        result: dict[str, Any] = json.loads(content)
+        content = path.read_bytes()
+        result: dict[str, Any] = orjson.loads(content)
         return result
-    except (FileNotFoundError, OSError, PermissionError, json.JSONDecodeError):
+    except (FileNotFoundError, OSError, PermissionError, orjson.JSONDecodeError):
         return default
 
 
@@ -143,9 +161,9 @@ def iterate_metadata_files(
                 )
                 continue
 
-            data = json.loads(meta_file.read_text())
+            data = orjson.loads(meta_file.read_bytes())
             yield meta_file, data
-        except json.JSONDecodeError as e:
+        except orjson.JSONDecodeError as e:
             logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
             continue
         except OSError as e:

@@ -16,9 +16,10 @@ See Also:
     - :mod:`snakesee.plugins.registry` for plugin lookup functions
 """
 
-import json
 import stat
 from pathlib import Path
+
+import orjson
 
 from snakesee.plugins.base import PluginMetadata
 from snakesee.plugins.base import ToolProgress
@@ -169,14 +170,14 @@ def find_rule_log(
     if metadata_dir.exists():
         for meta_file in metadata_dir.iterdir():
             try:
-                data = json.loads(meta_file.read_text())
+                data = orjson.loads(meta_file.read_bytes())
                 if data.get("rule") == rule_name and data.get("log"):
                     # Get the most recent log file for this rule
                     for log_entry in data["log"]:
                         log_path = workflow_dir / log_entry
                         if log_path.exists():
                             search_paths.append(log_path)
-            except (json.JSONDecodeError, OSError, KeyError):
+            except (orjson.JSONDecodeError, OSError, KeyError):
                 continue
 
     # .snakemake/log/ directory for rule-specific logs

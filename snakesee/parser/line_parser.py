@@ -10,13 +10,9 @@ from typing import NamedTuple
 # Import regex patterns from patterns module (single source of truth)
 from snakesee.parser.patterns import ERROR_IN_RULE_PATTERN
 from snakesee.parser.patterns import FINISHED_JOB_PATTERN
-from snakesee.parser.patterns import JOBID_PATTERN
-from snakesee.parser.patterns import LOG_PATTERN
 from snakesee.parser.patterns import PROGRESS_PATTERN
 from snakesee.parser.patterns import RULE_START_PATTERN
-from snakesee.parser.patterns import THREADS_PATTERN
 from snakesee.parser.patterns import TIMESTAMP_PATTERN
-from snakesee.parser.patterns import WILDCARDS_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +79,9 @@ class LogLineParser:
     def parse_line(self, line: str) -> ParseEvent | None:
         """Parse a single log line and return structured event.
 
+        Uses fast-path prefix checks to skip expensive regex operations
+        for lines that can't possibly match.
+
         Updates internal context as needed for multi-line entries.
 
         Args:
@@ -93,36 +92,110 @@ class LogLineParser:
         """
         line = line.rstrip("\n\r")
 
-        # Check for timestamp
-        if match := TIMESTAMP_PATTERN.match(line):
-            timestamp = _parse_timestamp(match.group(1))
-            self.context.timestamp = timestamp
-            return ParseEvent(ParseEventType.TIMESTAMP, {"timestamp": timestamp})
+        # Fast path: empty lines
+        if not line:
+            return None
 
-        # Check for progress
-        if match := PROGRESS_PATTERN.search(line):
-            completed = int(match.group(1))
-            total = int(match.group(2))
-            return ParseEvent(ParseEventType.PROGRESS, {"completed": completed, "total": total})
+        first_char = line[0]
 
-        # Track current rule being executed
-        if match := RULE_START_PATTERN.match(line):
-            rule = match.group(1)
-            self.context.reset_for_new_rule(rule)
-            return ParseEvent(ParseEventType.RULE_START, {"rule": rule})
+        # Timestamp lines start with '['
+        if first_char == "[":
+            if match := TIMESTAMP_PATTERN.match(line):
+                timestamp = _parse_timestamp(match.group(1))
+                self.context.timestamp = timestamp
+                return ParseEvent(ParseEventType.TIMESTAMP, {"timestamp": timestamp})
+            return None
 
-        # Capture wildcards within rule block
-        if match := WILDCARDS_PATTERN.match(line):
-            wildcards = _parse_wildcards(match.group(1))
+        # Indented lines (properties) start with space/tab
+        if first_char in (" ", "\t"):
+            return self._parse_indented_line(line)
+
+        # Rule start: "rule X:" or "localrule X:"
+        if first_char == "r" and line.startswith("rule "):
+            if match := RULE_START_PATTERN.match(line):
+                rule = match.group(1)
+                self.context.reset_for_new_rule(rule)
+                return ParseEvent(ParseEventType.RULE_START, {"rule": rule})
+            return None
+
+        if first_char == "l" and line.startswith("localrule "):
+            if match := RULE_START_PATTERN.match(line):
+                rule = match.group(1)
+                self.context.reset_for_new_rule(rule)
+                return ParseEvent(ParseEventType.RULE_START, {"rule": rule})
+            return None
+
+        # Finished job: "Finished job X" or "Finished jobid: X"
+        if first_char == "F" and line.startswith("Finished "):
+            if match := FINISHED_JOB_PATTERN.search(line):
+                jobid = match.group(1)
+                return ParseEvent(
+                    ParseEventType.JOB_FINISHED,
+                    {"jobid": jobid, "timestamp": self.context.timestamp},
+                )
+            return None
+
+        # Error detection: "Error in rule X:"
+        if first_char == "E" and line.startswith("Error in rule "):
+            if match := ERROR_IN_RULE_PATTERN.search(line):
+                rule = match.group(1)
+                # Use context if error rule matches current context
+                if self.context.rule == rule:
+                    return ParseEvent(
+                        ParseEventType.ERROR,
+                        {
+                            "rule": rule,
+                            "jobid": self.context.jobid,
+                            "wildcards": self.context.wildcards,
+                            "threads": self.context.threads,
+                            "log_path": self.context.log_path,
+                        },
+                    )
+                return ParseEvent(
+                    ParseEventType.ERROR,
+                    {
+                        "rule": rule,
+                        "jobid": None,
+                        "wildcards": None,
+                        "threads": None,
+                        "log_path": None,
+                    },
+                )
+            return None
+
+        # Progress line: "X of Y steps (Z%) done" - check with substring first
+        if "steps" in line and "done" in line:
+            if match := PROGRESS_PATTERN.search(line):
+                completed = int(match.group(1))
+                total = int(match.group(2))
+                return ParseEvent(ParseEventType.PROGRESS, {"completed": completed, "total": total})
+
+        return None
+
+    def _parse_indented_line(self, line: str) -> ParseEvent | None:
+        """Parse indented property lines (wildcards, threads, log, jobid).
+
+        Args:
+            line: Indented log line starting with space/tab.
+
+        Returns:
+            ParseEvent if line contains a recognized property, None otherwise.
+        """
+        stripped = line.lstrip()
+
+        # Check each property type by prefix (faster than regex)
+        if stripped.startswith("wildcards:"):
+            value = stripped[10:].strip()  # len('wildcards:') = 10
+            wildcards = _parse_wildcards(value)
             self.context.wildcards = wildcards
             return ParseEvent(
                 ParseEventType.WILDCARDS,
                 {"wildcards": wildcards, "jobid": self.context.jobid},
             )
 
-        # Capture threads within rule block
-        if match := THREADS_PATTERN.match(line):
-            threads = _parse_positive_int(match.group(1), "threads")
+        if stripped.startswith("threads:"):
+            value = stripped[8:].strip()  # len('threads:') = 8
+            threads = _parse_positive_int(value, "threads")
             if threads is not None:
                 self.context.threads = threads
                 return ParseEvent(
@@ -131,18 +204,16 @@ class LogLineParser:
                 )
             return None
 
-        # Capture log path within rule block
-        if match := LOG_PATTERN.match(line):
-            log_path = match.group(1).strip()
+        if stripped.startswith("log:"):
+            log_path = stripped[4:].strip()  # len('log:') = 4
             self.context.log_path = log_path
             return ParseEvent(
                 ParseEventType.LOG_PATH,
                 {"log_path": log_path, "jobid": self.context.jobid},
             )
 
-        # Capture jobid within rule block
-        if match := JOBID_PATTERN.match(line):
-            jobid = match.group(1)
+        if stripped.startswith("jobid:"):
+            jobid = stripped[6:].strip()  # len('jobid:') = 6
             self.context.jobid = jobid
             return ParseEvent(
                 ParseEventType.JOBID,
@@ -153,40 +224,6 @@ class LogLineParser:
                     "threads": self.context.threads,
                     "timestamp": self.context.timestamp,
                     "log_path": self.context.log_path,
-                },
-            )
-
-        # Track finished jobs
-        if match := FINISHED_JOB_PATTERN.search(line):
-            jobid = match.group(1)
-            return ParseEvent(
-                ParseEventType.JOB_FINISHED,
-                {"jobid": jobid, "timestamp": self.context.timestamp},
-            )
-
-        # Detect errors
-        if match := ERROR_IN_RULE_PATTERN.search(line):
-            rule = match.group(1)
-            # Use context if error rule matches current context
-            if self.context.rule == rule:
-                return ParseEvent(
-                    ParseEventType.ERROR,
-                    {
-                        "rule": rule,
-                        "jobid": self.context.jobid,
-                        "wildcards": self.context.wildcards,
-                        "threads": self.context.threads,
-                        "log_path": self.context.log_path,
-                    },
-                )
-            return ParseEvent(
-                ParseEventType.ERROR,
-                {
-                    "rule": rule,
-                    "jobid": None,
-                    "wildcards": None,
-                    "threads": None,
-                    "log_path": None,
                 },
             )
 

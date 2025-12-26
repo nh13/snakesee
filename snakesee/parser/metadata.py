@@ -7,12 +7,13 @@ information about completed jobs, including timing, wildcards, and code.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import orjson
 
 from snakesee.models import JobInfo
 from snakesee.utils import iterate_metadata_files
@@ -211,7 +212,7 @@ def collect_rule_code_hashes(
             progress_callback(i + 1, total)
 
         try:
-            data = json.loads(meta_file.read_text())
+            data = orjson.loads(meta_file.read_bytes())
             rule = data.get("rule")
             code = data.get("code")
 
@@ -224,7 +225,7 @@ def collect_rule_code_hashes(
                     hash_to_rules[code_hash] = set()
                 hash_to_rules[code_hash].add(rule)
 
-        except json.JSONDecodeError as e:
+        except orjson.JSONDecodeError as e:
             logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
             continue
         except OSError as e:
