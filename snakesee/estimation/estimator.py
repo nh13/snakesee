@@ -252,6 +252,144 @@ class TimeEstimator:
             half_life_logs=self.half_life_logs,
         )
 
+    def _try_thread_estimate(self, rule: str, threads: int) -> tuple[float, float] | None:
+        """Try to get estimate from thread-specific stats.
+
+        Args:
+            rule: The rule name.
+            threads: Thread count for the job.
+
+        Returns:
+            Tuple of (expected_duration, variance) if thread stats available, None otherwise.
+        """
+        effective_thread_stats = self.thread_stats
+        if rule not in effective_thread_stats:
+            return None
+
+        thread_stats, matched_threads = effective_thread_stats[rule].get_best_match(threads)
+        if thread_stats is None:
+            return None
+
+        thread_mean = self._get_weighted_mean(thread_stats)
+        var_mult = self.config.variance
+
+        # Tighter variance for exact thread match, wider for aggregate fallback
+        if matched_threads is not None:
+            thread_var = (
+                thread_stats.std_dev**2
+                if thread_stats.count > 1
+                else (thread_mean * var_mult.exact_thread_match) ** 2
+            )
+        else:
+            # Aggregate fallback - use standard variance
+            thread_var = (
+                thread_stats.std_dev**2
+                if thread_stats.count > 1
+                else (thread_mean * var_mult.aggregate_fallback) ** 2
+            )
+        return thread_mean, thread_var
+
+    def _try_wildcard_estimate(
+        self, rule: str, wildcards: dict[str, str]
+    ) -> tuple[float, float] | None:
+        """Try to get estimate from wildcard-specific stats.
+
+        Args:
+            rule: The rule name.
+            wildcards: Wildcard values for the job.
+
+        Returns:
+            Tuple of (expected_duration, variance) if wildcard stats available, None otherwise.
+        """
+        effective_wildcard_stats = self.wildcard_stats
+        if rule not in effective_wildcard_stats:
+            return None
+
+        rule_wc_stats = effective_wildcard_stats[rule]
+
+        # Find the most predictive wildcard key for this rule
+        best_key = WildcardTimingStats.get_most_predictive_key(rule_wc_stats)
+
+        if best_key is None or best_key not in wildcards:
+            return None
+
+        wc_value = wildcards[best_key]
+        wts = rule_wc_stats[best_key]
+        value_stats = wts.get_stats_for_value(wc_value)
+
+        if value_stats is None:
+            return None
+
+        # Use wildcard-specific statistics
+        rule_mean = self._get_weighted_mean(value_stats)
+        rule_var = (
+            value_stats.std_dev**2
+            if value_stats.count > 1
+            else (rule_mean * self.config.variance.exact_wildcard_match) ** 2
+        )
+        return rule_mean, rule_var
+
+    def _try_rule_estimate(self, rule: str, input_size: int | None) -> tuple[float, float] | None:
+        """Try to get estimate from rule-level stats.
+
+        Args:
+            rule: The rule name.
+            input_size: Optional input file size in bytes for size-scaled estimates.
+
+        Returns:
+            Tuple of (expected_duration, variance) if rule stats available, None otherwise.
+        """
+        effective_stats = self.rule_stats
+        if rule not in effective_stats:
+            return None
+
+        stats = effective_stats[rule]
+
+        # Try size-scaled estimate if input size is available
+        if input_size is not None and input_size > 0:
+            scaled_est, confidence = self._get_size_scaled_estimate(stats, input_size)
+            size_conf_threshold = self.config.confidence_thresholds.size_scaling_min
+            if confidence > size_conf_threshold:
+                # Reduce variance for size-scaled estimates
+                rule_var = (
+                    stats.std_dev**2 * (1 - confidence * 0.5)
+                    if stats.count > 1
+                    else (scaled_est * self.config.variance.size_scaled) ** 2
+                )
+                return scaled_est, rule_var
+
+        # Standard rule-level estimate
+        rule_mean = self._get_weighted_mean(stats)
+        rule_var = (
+            stats.std_dev**2
+            if stats.count > 1
+            else (rule_mean * self.config.variance.rule_fallback) ** 2
+        )
+        return rule_mean, rule_var
+
+    def _try_fuzzy_match_estimate(self, rule: str) -> tuple[float, float] | None:
+        """Try to get estimate from fuzzy-matched similar rules.
+
+        Args:
+            rule: The unknown rule name to match.
+
+        Returns:
+            Tuple of (expected_duration, variance) if similar rule found, None otherwise.
+        """
+        similar = self._find_similar_rule(rule)
+        if similar is None:
+            return None
+
+        _matched_rule, stats = similar
+        rule_mean = self._get_weighted_mean(stats)
+        # Wider variance for fuzzy matches due to uncertainty
+        rule_var = (
+            stats.std_dev**2
+            if stats.count > 1
+            else (rule_mean * self.config.variance.fuzzy_match) ** 2
+        )
+        return rule_mean, rule_var
+
     def get_estimate_for_job(
         self,
         rule: str,
@@ -262,9 +400,12 @@ class TimeEstimator:
         """
         Get expected duration and variance for a specific job.
 
-        Uses thread-specific timing if available, then wildcard-specific timing
-        if enabled, otherwise falls back to rule-level statistics.
-        Optionally scales by input file size.
+        Uses a cascade of estimation strategies in priority order:
+        1. Thread-specific stats (highest priority for running job ETA)
+        2. Wildcard-specific stats (if enabled)
+        3. Rule-level stats (with optional size scaling)
+        4. Fuzzy matching for renamed/similar rules
+        5. Global mean fallback
 
         Args:
             rule: The rule name.
@@ -275,95 +416,30 @@ class TimeEstimator:
         Returns:
             Tuple of (expected_duration, variance).
         """
+        # Strategy 1: Thread-specific stats (highest priority for running job ETA)
+        if threads is not None:
+            result = self._try_thread_estimate(rule, threads)
+            if result is not None:
+                return result
+
+        # Strategy 2: Wildcard-specific stats (if enabled)
+        if self.use_wildcard_conditioning and wildcards:
+            result = self._try_wildcard_estimate(rule, wildcards)
+            if result is not None:
+                return result
+
+        # Strategy 3: Rule-level stats (with optional size scaling)
+        result = self._try_rule_estimate(rule, input_size)
+        if result is not None:
+            return result
+
+        # Strategy 4: Fuzzy matching for renamed/similar rules
+        result = self._try_fuzzy_match_estimate(rule)
+        if result is not None:
+            return result
+
+        # Strategy 5: Global mean fallback
         global_mean = self.global_mean_duration()
-
-        # Try thread-specific stats first (highest priority for running job ETA)
-        effective_thread_stats = self.thread_stats
-        if threads is not None and rule in effective_thread_stats:
-            thread_stats, matched_threads = effective_thread_stats[rule].get_best_match(threads)
-            if thread_stats is not None:
-                thread_mean = self._get_weighted_mean(thread_stats)
-                var_mult = self.config.variance
-                # Tighter variance for exact thread match, wider for aggregate fallback
-                if matched_threads is not None:
-                    thread_var = (
-                        thread_stats.std_dev**2
-                        if thread_stats.count > 1
-                        else (thread_mean * var_mult.exact_thread_match) ** 2
-                    )
-                else:
-                    # Aggregate fallback - use standard variance
-                    thread_var = (
-                        thread_stats.std_dev**2
-                        if thread_stats.count > 1
-                        else (thread_mean * var_mult.aggregate_fallback) ** 2
-                    )
-                return thread_mean, thread_var
-
-        # Try wildcard-specific stats if enabled
-        effective_wildcard_stats = self.wildcard_stats
-        if self.use_wildcard_conditioning and wildcards and rule in effective_wildcard_stats:
-            rule_wc_stats = effective_wildcard_stats[rule]
-
-            # Find the most predictive wildcard key for this rule
-            best_key = WildcardTimingStats.get_most_predictive_key(rule_wc_stats)
-
-            if best_key is not None and best_key in wildcards:
-                wc_value = wildcards[best_key]
-                wts = rule_wc_stats[best_key]
-                value_stats = wts.get_stats_for_value(wc_value)
-
-                if value_stats is not None:
-                    # Use wildcard-specific statistics
-                    rule_mean = self._get_weighted_mean(value_stats)
-                    rule_var = (
-                        value_stats.std_dev**2
-                        if value_stats.count > 1
-                        else (rule_mean * self.config.variance.exact_wildcard_match) ** 2
-                    )
-                    return rule_mean, rule_var
-
-        # Fall back to rule-level stats
-        effective_stats = self.rule_stats
-        if rule in effective_stats:
-            stats = effective_stats[rule]
-
-            # Try size-scaled estimate if input size is available
-            if input_size is not None and input_size > 0:
-                scaled_est, confidence = self._get_size_scaled_estimate(stats, input_size)
-                size_conf_threshold = self.config.confidence_thresholds.size_scaling_min
-                if confidence > size_conf_threshold:
-                    # Reduce variance for size-scaled estimates
-                    rule_var = (
-                        stats.std_dev**2 * (1 - confidence * 0.5)
-                        if stats.count > 1
-                        else (scaled_est * self.config.variance.size_scaled) ** 2
-                    )
-                    return scaled_est, rule_var
-
-            # Standard rule-level estimate
-            rule_mean = self._get_weighted_mean(stats)
-            rule_var = (
-                stats.std_dev**2
-                if stats.count > 1
-                else (rule_mean * self.config.variance.rule_fallback) ** 2
-            )
-            return rule_mean, rule_var
-
-        # Try fuzzy matching for renamed/similar rules before falling back to global mean
-        similar = self._find_similar_rule(rule)
-        if similar is not None:
-            matched_rule, stats = similar
-            rule_mean = self._get_weighted_mean(stats)
-            # Wider variance for fuzzy matches due to uncertainty
-            rule_var = (
-                stats.std_dev**2
-                if stats.count > 1
-                else (rule_mean * self.config.variance.fuzzy_match) ** 2
-            )
-            return rule_mean, rule_var
-
-        # No data available, use global mean
         return global_mean, (global_mean * self.config.variance.global_fallback) ** 2
 
     def global_mean_duration(self) -> float:

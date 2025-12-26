@@ -101,7 +101,8 @@ def parse_job_stats_from_log(log_path: Path) -> set[str]:
 
     try:
         content = log_path.read_text(errors="ignore")
-    except OSError:
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
         return rules
 
     lines = content.splitlines()
@@ -166,7 +167,8 @@ def parse_job_stats_counts_from_log(log_path: Path) -> dict[str, int]:
 
     try:
         content = log_path.read_text(errors="ignore")
-    except OSError:
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
         return counts
 
     lines = content.splitlines()
@@ -241,8 +243,8 @@ def parse_progress_from_log(
             if match := PROGRESS_PATTERN.search(line):
                 completed = int(match.group(1))
                 total = int(match.group(2))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
     return completed, total
 
 
@@ -269,8 +271,8 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
             # Count "Finished job" as rule completion
             elif "Finished job" in line and current_rule is not None:
                 rule_counts[current_rule] = rule_counts.get(current_rule, 0) + 1
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
 
     return rule_counts
 
@@ -351,7 +353,8 @@ def parse_running_jobs_from_log(
             elif match := FINISHED_JOB_PATTERN.search(line):
                 finished_jobids.add(match.group(1))
 
-    except OSError:
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
         return []
 
     # Jobs that started but haven't finished are running
@@ -461,8 +464,8 @@ def parse_failed_jobs_from_log(
                         )
                     )
 
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
 
     return failed_jobs
 
@@ -544,8 +547,8 @@ def _get_first_log_timestamp(
                 for line in f:
                     if match := TIMESTAMP_PATTERN.match(line):
                         return _parse_timestamp(match.group(1))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
     return None
 
 
@@ -647,8 +650,8 @@ def parse_completed_jobs_from_log(
                         )
                     )
 
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
 
     return completed_jobs
 
@@ -690,8 +693,8 @@ def parse_threads_from_log(log_path: Path) -> dict[str, int]:
                 if current_threads is not None and current_jobid not in threads_map:
                     threads_map[current_jobid] = current_threads
 
-    except OSError:
-        pass
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
 
     return threads_map
 
