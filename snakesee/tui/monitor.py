@@ -60,7 +60,7 @@ FG_BLUE = "#26a8e0"
 FG_GREEN = "#38b44a"
 
 # Fulcrum Genomics logo path (easter egg)
-FG_LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
+FG_LOGO_PATH = Path(__file__).parent.parent / "assets" / "logo.png"
 
 
 class LayoutMode(Enum):

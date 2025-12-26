@@ -63,7 +63,7 @@ class TestWorkflowMonitorTUI:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
@@ -879,7 +879,7 @@ class TestTerminalHandling:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
@@ -993,7 +993,7 @@ class TestKeyboardInput:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
@@ -1111,7 +1111,7 @@ class TestTerminalSettingsRestore:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=0.1,  # Fast for testing
@@ -1151,7 +1151,7 @@ class TestTerminalSettingsRestore:
                 with patch("select.select", side_effect=mock_select):
                     with patch("os.read", return_value=b"q"):  # Quit key
                         with patch("fcntl.fcntl"):
-                            with patch("snakesee.tui.Live"):
+                            with patch("snakesee.tui.monitor.Live"):
                                 tui.run()
 
         # Verify tcsetattr was called to restore settings
@@ -1175,7 +1175,7 @@ class TestTerminalSettingsRestore:
         ):
             with patch("sys.stdin", mock_stdin):
                 with patch("select.select", side_effect=KeyboardInterrupt):
-                    with patch("snakesee.tui.Live"):
+                    with patch("snakesee.tui.monitor.Live"):
                         tui.run()
 
         # Verify settings were restored even after interrupt
@@ -1199,7 +1199,7 @@ class TestEscapeSequenceParsing:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
@@ -1241,7 +1241,7 @@ class TestKeyboardEdgeCases:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
