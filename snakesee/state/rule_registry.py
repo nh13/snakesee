@@ -361,7 +361,11 @@ class RuleRegistry:
             return list(self._rules.keys())
 
     def get_combination_stats(
-        self, rule: str, wildcards: dict[str, str] | None, threads: int | None
+        self,
+        rule: str,
+        wildcards: dict[str, str] | None,
+        threads: int | None,
+        min_samples: int | None = None,
     ) -> RuleTimingStats | None:
         """Get timing stats for a specific wildcard+threads combination.
 
@@ -369,11 +373,16 @@ class RuleRegistry:
             rule: Rule name.
             wildcards: Wildcard values dict.
             threads: Thread count.
+            min_samples: Minimum samples required. If None, uses MIN_SAMPLES_FOR_CONDITIONING.
+                        Set to 1 to get stats even with a single historical run.
 
         Returns:
             RuleTimingStats for the combination, or None if not found or insufficient samples.
         """
         from snakesee.constants import MIN_SAMPLES_FOR_CONDITIONING
+
+        if min_samples is None:
+            min_samples = MIN_SAMPLES_FOR_CONDITIONING
 
         combo_key = _make_combination_key(wildcards, threads)
         if combo_key is None:
@@ -389,7 +398,7 @@ class RuleRegistry:
                 return None
 
             # Require minimum samples for conditioning
-            if combo_stats.count < MIN_SAMPLES_FOR_CONDITIONING:
+            if combo_stats.count < min_samples:
                 return None
 
             return combo_stats

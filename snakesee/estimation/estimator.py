@@ -261,6 +261,10 @@ class TimeEstimator:
         This provides the most precise estimate when we have historical data
         for the exact same combination of wildcards and threads.
 
+        Uses a two-tier approach:
+        1. First try with standard MIN_SAMPLES threshold (3+) for high confidence
+        2. Fall back to any historical data (1+ samples) with higher variance
+
         Args:
             rule: The rule name.
             wildcards: Wildcard values for the job.
@@ -269,12 +273,26 @@ class TimeEstimator:
         Returns:
             Tuple of (expected_duration, variance) if combination stats available, None otherwise.
         """
+        # First try with standard threshold for high-confidence estimate
         combo_stats = self._rule_registry.get_combination_stats(rule, wildcards, threads)
+
         if combo_stats is None:
-            return None
+            # Fall back to any historical data (even 1-2 samples)
+            # This is better than using the rule average which may be completely wrong
+            combo_stats = self._rule_registry.get_combination_stats(
+                rule, wildcards, threads, min_samples=1
+            )
+            if combo_stats is None:
+                return None
+
+            # Use higher variance for low-sample estimates
+            combo_mean = self._get_weighted_mean(combo_stats)
+            # With 1-2 samples, use 50% variance multiplier (wider bounds)
+            combo_var = (combo_mean * 0.5) ** 2
+            return combo_mean, combo_var
 
         combo_mean = self._get_weighted_mean(combo_stats)
-        # Very tight variance for exact combination match
+        # Tight variance for high-confidence combination match (3+ samples)
         combo_var = (
             combo_stats.std_dev**2
             if combo_stats.count > 1
@@ -769,8 +787,12 @@ class TimeEstimator:
         total_variance = 0.0
         global_mean = self.global_mean_duration()
 
-        # Use wildcard-conditioned estimates for pending jobs if we have actual job list
-        if progress.pending_jobs_list:
+        # Use wildcard-conditioned estimates for pending jobs if we have a COMPLETE job list
+        # If pending_jobs_list is incomplete, fall back to rule-count-based estimation
+        pending_list_len = len(progress.pending_jobs_list) if progress.pending_jobs_list else 0
+        use_pending_list = pending_list_len > 0 and pending_list_len >= pending
+
+        if use_pending_list:
             # We have actual pending jobs with wildcards - use per-job estimates
             for job in progress.pending_jobs_list:
                 expected, variance = self.get_estimate_for_job(

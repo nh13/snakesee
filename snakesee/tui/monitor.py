@@ -1,6 +1,7 @@
 """Rich TUI for Snakemake workflow monitoring."""
 
 import logging
+import math
 import sys
 import time
 from datetime import datetime
@@ -1715,13 +1716,29 @@ class WorkflowMonitorTUI:
             remaining: float | None = None
             tool_progress: ToolProgress | None = None
 
-            if self._estimator is not None and elapsed is not None:
-                # Use thread-aware ETA when thread info is available
-                expected, _ = self._estimator.get_estimate_for_job(
+            if self._estimator is not None:
+                # Use wildcard+thread-aware ETA when available
+                expected, variance = self._estimator.get_estimate_for_job(
                     rule=job.rule,
+                    wildcards=job.wildcards,
                     threads=job.threads,
                 )
-                remaining = max(0, expected - elapsed)
+                if elapsed is None:
+                    # No start time yet - use expected duration as remaining estimate
+                    remaining = expected
+                elif elapsed <= expected:
+                    remaining = expected - elapsed
+                else:
+                    # Job running longer than expected - use variance to estimate
+                    std_dev = math.sqrt(variance) if variance > 0 else expected * 0.5
+                    if elapsed <= expected + 2 * std_dev:
+                        # Within reasonable variance - assume nearly done
+                        remaining = 0.0
+                    else:
+                        # Far outside expected range - estimate based on elapsed time
+                        # Assume job is ~60% done (heuristic for long-running jobs)
+                        # This gives a rough estimate rather than "unknown"
+                        remaining = elapsed * 0.67  # ~40% more time expected
 
             # Try to get tool-specific progress
             tool_progress = self._get_tool_progress(job)

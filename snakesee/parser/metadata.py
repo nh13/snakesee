@@ -2,6 +2,15 @@
 
 This module handles parsing of .snakemake/metadata/ files which contain
 information about completed jobs, including timing, wildcards, and code.
+
+Note: Currently (Snakemake <= 8.x), metadata files do NOT store wildcards.
+Wildcards are only available from live log events during the current session.
+This means combination-based estimates (wildcard+threads) only work for jobs
+that ran in the current session.
+
+TODO: Once https://github.com/snakemake/snakemake/pull/3888 is merged and
+released, metadata files will include wildcards, enabling historical
+combination-based estimates across sessions.
 """
 
 from __future__ import annotations
