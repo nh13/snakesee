@@ -3,6 +3,11 @@
 import json
 from pathlib import Path
 
+from hypothesis import HealthCheck
+from hypothesis import given
+from hypothesis import settings
+from hypothesis import strategies as st
+
 from snakesee.models import WorkflowStatus
 from snakesee.parser import IncrementalLogReader
 from snakesee.parser import _parse_wildcards
@@ -1693,3 +1698,180 @@ Finished job 2.
         assert jobs[0].rule == "test"
         assert jobs[0].start_time == 900.0
         assert jobs[0].end_time == 1000.0
+
+
+# =============================================================================
+# Property-Based Tests (TC-L2)
+# =============================================================================
+
+
+class TestParserPropertyBased:
+    """Property-based tests using hypothesis for parser robustness."""
+
+    # Strategy for valid wildcard keys (alphanumeric + underscore)
+    wildcard_key = st.text(
+        alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz0123456789_"),
+        min_size=1,
+        max_size=30,
+    )
+    # Strategy for valid wildcard values (alphanumeric + common chars, no comma)
+    wildcard_value = st.text(
+        alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz0123456789_-."),
+        min_size=1,
+        max_size=50,
+    )
+
+    @given(key=wildcard_key, value=wildcard_value)
+    def test_parse_wildcards_roundtrip(self, key: str, value: str) -> None:
+        """Wildcard parsing should handle valid key=value pairs."""
+        from snakesee.parser import _parse_wildcards
+
+        # Create wildcard string
+        wildcard_str = f"{key}={value}"
+        result = _parse_wildcards(wildcard_str)
+
+        # Should parse without error
+        assert result is not None
+        assert key in result
+        assert result[key] == value
+
+    @given(
+        keys=st.lists(wildcard_key, min_size=1, max_size=5, unique=True),
+        values=st.lists(wildcard_value, min_size=1, max_size=5),
+    )
+    def test_parse_wildcards_multiple(self, keys: list[str], values: list[str]) -> None:
+        """Wildcard parsing handles multiple key=value pairs."""
+        from snakesee.parser import _parse_wildcards
+
+        # Match lengths
+        n = min(len(keys), len(values))
+        keys = keys[:n]
+        values = values[:n]
+
+        # Create wildcard string
+        pairs = [f"{k}={v}" for k, v in zip(keys, values, strict=True)]
+        wildcard_str = ", ".join(pairs)
+        result = _parse_wildcards(wildcard_str)
+
+        # Should parse all pairs
+        assert result is not None
+        for k, v in zip(keys, values, strict=True):
+            assert k in result
+            assert result[k] == v
+
+    @given(
+        completed=st.integers(min_value=0, max_value=1000000),
+        total=st.integers(min_value=1, max_value=1000000),
+    )
+    def test_parse_progress_line_valid(self, completed: int, total: int) -> None:
+        """Progress parsing handles valid progress lines."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        # Ensure completed <= total for valid progress
+        if completed > total:
+            completed, total = total, completed
+
+        parser = LogLineParser()
+        line = f"{completed} of {total} steps (50%) done"
+        event = parser.parse_line(line)
+
+        # Should parse progress
+        assert event is not None
+        assert event.event_type == ParseEventType.PROGRESS
+        assert event.data["completed"] == completed
+        assert event.data["total"] == total
+
+    @given(line=st.text(max_size=500))
+    def test_parse_line_no_crash(self, line: str) -> None:
+        """Line parsing should never crash on arbitrary input."""
+        from snakesee.parser.line_parser import LogLineParser
+
+        parser = LogLineParser()
+        # Should not crash on any input
+        result = parser.parse_line(line)
+        # Result is either None or a valid ParseEvent
+        assert result is None or hasattr(result, "event_type")
+
+    @given(line=st.text(max_size=1000))
+    def test_log_line_parsing_stability(self, line: str) -> None:
+        """Log line parsing should maintain valid context on arbitrary input."""
+        from snakesee.parser.line_parser import LogLineParser
+
+        parser = LogLineParser()
+        # Parse multiple lines - context should remain valid
+        parser.parse_line(line)
+        parser.parse_line(line)
+
+        # Context should be valid dataclass
+        assert parser.context is not None
+        assert hasattr(parser.context, "rule")
+        assert hasattr(parser.context, "jobid")
+
+    @given(
+        rule=st.text(
+            alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz0123456789_"),
+            min_size=1,
+            max_size=30,
+        ),
+        jobid=st.integers(min_value=0, max_value=999999),
+    )
+    def test_job_lifecycle_properties(self, rule: str, jobid: int) -> None:
+        """Job tracking maintains consistent state."""
+        from snakesee.parser.job_tracker import JobLifecycleTracker
+
+        tracker = JobLifecycleTracker()
+
+        # Start a job with correct API
+        tracker.start_job(str(jobid), rule, start_time=1000.0)
+
+        # Verify job is tracked
+        running = tracker.get_running_jobs()
+        running_ids = [j.job_id for j in running]
+        assert str(jobid) in running_ids
+
+        # Complete the job
+        completed_job = tracker.finish_job(str(jobid), 1100.0)
+
+        # Job should be completed
+        assert completed_job is not None
+        assert completed_job.rule == rule
+        assert completed_job.job_id == str(jobid)
+
+        # Job should no longer be running
+        running_after = tracker.get_running_jobs()
+        running_ids_after = [j.job_id for j in running_after]
+        assert str(jobid) not in running_ids_after
+
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(
+        rule=st.text(
+            alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz0123456789_"),
+            min_size=1,
+            max_size=30,
+        ),
+        starttime=st.floats(min_value=0, max_value=1e10, allow_nan=False),
+        duration=st.floats(min_value=0.1, max_value=1e6, allow_nan=False),
+    )
+    def test_metadata_parsing_properties(
+        self, rule: str, starttime: float, duration: float, tmp_path: Path
+    ) -> None:
+        """Metadata parsing handles valid data correctly."""
+        import tempfile
+
+        from snakesee.parser import parse_metadata_files
+
+        endtime = starttime + duration
+        data = {"rule": rule, "starttime": starttime, "endtime": endtime}
+
+        # Use tempfile to avoid fixture reuse issues
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_dir = Path(tmpdir) / "metadata"
+            metadata_dir.mkdir()
+            (metadata_dir / "test_output").write_text(json.dumps(data))
+
+            jobs = list(parse_metadata_files(metadata_dir))
+            assert len(jobs) == 1
+            assert jobs[0].rule == rule
+            assert jobs[0].start_time == starttime
+            assert jobs[0].end_time == endtime
