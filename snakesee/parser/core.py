@@ -1194,6 +1194,105 @@ def _augment_completions_with_threads(completions: list[JobInfo], log_path: Path
     return augmented
 
 
+def _determine_final_workflow_status(
+    *,
+    running: list[JobInfo],
+    failed_list: list[JobInfo],
+    incomplete_list: list[JobInfo],
+    completed: int,
+    total: int,
+    is_latest_log: bool,
+    workflow_is_running: bool,
+) -> WorkflowStatus:
+    """Determine final workflow status from job state.
+
+    Args:
+        running: List of currently running jobs.
+        failed_list: List of failed jobs.
+        incomplete_list: List of jobs with incomplete markers.
+        completed: Number of completed jobs.
+        total: Total number of jobs.
+        is_latest_log: Whether we're looking at the latest log.
+        workflow_is_running: Whether workflow lock is held.
+
+    Returns:
+        The determined WorkflowStatus.
+    """
+    if running and is_latest_log and workflow_is_running:
+        return WorkflowStatus.RUNNING
+    if len(failed_list) > 0:
+        return WorkflowStatus.FAILED
+    if incomplete_list:
+        return WorkflowStatus.INCOMPLETE
+    if completed < total and not workflow_is_running:
+        return WorkflowStatus.INCOMPLETE
+    return WorkflowStatus.RUNNING if workflow_is_running else WorkflowStatus.COMPLETED
+
+
+def _collect_filtered_completions(
+    all_completions: list[JobInfo],
+    log_path: Path | None,
+    cutoff_time: float | None,
+    log_reader: IncrementalLogReader | None,
+) -> list[JobInfo]:
+    """Collect and filter completions for the relevant timeframe.
+
+    Args:
+        all_completions: All parsed completions from metadata.
+        log_path: Path to the log file.
+        cutoff_time: Optional upper bound for filtering.
+        log_reader: Optional incremental log reader.
+
+    Returns:
+        Filtered list of completed jobs.
+    """
+    if log_path is None:
+        return []
+
+    filtered = _filter_completions_by_timeframe(all_completions, log_path, cutoff_time)
+    if filtered:
+        return filtered
+
+    if log_reader is not None:
+        return log_reader.completed_jobs
+
+    # No matching metadata - parse completions from the log file
+    return parse_completed_jobs_from_log(log_path)
+
+
+def _reconcile_job_lists(
+    running: list[JobInfo],
+    failed_list: list[JobInfo],
+    incomplete_list: list[JobInfo],
+    workflow_is_running: bool,
+) -> tuple[list[JobInfo], list[JobInfo]]:
+    """Reconcile running, failed, and incomplete job lists.
+
+    Removes failed jobs from running list and handles the running/incomplete
+    overlap based on whether the workflow is actually running.
+
+    Args:
+        running: List of jobs that appear to be running.
+        failed_list: List of failed jobs.
+        incomplete_list: List of incomplete markers.
+        workflow_is_running: Whether workflow lock is held.
+
+    Returns:
+        Tuple of (reconciled_running, reconciled_incomplete).
+    """
+    # Remove failed jobs from running list
+    failed_job_ids = {job.job_id for job in failed_list if job.job_id is not None}
+    if failed_job_ids:
+        running = [job for job in running if job.job_id not in failed_job_ids]
+
+    if not workflow_is_running:
+        # Not running = orphaned jobs, not truly running
+        return [], incomplete_list
+
+    # Workflow IS running = incomplete markers are running jobs, not interrupted
+    return running, []
+
+
 def parse_workflow_state(
     workflow_dir: Path,
     log_file: Path | None = None,
@@ -1264,18 +1363,7 @@ def parse_workflow_state(
     all_completions = list(parse_metadata_files(metadata_dir))
 
     # Filter completions to the relevant timeframe
-    completions: list[JobInfo] = []
-    if log_path is not None:
-        filtered = _filter_completions_by_timeframe(all_completions, log_path, cutoff_time)
-        if filtered:
-            completions = filtered
-        elif log_reader is not None:
-            # Use incremental reader's completed jobs
-            completions = log_reader.completed_jobs
-        else:
-            # No matching metadata - parse completions from the log file
-            # This handles: no metadata dir, timing mismatches, historical logs
-            completions = parse_completed_jobs_from_log(log_path)
+    completions = _collect_filtered_completions(all_completions, log_path, cutoff_time, log_reader)
 
     # Augment completions with threads from log (metadata doesn't have threads)
     if log_path is not None and completions:
@@ -1302,41 +1390,28 @@ def parse_workflow_state(
         else []
     )
 
-    # Remove failed jobs from the running list - a job can't be both running and failed
-    failed_job_ids = {job.job_id for job in failed_list if job.job_id is not None}
-    if failed_job_ids:
-        running = [job for job in running if job.job_id not in failed_job_ids]
-
-    # If workflow is not actually running, clear "running" jobs from log parsing
-    # (those are orphaned jobs, not truly running - they're reflected in incomplete_list)
-    if not workflow_is_running:
-        running = []
-    else:
-        # If workflow IS running, incomplete markers represent running jobs, not
-        # interrupted ones - clear them to avoid double-counting
-        incomplete_list = []
+    # Reconcile running, failed, and incomplete job lists
+    running, incomplete_list = _reconcile_job_lists(
+        running, failed_list, incomplete_list, workflow_is_running
+    )
 
     # Determine final status based on running jobs, failures, and incomplete markers
-    failed_jobs = len(failed_list)
-    if running and is_latest_log and workflow_is_running:
-        # Workflow is actively running jobs
-        status = WorkflowStatus.RUNNING
-    elif failed_jobs > 0:
-        # No running jobs but has failures
-        status = WorkflowStatus.FAILED
-    elif incomplete_list:
-        # Workflow has incomplete markers = interrupted
-        status = WorkflowStatus.INCOMPLETE
-    elif completed < total and not workflow_is_running:
-        # Fallback: if workflow stopped but not all jobs completed, it was interrupted
-        status = WorkflowStatus.INCOMPLETE
+    status = _determine_final_workflow_status(
+        running=running,
+        failed_list=failed_list,
+        incomplete_list=incomplete_list,
+        completed=completed,
+        total=total,
+        is_latest_log=is_latest_log,
+        workflow_is_running=workflow_is_running,
+    )
 
     return WorkflowProgress(
         workflow_dir=workflow_dir,
         status=status,
         total_jobs=total,
         completed_jobs=completed,
-        failed_jobs=failed_jobs,
+        failed_jobs=len(failed_list),
         failed_jobs_list=failed_list,
         incomplete_jobs_list=incomplete_list,
         running_jobs=running,
