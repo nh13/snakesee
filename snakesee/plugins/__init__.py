@@ -20,6 +20,7 @@ import json
 import stat
 from pathlib import Path
 
+from snakesee.plugins.base import PluginMetadata
 from snakesee.plugins.base import ToolProgress
 from snakesee.plugins.base import ToolProgressPlugin
 from snakesee.plugins.bwa import BWAPlugin
@@ -37,6 +38,7 @@ from snakesee.plugins.samtools import SamtoolsSortPlugin
 from snakesee.plugins.star import STARPlugin
 
 __all__ = [
+    "PluginMetadata",
     "ToolProgress",
     "ToolProgressPlugin",
     "BUILTIN_PLUGINS",

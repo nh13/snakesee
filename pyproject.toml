@@ -107,7 +107,7 @@ ignore_missing_imports = true
 
 [tool.coverage.report]
 exclude_lines = ["pragma: not covered", "@overload"]
-fail_under = 65
+fail_under = 80
 
 [tool.pytest.ini_options]
 minversion = "7.4"

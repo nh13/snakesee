@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from snakesee.plugins.base import PLUGIN_API_VERSION
+from snakesee.plugins.base import PluginMetadata
 from snakesee.plugins.base import ToolProgressPlugin
 
 logger = logging.getLogger(__name__)
@@ -25,36 +26,21 @@ USER_PLUGIN_DIRS: list[Path] = [
 _user_plugins: list[ToolProgressPlugin] | None = None
 
 
-def validate_plugin(plugin: ToolProgressPlugin, source: str = "unknown") -> bool:
+def validate_plugin(plugin: ToolProgressPlugin, source: str = "unknown") -> PluginMetadata | None:
     """
     Validate that a plugin instance is compatible and properly implemented.
+
+    Uses PluginMetadata for structured validation of plugin attributes.
 
     Args:
         plugin: The plugin instance to validate.
         source: Description of where the plugin came from (for logging).
 
     Returns:
-        True if the plugin is valid and compatible, False otherwise.
+        PluginMetadata if the plugin is valid and compatible, None otherwise.
     """
-    # Check API version compatibility
-    try:
-        plugin_version = plugin.plugin_api_version
-    except (AttributeError, TypeError):
-        plugin_version = 1  # Assume version 1 if not specified
-
-    if plugin_version > PLUGIN_API_VERSION:
-        logger.warning(
-            "Plugin %s from %s requires API version %d, but current version is %d. Skipping.",
-            plugin.tool_name if hasattr(plugin, "tool_name") else "unknown",
-            source,
-            plugin_version,
-            PLUGIN_API_VERSION,
-        )
-        return False
-
     # Validate required interface methods exist and are callable
     required_methods = ["can_parse", "parse_progress"]
-    required_properties = ["tool_name"]
 
     for method_name in required_methods:
         method = getattr(plugin, method_name, None)
@@ -64,28 +50,31 @@ def validate_plugin(plugin: ToolProgressPlugin, source: str = "unknown") -> bool
                 source,
                 method_name,
             )
-            return False
+            return None
 
-    for prop_name in required_properties:
-        try:
-            value = getattr(plugin, prop_name)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                logger.warning(
-                    "Plugin from %s has invalid '%s' property. Skipping.",
-                    source,
-                    prop_name,
-                )
-                return False
-        except (AttributeError, TypeError) as e:
-            logger.warning(
-                "Plugin from %s failed to access '%s' property: %s. Skipping.",
-                source,
-                prop_name,
-                e,
-            )
-            return False
+    # Use PluginMetadata for structured validation
+    try:
+        metadata = PluginMetadata.from_plugin(plugin)
+    except (ValueError, AttributeError) as e:
+        logger.warning(
+            "Plugin from %s failed metadata validation: %s. Skipping.",
+            source,
+            e,
+        )
+        return None
 
-    return True
+    # Check API version compatibility
+    if not metadata.is_compatible(PLUGIN_API_VERSION):
+        logger.warning(
+            "Plugin %s from %s requires API version %d, but current version is %d. Skipping.",
+            metadata.name,
+            source,
+            metadata.api_version,
+            PLUGIN_API_VERSION,
+        )
+        return None
+
+    return metadata
 
 
 def load_user_plugins(
@@ -225,8 +214,15 @@ def _load_plugins_from_file(plugin_file: Path) -> list[ToolProgressPlugin]:
             try:
                 plugin_instance = obj()
                 # Validate the plugin before adding it
-                if validate_plugin(plugin_instance, str(plugin_file)):
+                metadata = validate_plugin(plugin_instance, str(plugin_file))
+                if metadata is not None:
                     plugins.append(plugin_instance)
+                    logger.debug(
+                        "Loaded plugin '%s' (API v%d) from %s",
+                        metadata.name,
+                        metadata.api_version,
+                        plugin_file,
+                    )
             except (TypeError, AttributeError, RuntimeError) as e:
                 logger.debug("Failed to instantiate plugin %s: %s", name, e)
                 continue

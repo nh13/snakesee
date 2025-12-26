@@ -623,34 +623,20 @@ class TimeEstimate:
         """
         Format as human-readable ETA string.
 
+        Delegates to snakesee.formatting.format_eta for centralized formatting.
+
         Returns:
             Formatted ETA with confidence indication.
             Examples: "~5m", "5-10m", "~15m (rough)", "unknown"
         """
-        if self.seconds_remaining == float("inf"):
-            return "unknown"
+        from snakesee.formatting import format_eta as _format_eta
 
-        expected_str = format_duration(self.seconds_remaining)
-
-        # High confidence, narrow range: just show estimate
-        if (
-            self.confidence > 0.7
-            and self.seconds_remaining > 0
-            and (self.upper_bound - self.lower_bound) / self.seconds_remaining < 0.3
-        ):
-            return f"~{expected_str}"
-
-        # Medium confidence: show range
-        if self.confidence > 0.4:
-            lower_str = format_duration(max(0, self.lower_bound))
-            upper_str = format_duration(self.upper_bound)
-            return f"{lower_str} - {upper_str}"
-
-        # Low confidence: show with caveat
-        if self.confidence > 0.1:
-            return f"~{expected_str} (rough)"
-
-        return f"~{expected_str} (very rough)"
+        return _format_eta(
+            seconds_remaining=self.seconds_remaining,
+            lower_bound=self.lower_bound,
+            upper_bound=self.upper_bound,
+            confidence=self.confidence,
+        )
 
 
 @dataclass

@@ -36,8 +36,62 @@ def safe_mtime(path: Path) -> float:
     """
     try:
         return path.stat().st_mtime
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         return 0.0
+
+
+def safe_read_text(path: Path, default: str = "", errors: str = "ignore") -> str:
+    """Safely read text from a file, returning default on error.
+
+    Handles common race conditions and encoding issues gracefully.
+
+    Args:
+        path: Path to the file.
+        default: Value to return if file cannot be read.
+        errors: How to handle encoding errors (passed to read_text).
+
+    Returns:
+        File contents as string, or default if reading fails.
+    """
+    try:
+        return path.read_text(errors=errors)
+    except (FileNotFoundError, OSError, PermissionError):
+        return default
+
+
+def safe_read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Safely read and parse JSON from a file.
+
+    Handles file access errors and JSON parse errors gracefully.
+
+    Args:
+        path: Path to the JSON file.
+        default: Value to return if file cannot be read or parsed.
+
+    Returns:
+        Parsed JSON as dict, or default if reading/parsing fails.
+    """
+    try:
+        content = path.read_text()
+        result: dict[str, Any] = json.loads(content)
+        return result
+    except (FileNotFoundError, OSError, PermissionError, json.JSONDecodeError):
+        return default
+
+
+def safe_file_size(path: Path) -> int:
+    """Safely get file size in bytes, returning 0 on error.
+
+    Args:
+        path: Path to the file.
+
+    Returns:
+        File size in bytes, or 0 if file doesn't exist or can't be accessed.
+    """
+    try:
+        return path.stat().st_size
+    except (FileNotFoundError, OSError):
+        return 0
 
 
 def iterate_metadata_files(

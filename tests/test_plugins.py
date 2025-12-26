@@ -2,10 +2,14 @@
 
 from pathlib import Path
 
+import pytest
+
 from snakesee.plugins import BUILTIN_PLUGINS
+from snakesee.plugins import PluginMetadata
 from snakesee.plugins import find_plugin_for_log
 from snakesee.plugins import find_rule_log
 from snakesee.plugins import parse_tool_progress
+from snakesee.plugins.base import PLUGIN_API_VERSION
 from snakesee.plugins.base import ToolProgress
 from snakesee.plugins.bwa import BWAPlugin
 from snakesee.plugins.fastp import FastpPlugin
@@ -554,3 +558,131 @@ class TypeErrorPlugin(ToolProgressPlugin):
         plugins = load_user_plugins(plugin_dirs=[tmp_path], force_reload=True)
         # Plugin should be skipped due to TypeError (missing required arg)
         assert plugins == []
+
+
+class TestPluginMetadata:
+    """Tests for PluginMetadata dataclass and validation."""
+
+    def test_create_basic_metadata(self) -> None:
+        """Test creating basic metadata."""
+        metadata = PluginMetadata(name="test", api_version=1)
+        assert metadata.name == "test"
+        assert metadata.api_version == 1
+        assert metadata.patterns == ()
+        assert metadata.description == ""
+
+    def test_create_full_metadata(self) -> None:
+        """Test creating metadata with all fields."""
+        metadata = PluginMetadata(
+            name="bwa",
+            api_version=1,
+            patterns=("bwa_align", "bwa_mem"),
+            description="BWA alignment plugin",
+        )
+        assert metadata.name == "bwa"
+        assert metadata.patterns == ("bwa_align", "bwa_mem")
+        assert metadata.description == "BWA alignment plugin"
+
+    def test_empty_name_raises(self) -> None:
+        """Test that empty name raises ValueError."""
+        with pytest.raises(ValueError, match="Plugin name cannot be empty"):
+            PluginMetadata(name="", api_version=1)
+
+    def test_whitespace_name_raises(self) -> None:
+        """Test that whitespace-only name raises ValueError."""
+        with pytest.raises(ValueError, match="Plugin name cannot be empty"):
+            PluginMetadata(name="   ", api_version=1)
+
+    def test_invalid_api_version_raises(self) -> None:
+        """Test that API version < 1 raises ValueError."""
+        with pytest.raises(ValueError, match="Plugin API version must be >= 1"):
+            PluginMetadata(name="test", api_version=0)
+
+        with pytest.raises(ValueError, match="Plugin API version must be >= 1"):
+            PluginMetadata(name="test", api_version=-1)
+
+    def test_from_plugin_bwa(self) -> None:
+        """Test creating metadata from BWA plugin."""
+        plugin = BWAPlugin()
+        metadata = PluginMetadata.from_plugin(plugin)
+        assert metadata.name == "bwa"
+        assert metadata.api_version >= 1
+        assert len(metadata.patterns) > 0
+
+    def test_from_plugin_fastp(self) -> None:
+        """Test creating metadata from fastp plugin."""
+        plugin = FastpPlugin()
+        metadata = PluginMetadata.from_plugin(plugin)
+        assert metadata.name == "fastp"
+
+    def test_from_plugin_star(self) -> None:
+        """Test creating metadata from STAR plugin."""
+        plugin = STARPlugin()
+        metadata = PluginMetadata.from_plugin(plugin)
+        assert metadata.name == "star"
+
+    def test_is_compatible_same_version(self) -> None:
+        """Test is_compatible with same API version."""
+        metadata = PluginMetadata(name="test", api_version=1)
+        assert metadata.is_compatible(1) is True
+
+    def test_is_compatible_older_version(self) -> None:
+        """Test is_compatible with older plugin version."""
+        metadata = PluginMetadata(name="test", api_version=1)
+        # Plugin v1 is compatible with API v2
+        assert metadata.is_compatible(2) is True
+
+    def test_is_compatible_newer_version(self) -> None:
+        """Test is_compatible with newer plugin version."""
+        metadata = PluginMetadata(name="test", api_version=2)
+        # Plugin v2 is NOT compatible with API v1
+        assert metadata.is_compatible(1) is False
+
+    def test_is_compatible_default_version(self) -> None:
+        """Test is_compatible with default (current) API version."""
+        metadata = PluginMetadata(name="test", api_version=PLUGIN_API_VERSION)
+        assert metadata.is_compatible() is True
+
+    def test_metadata_is_frozen(self) -> None:
+        """Test that PluginMetadata is immutable."""
+        metadata = PluginMetadata(name="test", api_version=1)
+        with pytest.raises(AttributeError):
+            metadata.name = "modified"  # type: ignore[misc]
+
+
+class TestPluginValidation:
+    """Tests for plugin validation with PluginMetadata."""
+
+    def test_validate_plugin_returns_metadata(self) -> None:
+        """Test that validate_plugin returns PluginMetadata on success."""
+        from snakesee.plugins.loader import validate_plugin
+
+        plugin = BWAPlugin()
+        result = validate_plugin(plugin, "test")
+        assert result is not None
+        assert isinstance(result, PluginMetadata)
+        assert result.name == "bwa"
+
+    def test_validate_plugin_missing_method(self, tmp_path: Path) -> None:
+        """Test that plugin missing required methods returns None."""
+        from snakesee.plugins.loader import validate_plugin
+
+        # Create a class that's not a proper plugin
+        class BadPlugin:
+            @property
+            def tool_name(self) -> str:
+                return "bad"
+
+            # Missing can_parse and parse_progress
+
+        result = validate_plugin(BadPlugin(), "test")  # type: ignore[arg-type]
+        assert result is None
+
+    def test_validate_all_builtin_plugins(self) -> None:
+        """Test that all builtin plugins pass validation."""
+        from snakesee.plugins.loader import validate_plugin
+
+        for plugin in BUILTIN_PLUGINS:
+            result = validate_plugin(plugin, "builtin")
+            assert result is not None, f"Plugin {plugin.tool_name} failed validation"
+            assert result.name == plugin.tool_name
