@@ -577,7 +577,39 @@ class TimeEstimator:
     ) -> TimeEstimate:
         """Weighted estimation using per-rule historical timing.
 
-        Uses exponentially weighted moving averages favoring recent executions.
+        Algorithm Overview:
+        ------------------
+        This method implements an Exponentially Weighted Moving Average (EWMA)
+        approach for time estimation, which is well-suited for workflows that
+        evolve over time (e.g., code changes, data size variations).
+
+        Key Design Decisions:
+
+        1. **Exponential Weighting**: Recent executions are weighted more heavily
+           than older ones. This is based on the observation that:
+           - Pipeline code changes frequently during development
+           - Recent runs better reflect current performance characteristics
+           - Older timing data may reflect outdated code or different conditions
+
+           The decay is controlled by half-life parameters:
+           - `half_life_logs`: After N runs, a run's weight is halved (index-based)
+           - `half_life_days`: After N days, a run's weight is halved (time-based)
+
+        2. **Median Input Size for Size Scaling**: When scaling estimates by input
+           file size, we use the median historical input size as the reference
+           point rather than the mean. This provides robustness to outliers
+           (e.g., test files that are much smaller than production files).
+
+        3. **Parallelism Estimation**: We infer effective parallelism from the
+           historical completion rate rather than just counting running jobs.
+           This accounts for I/O-bound or memory-bound jobs that don't fully
+           utilize available cores.
+
+        4. **Confidence Scoring**: Confidence is a weighted combination of:
+           - Sample size (more historical data = more confidence)
+           - Recency (fresher data = more confidence)
+           - Consistency (lower variance = more confidence)
+           - Data coverage (more rules with data = more confidence)
 
         Args:
             progress: Current workflow progress.
@@ -585,6 +617,10 @@ class TimeEstimator:
 
         Returns:
             TimeEstimate using weighted historical data.
+
+        References:
+            - EWMA: Standard statistical technique for time series smoothing
+            - Half-life decay: Common in recommendation systems and caching
         """
         # Get rule completion counts from recent completions
         rule_completed: dict[str, int] = {}

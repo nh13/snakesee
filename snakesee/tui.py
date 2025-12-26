@@ -25,6 +25,11 @@ from rich.progress import TextColumn
 from rich.table import Table
 from rich.text import Text
 
+from snakesee.constants import ADAPTIVE_CACHE_TTL_MULTIPLIER
+from snakesee.constants import DEFAULT_REFRESH_RATE
+from snakesee.constants import MAX_CACHE_TTL
+from snakesee.constants import MAX_REFRESH_RATE
+from snakesee.constants import MIN_REFRESH_RATE
 from snakesee.estimator import TimeEstimator
 from snakesee.events import EventReader
 from snakesee.events import EventType
@@ -49,11 +54,6 @@ from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
 
 logger = logging.getLogger(__name__)
-
-# Refresh rate bounds
-MIN_REFRESH_RATE = 0.5
-MAX_REFRESH_RATE = 60.0
-DEFAULT_REFRESH_RATE = 1.0
 
 # Fulcrum Genomics brand colors
 FG_BLUE = "#26a8e0"
@@ -207,7 +207,10 @@ class WorkflowMonitorTUI:
         # Tool progress cache (to avoid parsing job logs on every refresh)
         # Cache stores: (cached_time, file_mtime, progress) - invalidates if file changes
         self._tool_progress_cache: dict[str, tuple[float, float, ToolProgress | None]] = {}
-        self._tool_progress_cache_ttl: float = 5.0  # seconds
+        # Adaptive TTL: scales with refresh rate to avoid cache outliving refresh cycles
+        self._tool_progress_cache_ttl: float = min(
+            ADAPTIVE_CACHE_TTL_MULTIPLIER * refresh_rate, MAX_CACHE_TTL
+        )
 
         # Event reader for real-time events from logger plugin
         self._event_reader: EventReader | None = None
@@ -1144,7 +1147,7 @@ class WorkflowMonitorTUI:
                 )
             except ImportError:
                 pass  # Fall through to text fallback
-            except Exception:
+            except (OSError, ValueError, TypeError):
                 pass  # Fall through to text fallback
 
         # Fallback: simple text logo

@@ -4,6 +4,7 @@ import importlib.util
 import logging
 import stat
 import sys
+from importlib.metadata import distributions
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -103,6 +104,26 @@ def load_user_plugins(
         if not plugin_dir.exists() or not plugin_dir.is_dir():
             continue
 
+        # Security: warn if plugin directory is a symlink
+        resolved_dir = plugin_dir.resolve()
+        if plugin_dir.is_symlink():
+            logger.warning(
+                "Plugin directory is a symlink: %s -> %s. Ensure the target is trusted.",
+                plugin_dir,
+                resolved_dir,
+            )
+
+        # Security: warn if plugin directory is world-writable
+        try:
+            dir_mode = plugin_dir.stat().st_mode
+            if dir_mode & stat.S_IWOTH:
+                logger.warning(
+                    "Plugin directory is world-writable: %s. This is a security risk.",
+                    plugin_dir,
+                )
+        except OSError:
+            pass
+
         # Find all Python files in the plugin directory
         for plugin_file in plugin_dir.glob("*.py"):
             if plugin_file.name.startswith("_"):
@@ -185,8 +206,24 @@ def discover_entry_point_plugins(
         List of discovered plugin instances.
     """
     global _entry_point_plugins
+    global _entry_point_version_hash
 
-    if _entry_point_plugins is not None and not force_reload:
+    # Build a version hash of installed packages to detect updates
+    try:
+        version_hash = hash(
+            tuple(
+                (d.metadata.get("Name", ""), d.metadata.get("Version", "")) for d in distributions()
+            )
+        )
+    except Exception:
+        version_hash = 0
+
+    # Invalidate cache if package versions changed
+    if (
+        _entry_point_plugins is not None
+        and not force_reload
+        and _entry_point_version_hash == version_hash
+    ):
         return _entry_point_plugins
 
     plugins: list[ToolProgressPlugin] = []
@@ -206,11 +243,14 @@ def discover_entry_point_plugins(
         logger.debug("Error discovering entry points: %s", e)
 
     _entry_point_plugins = plugins
+    _entry_point_version_hash = version_hash
     return plugins
 
 
 # Cache for entry point plugins
 _entry_point_plugins: list[ToolProgressPlugin] | None = None
+# Version hash to detect package updates
+_entry_point_version_hash: int = 0
 
 
 def get_all_plugins(include_user: bool = True) -> list[ToolProgressPlugin]:

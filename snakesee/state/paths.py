@@ -6,11 +6,52 @@ scattered across multiple functions.
 """
 
 import base64
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from snakesee.constants import EXISTS_CACHE_TTL
 from snakesee.utils import safe_mtime
+
+# Module-level cache for filesystem existence checks
+# Maps path string -> (timestamp, exists_result)
+_exists_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _cached_exists(path: Path, ttl: float = EXISTS_CACHE_TTL) -> bool:
+    """Check if a path exists, with caching to reduce filesystem calls.
+
+    This is particularly beneficial on network filesystems where stat() calls
+    can be slow.
+
+    Args:
+        path: Path to check.
+        ttl: Cache TTL in seconds (default from constants).
+
+    Returns:
+        True if the path exists, False otherwise.
+    """
+    key = str(path)
+    now = time.time()
+
+    if key in _exists_cache:
+        cached_time, cached_result = _exists_cache[key]
+        if now - cached_time < ttl:
+            return cached_result
+
+    result = path.exists()
+    _exists_cache[key] = (now, result)
+    return result
+
+
+def clear_exists_cache() -> None:
+    """Clear the filesystem existence cache.
+
+    Useful for testing or after significant filesystem operations.
+    """
+    _exists_cache.clear()
+
 
 # Default names for snakemake directories and files
 SNAKEMAKE_DIR = ".snakemake"
@@ -104,31 +145,31 @@ class WorkflowPaths:
     @property
     def exists(self) -> bool:
         """Check if this is a valid workflow directory."""
-        return self.snakemake_dir.exists()
+        return _cached_exists(self.snakemake_dir)
 
     @property
     def has_metadata(self) -> bool:
         """Check if metadata directory exists."""
-        return self.metadata_dir.exists()
+        return _cached_exists(self.metadata_dir)
 
     @property
     def has_logs(self) -> bool:
         """Check if log directory exists and contains logs."""
-        if not self.log_dir.exists():
+        if not _cached_exists(self.log_dir):
             return False
         return any(self.log_dir.glob(LOG_GLOB_PATTERN))
 
     @property
     def has_events(self) -> bool:
         """Check if events file exists and has content."""
-        if not self.events_file.exists():
+        if not _cached_exists(self.events_file):
             return False
         return self.events_file.stat().st_size > 0
 
     @property
     def has_locks(self) -> bool:
         """Check if locks directory exists and contains files."""
-        if not self.locks_dir.exists():
+        if not _cached_exists(self.locks_dir):
             return False
         try:
             return any(self.locks_dir.iterdir())
@@ -138,7 +179,7 @@ class WorkflowPaths:
     @property
     def has_incomplete(self) -> bool:
         """Check if incomplete directory exists and contains markers."""
-        if not self.incomplete_dir.exists():
+        if not _cached_exists(self.incomplete_dir):
             return False
         try:
             return any(self.incomplete_dir.iterdir())
@@ -155,9 +196,9 @@ class WorkflowPaths:
         Returns:
             Path to the most recent log file, or None if no logs exist.
         """
-        if not self.log_dir.exists():
+        if not _cached_exists(self.log_dir):
             return None
-        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if p.exists()]
+        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if _cached_exists(p)]
         if not logs:
             return None
         logs.sort(key=safe_mtime)
@@ -169,9 +210,9 @@ class WorkflowPaths:
         Returns:
             List of paths sorted oldest to newest.
         """
-        if not self.log_dir.exists():
+        if not _cached_exists(self.log_dir):
             return []
-        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if p.exists()]
+        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if _cached_exists(p)]
         logs.sort(key=safe_mtime)
         return logs
 
@@ -195,7 +236,7 @@ class WorkflowPaths:
         Yields:
             Path to each metadata file.
         """
-        if not self.metadata_dir.exists():
+        if not _cached_exists(self.metadata_dir):
             return
         for f in self.metadata_dir.rglob("*"):
             if f.is_file():
@@ -207,7 +248,7 @@ class WorkflowPaths:
         Returns:
             Number of metadata files.
         """
-        if not self.metadata_dir.exists():
+        if not _cached_exists(self.metadata_dir):
             return 0
         return sum(1 for f in self.metadata_dir.rglob("*") if f.is_file())
 
@@ -221,7 +262,7 @@ class WorkflowPaths:
         Yields:
             Path to each incomplete marker file.
         """
-        if not self.incomplete_dir.exists():
+        if not _cached_exists(self.incomplete_dir):
             return
         for marker in self.incomplete_dir.rglob("*"):
             if marker.is_file() and marker.name != "migration_underway":
@@ -268,7 +309,7 @@ class WorkflowPaths:
         search_paths: list[Path] = []
 
         # .snakemake/log/ directory
-        if self.log_dir.exists():
+        if _cached_exists(self.log_dir):
             search_paths.extend(self.log_dir.glob(f"*{rule}*"))
             if job_id is not None:
                 search_paths.extend(self.log_dir.glob(f"*job{job_id}*"))
@@ -286,7 +327,7 @@ class WorkflowPaths:
         if existing_logs:
             existing_logs.sort(key=safe_mtime, reverse=True)
             for log in existing_logs:
-                if log.exists():
+                if _cached_exists(log):
                     return log
 
         return None
@@ -299,13 +340,13 @@ class WorkflowPaths:
     ) -> list[Path]:
         """Search a log directory for matching logs."""
         paths: list[Path] = []
-        if not log_dir.exists():
+        if not _cached_exists(log_dir):
             return paths
 
         paths.extend(log_dir.glob(f"**/{rule}*"))
 
         rule_log_dir = log_dir / rule
-        if rule_log_dir.exists():
+        if _cached_exists(rule_log_dir):
             paths.extend(rule_log_dir.glob("*"))
 
         if wildcards:
@@ -331,7 +372,7 @@ class WorkflowPaths:
         current = self.workflow_dir.resolve()
         for _ in range(max_levels):
             profile_path = current / DEFAULT_PROFILE_NAME
-            if profile_path.exists():
+            if _cached_exists(profile_path):
                 return profile_path
             if current.parent == current:
                 break
@@ -348,5 +389,5 @@ class WorkflowPaths:
         Raises:
             ValueError: If .snakemake directory doesn't exist.
         """
-        if not self.snakemake_dir.exists():
+        if not _cached_exists(self.snakemake_dir):
             raise ValueError(f"No .snakemake directory found in {self.workflow_dir}")

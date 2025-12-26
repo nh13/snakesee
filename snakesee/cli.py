@@ -245,7 +245,7 @@ def profile_export(
         if merge and output_path.exists():
             console.print("  [dim](merged with existing profile)[/dim]")
 
-    except Exception as e:
+    except (OSError, ValueError, TypeError, KeyError) as e:
         console.print(f"[red]Error:[/red] Failed to export profile: {e}")
         sys.exit(1)
 
