@@ -786,6 +786,12 @@ class WorkflowMonitorTUI:
         Returns:
             True if should quit, False otherwise.
         """
+        # Handle help overlay first - any key closes it regardless of mode
+        if self._show_help:
+            self._show_help = False
+            self._force_refresh = True
+            return False
+
         # Handle job selection mode (before filter mode)
         if self._job_selection_mode:
             # Use large number; actual bounds checked in _make_job_log_panel
@@ -799,13 +805,6 @@ class WorkflowMonitorTUI:
         easter_result = self._handle_easter_egg_key(key)
         if easter_result is not None:
             return easter_result
-
-        # Handle help overlay
-        if self._show_help:
-            # Any key closes help
-            self._show_help = False
-            self._force_refresh = True
-            return False
 
         # Normal mode keybindings
         if key.lower() == "q":
@@ -1021,6 +1020,16 @@ class WorkflowMonitorTUI:
 
     def _handle_job_selection_key(self, key: str, num_jobs: int) -> bool:
         """Handle keypress in job selection mode. Returns True if should quit."""
+        # Help key works in job selection mode
+        if key == "?":
+            self._show_help = True
+            self._force_refresh = True
+            return False
+
+        # Sort keys work in job selection mode
+        if self._handle_sort_key(key):
+            return False
+
         if key == "\x1b":  # Escape - exit selection mode
             self._job_selection_mode = False
             self._log_source = None
@@ -1381,6 +1390,31 @@ class WorkflowMonitorTUI:
             return ""
         return " ▲" if self._sort_ascending else " ▼"
 
+    def _get_job_id_column_width(self, jobs: list[JobInfo]) -> int:
+        """Calculate column width needed for job IDs.
+
+        Args:
+            jobs: List of jobs to check for max job ID.
+
+        Returns:
+            Minimum column width needed to display all job IDs (minimum 2).
+        """
+        if not jobs:
+            return 2
+        max_id = 0
+        for job in jobs:
+            if job.job_id:
+                try:
+                    job_id_int = int(job.job_id)
+                    max_id = max(max_id, job_id_int)
+                except ValueError:
+                    # Non-integer job ID, use string length
+                    max_id = max(max_id, 10 ** (len(job.job_id) - 1))
+        # Use row index as fallback if no job IDs
+        if max_id == 0:
+            max_id = len(jobs)
+        return max(2, len(str(max_id)))
+
     def _get_tool_progress(self, job: JobInfo) -> ToolProgress | None:
         """
         Get tool-specific progress for a running job.
@@ -1500,16 +1534,17 @@ class WorkflowMonitorTUI:
         is_sorting = self._sort_table == "running"
         header_style = "bold magenta on dark_blue" if is_sorting else "bold magenta"
 
+        jobs = self._filter_jobs(progress.running_jobs)
+        id_col_width = self._get_job_id_column_width(jobs)
+
         table = Table(expand=True, show_header=True, header_style=header_style)
-        table.add_column("#", justify="right", style="dim", width=5)
+        table.add_column("#", justify="right", style="dim", width=id_col_width)
         table.add_column(f"Rule{self._sort_indicator('running', 0)}", style="cyan", no_wrap=True)
         table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Started{self._sort_indicator('running', 1)}", justify="right")
         table.add_column(f"Elapsed{self._sort_indicator('running', 2)}", justify="right")
         table.add_column("Progress", justify="right")
         table.add_column(f"Est. Remaining{self._sort_indicator('running', 3)}", justify="right")
-
-        jobs = self._filter_jobs(progress.running_jobs)
         job_data = self._build_running_job_data(jobs)
 
         if is_sorting:
@@ -1606,14 +1641,6 @@ class WorkflowMonitorTUI:
         is_sorting = self._sort_table == "completions"
         header_style = "bold green on dark_blue" if is_sorting else "bold green"
 
-        table = Table(expand=True, show_header=True, header_style=header_style)
-        ind = self._sort_indicator
-        table.add_column("#", justify="right", style="dim", width=5)
-        table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
-        table.add_column(f"Thr{ind('completions', 1)}", justify="right")
-        table.add_column(f"Duration{ind('completions', 2)}", justify="right")
-        table.add_column(f"Completed{ind('completions', 3)}", justify="right")
-
         # Merge successful completions and failed jobs for a unified view
         failed_job_ids = {id(job) for job in progress.failed_jobs_list}
         all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
@@ -1622,6 +1649,15 @@ class WorkflowMonitorTUI:
         all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
 
         jobs = self._filter_jobs(all_jobs)
+        id_col_width = self._get_job_id_column_width(jobs)
+
+        table = Table(expand=True, show_header=True, header_style=header_style)
+        ind = self._sort_indicator
+        table.add_column("#", justify="right", style="dim", width=id_col_width)
+        table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
+        table.add_column(f"Thr{ind('completions', 1)}", justify="right")
+        table.add_column(f"Duration{ind('completions', 2)}", justify="right")
+        table.add_column(f"Completed{ind('completions', 3)}", justify="right")
 
         # Sort if this table is active
         if is_sorting and jobs:
