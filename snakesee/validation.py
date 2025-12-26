@@ -321,6 +321,30 @@ DiscrepancyValue: TypeAlias = int | float | str | None
 # Validation log file name
 VALIDATION_LOG_NAME = ".snakesee_validation.log"
 
+# Default maximum jobs to track in EventAccumulator
+DEFAULT_MAX_JOBS = 10000
+
+
+def _get_max_jobs_config() -> int:
+    """Get max jobs configuration from environment or default.
+
+    Returns:
+        Maximum number of jobs to track.
+    """
+    import os
+
+    env_value = os.environ.get("SNAKESEE_MAX_JOB_TRACKING")
+    if env_value is not None:
+        try:
+            return int(env_value)
+        except ValueError:
+            logger.warning(
+                "Invalid SNAKESEE_MAX_JOB_TRACKING value '%s', using default %d",
+                env_value,
+                DEFAULT_MAX_JOBS,
+            )
+    return DEFAULT_MAX_JOBS
+
 
 @dataclass
 class JobState:
@@ -347,6 +371,10 @@ class EventAccumulator:
     The jobs dict has a maximum size limit to prevent unbounded memory
     growth in long-running workflows. When the limit is reached, the
     oldest completed jobs are pruned.
+
+    Args:
+        max_jobs: Maximum number of jobs to track. Defaults to DEFAULT_MAX_JOBS.
+                  Can also be configured via SNAKESEE_MAX_JOB_TRACKING env var.
     """
 
     # Job states keyed by job_id
@@ -359,7 +387,7 @@ class EventAccumulator:
     workflow_start_time: float | None = None
 
     # Maximum number of jobs to track (prevents unbounded memory growth)
-    max_jobs: int = 10000
+    max_jobs: int = field(default_factory=lambda: _get_max_jobs_config())
 
     def process_event(self, event: SnakeseeEvent) -> None:
         """Process a single event and update accumulated state."""

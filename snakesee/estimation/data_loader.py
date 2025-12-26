@@ -134,7 +134,7 @@ class HistoricalDataLoader:
                         has_wildcards = True
 
         except OSError as e:
-            logger.info("Error reading events file %s: %s", events_file, e)
+            logger.warning("Error reading events file %s: %s", events_file, e)
             return False
 
         return has_wildcards

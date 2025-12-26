@@ -201,7 +201,7 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(temp_path, path)
-    except BaseException:
+    except Exception:
         # Clean up temp file on any error
         try:
             os.unlink(temp_path)

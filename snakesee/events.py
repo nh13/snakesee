@@ -141,28 +141,38 @@ class EventReader:
         if not self.event_file.exists():
             return []
 
-        events: list[SnakeseeEvent] = []
+        # Get current offset under lock (minimize lock hold time)
         with self._lock:
-            try:
-                with open(self.event_file, "r", encoding="utf-8") as f:
-                    f.seek(self._offset)
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            try:
-                                events.append(SnakeseeEvent.from_json(line))
-                            except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
-                                # Skip malformed lines but log for debugging
-                                logger.debug(
-                                    "Skipping malformed event line: %s... (%s)",
-                                    line[:50],
-                                    e,
-                                )
-                                continue
-                    self._offset = f.tell()
-            except OSError as e:
-                # File access error - log and return empty list
-                logger.info("Error reading event file %s: %s", self.event_file, e)
+            offset = self._offset
+
+        # Perform file I/O without holding the lock to avoid blocking
+        events: list[SnakeseeEvent] = []
+        new_offset = offset
+        try:
+            with open(self.event_file, "r", encoding="utf-8") as f:
+                f.seek(offset)
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            events.append(SnakeseeEvent.from_json(line))
+                        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                            # Skip malformed lines but log for debugging
+                            logger.debug(
+                                "Skipping malformed event line: %s... (%s)",
+                                line[:50],
+                                e,
+                            )
+                            continue
+                new_offset = f.tell()
+        except OSError as e:
+            # File access error - log and return empty list
+            logger.warning("Error reading event file %s: %s", self.event_file, e)
+            return events
+
+        # Update offset under lock
+        with self._lock:
+            self._offset = new_offset
 
         return events
 

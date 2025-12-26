@@ -94,7 +94,7 @@ FILE_LOCK_TIMEOUT: float = 5.0
 
 
 def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> bool:
-    """Acquire an exclusive file lock with timeout.
+    """Acquire an exclusive file lock with timeout using exponential backoff.
 
     Args:
         fd: File descriptor to lock.
@@ -104,6 +104,8 @@ def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> b
         True if lock was acquired, False if timeout expired.
     """
     deadline = time.time() + timeout
+    sleep_time = 0.001  # Start with 1ms
+    max_sleep = 0.1  # Cap at 100ms
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -111,8 +113,9 @@ def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> b
         except BlockingIOError:
             if time.time() >= deadline:
                 return False
-            # Brief sleep before retry (10ms)
-            time.sleep(0.01)
+            # Exponential backoff with cap
+            time.sleep(min(sleep_time, max_sleep))
+            sleep_time *= 1.5
 
 
 # Maximum retries for event writing
