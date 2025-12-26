@@ -156,7 +156,7 @@ def tui_with_mocks(tmp_path: Path, mock_console: MagicMock) -> "WorkflowMonitorT
     # Create minimal directory structure
     (tmp_path / ".snakemake" / "log").mkdir(parents=True)
 
-    with patch("snakesee.tui.Console", return_value=mock_console):
+    with patch("snakesee.tui.monitor.Console", return_value=mock_console):
         tui = WorkflowMonitorTUI(workflow_dir=tmp_path)
         # Disable file-dependent initialization for isolated testing
         tui._event_reader = None
