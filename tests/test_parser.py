@@ -1504,3 +1504,192 @@ Finished job 1.
 
         assert len(result) == 1
         assert result[0].rule == "test"
+
+
+class TestParserEdgeCasesUnit:
+    """Unit tests for parser edge cases with special characters and malformed data."""
+
+    def test_parse_wildcards_with_special_chars(self) -> None:
+        """Test parsing wildcards with special characters."""
+        from snakesee.parser import _parse_wildcards
+
+        # Path-like value
+        result = _parse_wildcards("sample=path/to/file.txt")
+        assert result == {"sample": "path/to/file.txt"}
+
+        # Dots in value
+        result = _parse_wildcards("sample=file.name.txt")
+        assert result == {"sample": "file.name.txt"}
+
+        # Hyphens and underscores
+        result = _parse_wildcards("sample_name=test-value_123")
+        assert result == {"sample_name": "test-value_123"}
+
+    def test_parse_wildcards_with_equals_in_value(self) -> None:
+        """Test parsing wildcards with = in value."""
+        from snakesee.parser import _parse_wildcards
+
+        # This is a tricky case - = in value
+        result = _parse_wildcards("param=key=value")
+        # Should capture at least the key
+        assert "param" in result
+
+    def test_empty_log_file(self, tmp_path: Path) -> None:
+        """Test parsing empty log file."""
+        log_file = tmp_path / "empty.log"
+        log_file.write_text("")
+
+        reader = IncrementalLogReader(log_file)
+        lines = reader.read_new_lines()
+
+        assert lines == 0
+        assert reader.progress == (0, 0)
+        assert reader.running_jobs == []
+
+    def test_log_file_with_only_whitespace(self, tmp_path: Path) -> None:
+        """Test parsing log file with only whitespace."""
+        log_file = tmp_path / "whitespace.log"
+        log_file.write_text("   \n\t\n  \n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        assert reader.progress == (0, 0)
+        assert reader.running_jobs == []
+
+    def test_log_with_unicode_characters(self, tmp_path: Path) -> None:
+        """Test parsing log with unicode characters."""
+        log_file = tmp_path / "unicode.log"
+        log_file.write_text("""rule process_日本語:
+    jobid: 1
+[Mon Dec 16 10:00:00 2024]
+Finished job 1.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Should handle unicode rule names
+        completed = reader.completed_jobs
+        assert len(completed) == 1
+        assert "日本語" in completed[0].rule
+
+    def test_log_with_very_long_line(self, tmp_path: Path) -> None:
+        """Test parsing log with very long lines."""
+        log_file = tmp_path / "long.log"
+        long_value = "x" * 10000
+        log_file.write_text(f"""rule long_rule:
+    wildcards: sample={long_value}
+    jobid: 1
+""")
+
+        reader = IncrementalLogReader(log_file)
+        lines = reader.read_new_lines()
+
+        # Should handle long lines without crashing
+        assert lines > 0
+        running = reader.running_jobs
+        assert len(running) == 1
+
+    def test_log_with_malformed_timestamp(self, tmp_path: Path) -> None:
+        """Test parsing log with malformed timestamps."""
+        log_file = tmp_path / "malformed_time.log"
+        log_file.write_text("""[Invalid Timestamp Format]
+rule test:
+    jobid: 1
+[Another Bad 00:00:00 2024]
+Finished job 1.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Should still parse the job info - job completed
+        assert len(reader.running_jobs) == 0
+        assert len(reader.completed_jobs) == 1
+
+    def test_log_with_interleaved_output(self, tmp_path: Path) -> None:
+        """Test parsing log with interleaved rule outputs."""
+        log_file = tmp_path / "interleaved.log"
+        log_file.write_text("""rule align:
+    jobid: 1
+rule sort:
+    jobid: 2
+    wildcards: sample=A
+rule align:
+    wildcards: sample=B
+Finished job 1.
+Finished job 2.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Both jobs should be completed
+        completed = reader.completed_jobs
+        assert len(completed) == 2
+
+    def test_parse_progress_with_large_numbers(self, tmp_path: Path) -> None:
+        """Test parsing progress with large job counts."""
+        log_file = tmp_path / "large.log"
+        log_file.write_text("99999 of 100000 steps (99%) done\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        assert reader.progress == (99999, 100000)
+
+    def test_log_with_null_bytes(self, tmp_path: Path) -> None:
+        """Test handling log with null bytes (binary data)."""
+        log_file = tmp_path / "binary.log"
+        # Write text with embedded null bytes
+        content = "rule test:\n    jobid: 1\x00\n"
+        log_file.write_bytes(content.encode("utf-8", errors="replace"))
+
+        reader = IncrementalLogReader(log_file)
+        # Should not crash
+        try:
+            reader.read_new_lines()
+        except UnicodeDecodeError:
+            pass  # Acceptable to fail on binary data
+
+    def test_parse_metadata_with_missing_fields(self, tmp_path: Path) -> None:
+        """Test parsing metadata files with missing required fields are skipped."""
+        from snakesee.parser import parse_metadata_files
+
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+
+        # Metadata with only rule name, missing starttime and endtime
+        (metadata_dir / "output.txt").write_text(json.dumps({"rule": "test"}))
+
+        # Files missing required fields (rule, starttime, endtime) are silently skipped
+        jobs = list(parse_metadata_files(metadata_dir))
+        assert len(jobs) == 0
+
+    def test_parse_metadata_with_extra_fields(self, tmp_path: Path) -> None:
+        """Test parsing metadata files with extra unknown fields."""
+        from snakesee.parser import parse_metadata_files
+
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+
+        # Metadata with required fields plus extra unknown fields
+        (metadata_dir / "output.txt").write_text(
+            json.dumps(
+                {
+                    "rule": "test",
+                    "starttime": 900.0,
+                    "endtime": 1000.0,
+                    "unknown_field": "value",
+                    "another_extra": 123,
+                }
+            )
+        )
+
+        # Extra fields should be ignored, required fields parsed
+        jobs = list(parse_metadata_files(metadata_dir))
+        assert len(jobs) == 1
+        assert jobs[0].rule == "test"
+        assert jobs[0].start_time == 900.0
+        assert jobs[0].end_time == 1000.0
