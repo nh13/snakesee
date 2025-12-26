@@ -10,10 +10,14 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
+from typing import TypeAlias
 
 from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
 from snakesee.models import WorkflowProgress
+
+# Type alias for values compared in discrepancies (counts, timestamps, IDs)
+DiscrepancyValue: TypeAlias = int | float | str | None
 
 # Validation log file name
 VALIDATION_LOG_NAME = ".snakesee_validation.log"
@@ -40,6 +44,10 @@ class EventAccumulator:
 
     This tracks the full history of job state changes from events,
     allowing comparison with the parsed state at any point in time.
+
+    The jobs dict has a maximum size limit to prevent unbounded memory
+    growth in long-running workflows. When the limit is reached, the
+    oldest completed jobs are pruned.
     """
 
     # Job states keyed by job_id
@@ -50,6 +58,9 @@ class EventAccumulator:
     completed_jobs: int = 0
     workflow_started: bool = False
     workflow_start_time: float | None = None
+
+    # Maximum number of jobs to track (prevents unbounded memory growth)
+    max_jobs: int = 10000
 
     def process_event(self, event: SnakeseeEvent) -> None:
         """Process a single event and update accumulated state."""
@@ -124,6 +135,38 @@ class EventAccumulator:
         """Process multiple events."""
         for event in events:
             self.process_event(event)
+        # Prune after batch processing for efficiency
+        self._prune_if_needed()
+
+    def _prune_if_needed(self) -> None:
+        """Remove oldest completed jobs if over the size limit.
+
+        Keeps running and submitted jobs, removes finished/error jobs
+        oldest-first based on end_time.
+        """
+        if len(self.jobs) <= self.max_jobs:
+            return
+
+        # Find completed jobs (finished or error) that can be pruned
+        completed = [
+            (job_id, job)
+            for job_id, job in self.jobs.items()
+            if job.status in ("finished", "error")
+        ]
+
+        if not completed:
+            # All jobs are running/submitted, nothing to prune
+            return
+
+        # Sort by end_time (oldest first), None values at the end
+        completed.sort(key=lambda x: x[1].end_time or float("inf"))
+
+        # Calculate how many to remove
+        to_remove = len(self.jobs) - self.max_jobs
+
+        # Remove oldest completed jobs
+        for job_id, _ in completed[:to_remove]:
+            del self.jobs[job_id]
 
     @property
     def running_jobs(self) -> list[JobState]:
@@ -153,8 +196,8 @@ class Discrepancy:
     category: str  # e.g., "running_count", "job_missing", "timing_mismatch"
     severity: str  # "info", "warning", "error"
     message: str
-    event_value: Any = None
-    parsed_value: Any = None
+    event_value: DiscrepancyValue = None
+    parsed_value: DiscrepancyValue = None
     job_id: int | None = None
     rule_name: str | None = None
     wildcards: dict[str, str] | None = None

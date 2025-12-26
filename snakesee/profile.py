@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import tempfile
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -174,7 +176,7 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         path: Path to write the profile to.
     """
 
-    def serialize(obj: Any) -> Any:
+    def serialize(obj: object) -> dict[str, Any]:
         if isinstance(obj, RuleProfile):
             return asdict(obj)
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
@@ -187,7 +189,25 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         "rules": {name: asdict(rp) for name, rp in profile.rules.items()},
     }
 
-    path.write_text(json.dumps(data, indent=2, default=serialize))
+    # Write atomically: write to temp file, then rename
+    # This prevents corruption if the program crashes mid-write
+    content = json.dumps(data, indent=2, default=serialize)
+    fd, temp_path = tempfile.mkstemp(
+        suffix=".tmp",
+        prefix=path.name,
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(temp_path, path)
+    except BaseException:
+        # Clean up temp file on any error
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_profile(path: Path) -> TimingProfile:

@@ -11,6 +11,8 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from typing import TypedDict
 
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
@@ -19,6 +21,19 @@ from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 
 logger = logging.getLogger(__name__)
+
+
+class StartedJobData(TypedDict):
+    """Typed dictionary for tracking started job information.
+
+    Used internally by IncrementalLogReader to track jobs that have started
+    but not yet finished, avoiding complex tuple types.
+    """
+
+    rule: str
+    start_time: float | None
+    wildcards: dict[str, str] | None
+    threads: int | None
 
 
 @dataclass(frozen=True)
@@ -362,10 +377,8 @@ class IncrementalLogReader:
         self._total: int = 0
 
         # Job tracking state
-        # started_jobs: jobid -> (rule, start_timestamp, wildcards, threads)
-        self._started_jobs: dict[
-            str, tuple[str, float | None, dict[str, str] | None, int | None]
-        ] = {}
+        # started_jobs: jobid -> StartedJobData
+        self._started_jobs: dict[str, StartedJobData] = {}
         self._finished_jobids: set[str] = set()
         self._completed_jobs: list[JobInfo] = []
 
@@ -521,13 +534,7 @@ class IncrementalLogReader:
             self._current_wildcards = _parse_wildcards(match.group(1))
             # Update already-stored job if wildcards comes after jobid
             if self._current_jobid and self._current_jobid in self._started_jobs:
-                rule, ts, _, threads = self._started_jobs[self._current_jobid]
-                self._started_jobs[self._current_jobid] = (
-                    rule,
-                    ts,
-                    self._current_wildcards,
-                    threads,
-                )
+                self._started_jobs[self._current_jobid]["wildcards"] = self._current_wildcards
             return
 
         # Capture threads within rule block
@@ -537,8 +544,7 @@ class IncrementalLogReader:
                 self._current_threads = threads
                 # Update already-stored job if threads comes after jobid
                 if self._current_jobid and self._current_jobid in self._started_jobs:
-                    rule, ts, wc, _ = self._started_jobs[self._current_jobid]
-                    self._started_jobs[self._current_jobid] = (rule, ts, wc, self._current_threads)
+                    self._started_jobs[self._current_jobid]["threads"] = self._current_threads
             return
 
         # Capture log path within rule block - store by jobid for direct lookup
@@ -553,11 +559,11 @@ class IncrementalLogReader:
         if match := JOBID_PATTERN.match(line):
             self._current_jobid = match.group(1)
             if self._current_rule is not None and self._current_jobid not in self._started_jobs:
-                self._started_jobs[self._current_jobid] = (
-                    self._current_rule,
-                    self._current_timestamp,
-                    self._current_wildcards,
-                    self._current_threads,
+                self._started_jobs[self._current_jobid] = StartedJobData(
+                    rule=self._current_rule,
+                    start_time=self._current_timestamp,
+                    wildcards=self._current_wildcards,
+                    threads=self._current_threads,
                 )
             # Store log by jobid if we already captured it
             if self._current_log_path:
@@ -571,16 +577,16 @@ class IncrementalLogReader:
 
             # Create completed job entry if we have start info
             if jobid in self._started_jobs:
-                rule, start_time, wildcards, threads = self._started_jobs[jobid]
+                job_data = self._started_jobs[jobid]
                 log_path = self._job_logs.get(jobid)
                 self._completed_jobs.append(
                     JobInfo(
-                        rule=rule,
+                        rule=job_data["rule"],
                         job_id=jobid,
-                        start_time=start_time,
+                        start_time=job_data["start_time"],
                         end_time=self._current_timestamp,
-                        wildcards=wildcards,
-                        threads=threads,
+                        wildcards=job_data["wildcards"],
+                        threads=job_data["threads"],
                         log_file=Path(log_path) if log_path else None,
                     )
                 )
@@ -628,17 +634,17 @@ class IncrementalLogReader:
         """
         with self._lock:
             running: list[JobInfo] = []
-            for jobid, (rule, start_time, wildcards, threads) in self._started_jobs.items():
+            for jobid, job_data in self._started_jobs.items():
                 if jobid not in self._finished_jobids:
                     # Look up log by jobid - unique within this run
                     log_path = self._job_logs.get(jobid)
                     running.append(
                         JobInfo(
-                            rule=rule,
+                            rule=job_data["rule"],
                             job_id=jobid,
-                            start_time=start_time,
-                            wildcards=wildcards,
-                            threads=threads,
+                            start_time=job_data["start_time"],
+                            wildcards=job_data["wildcards"],
+                            threads=job_data["threads"],
                             log_file=Path(log_path) if log_path else None,
                         )
                     )
@@ -724,7 +730,7 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
 def _iterate_metadata_files(
     metadata_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> Iterator[tuple[Path, dict]]:
+) -> Iterator[tuple[Path, dict[str, Any]]]:
     """Iterate metadata files with optional progress reporting.
 
     Args:
@@ -765,7 +771,7 @@ def _iterate_metadata_files(
             continue
 
 
-def _calculate_input_size(input_files: list | None) -> int | None:
+def _calculate_input_size(input_files: list[str] | None) -> int | None:
     """Calculate total input size from file list.
 
     Args:
