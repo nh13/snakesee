@@ -3,6 +3,11 @@
 This module helps identify discrepancies between job status tracking via
 the logger plugin events and log/metadata parsing, enabling bug detection
 in either approach.
+
+Related modules:
+    snakesee.events: Event types and SnakeseeEvent dataclass
+    snakesee.parser: Log file parsing for comparison
+    snakesee.models: WorkflowProgress for state comparison
 """
 
 import logging

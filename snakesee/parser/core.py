@@ -100,6 +100,14 @@ def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
 
     Returns:
         Dictionary like {"sample": "A", "batch": "1"}
+
+    Examples:
+        >>> _parse_wildcards("sample=A, batch=1")
+        {'sample': 'A', 'batch': '1'}
+        >>> _parse_wildcards("id=test_123")
+        {'id': 'test_123'}
+        >>> _parse_wildcards("key=value=with=equals")
+        {'key': 'value=with=equals'}
     """
     wildcards: dict[str, str] = {}
     # Split by comma, then parse key=value pairs
