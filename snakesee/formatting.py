@@ -194,7 +194,7 @@ def format_size(
 
     Examples:
         >>> format_size(1024)
-        '1.0 KB'
+        '1 KB'
         >>> format_size(1536, precision=2)
         '1.50 KB'
         >>> format_size(0)

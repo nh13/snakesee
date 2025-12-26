@@ -2,6 +2,7 @@
 
 import importlib.util
 import logging
+import stat
 import sys
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -14,7 +15,6 @@ from snakesee.plugins.fgbio import FgbioPlugin
 from snakesee.plugins.samtools import SamtoolsIndexPlugin
 from snakesee.plugins.samtools import SamtoolsSortPlugin
 from snakesee.plugins.star import STARPlugin
-from snakesee.utils import safe_mtime
 
 logger = logging.getLogger(__name__)
 
@@ -364,13 +364,23 @@ def find_rule_log(
     # log/ directory (another common convention)
     search_paths.extend(_search_log_dir(workflow_dir / "log", rule_name, wildcards))
 
-    # Sort by modification time (newest first) and return first match
-    existing_logs = [p for p in search_paths if p.is_file()]
-    if existing_logs:
-        existing_logs.sort(key=safe_mtime, reverse=True)
-        # Return first file that still exists
-        for log in existing_logs:
-            if log.exists():
-                return log
+    # Deduplicate and filter to existing files, then sort by mtime
+    seen: set[Path] = set()
+    valid_logs: list[tuple[Path, float]] = []
+    for p in search_paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            stat_result = p.stat()
+            if stat.S_ISREG(stat_result.st_mode):
+                valid_logs.append((p, stat_result.st_mtime))
+        except OSError:
+            continue
+
+    if valid_logs:
+        # Sort by mtime (newest first) and return
+        valid_logs.sort(key=lambda x: x[1], reverse=True)
+        return valid_logs[0][0]
 
     return None
