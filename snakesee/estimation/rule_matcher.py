@@ -62,19 +62,25 @@ class RuleMatchingEngine:
     ) -> str | None:
         """Find a rule with matching code hash.
 
+        When multiple rules share the same code hash and are in known_rules,
+        returns the lexicographically smallest rule name for deterministic behavior.
+
         Args:
             rule: Rule name to look up.
             code_hash_to_rules: Mapping of code hashes to rule sets.
             known_rules: Set of rules with available stats.
 
         Returns:
-            Name of matching rule, or None if not found.
+            Name of matching rule (lexicographically smallest if multiple),
+            or None if not found.
         """
         for _hash, rules in code_hash_to_rules.items():
             if rule in rules:
-                for r in rules:
-                    if r != rule and r in known_rules:
-                        return r
+                # Find all candidate rules that match criteria
+                candidates = {r for r in rules if r != rule and r in known_rules}
+                if candidates:
+                    # Return lexicographically smallest for deterministic selection
+                    return min(candidates)
         return None
 
     def find_similar(

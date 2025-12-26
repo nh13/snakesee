@@ -111,10 +111,11 @@ def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> b
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except BlockingIOError:
-            if time.time() >= deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
                 return False
-            # Exponential backoff with cap
-            time.sleep(min(sleep_time, max_sleep))
+            # Exponential backoff with cap, bounded by remaining time
+            time.sleep(min(sleep_time, max_sleep, remaining))
             sleep_time *= 1.5
 
 

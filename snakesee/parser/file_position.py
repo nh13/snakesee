@@ -71,6 +71,8 @@ class LogFilePosition:
         """Clamp offset to file bounds.
 
         Args:
-            file_size: Current file size.
+            file_size: Current file size (must be non-negative).
         """
+        if file_size < 0:
+            file_size = 0
         self._offset = min(self._offset, file_size)

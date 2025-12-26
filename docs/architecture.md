@@ -4,7 +4,7 @@ This document describes the architecture and key design decisions in snakesee.
 
 ## Module Structure
 
-```
+```text
 snakesee/
 ├── __init__.py          # Public API exports
 ├── cli.py               # Command-line interface (defopt-based)
@@ -117,7 +117,7 @@ Estimation-specific configuration is in `state/config.py`.
 
 Custom exception hierarchy for precise error handling:
 
-```
+```text
 SnakeseeError (base)
 ├── WorkflowError
 │   ├── WorkflowNotFoundError

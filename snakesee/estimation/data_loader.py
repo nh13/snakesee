@@ -93,7 +93,7 @@ class HistoricalDataLoader:
         has_wildcards = False
 
         try:
-            with open(events_file, "r") as f:
+            with open(events_file, "r", encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
                         continue

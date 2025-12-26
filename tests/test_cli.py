@@ -215,22 +215,22 @@ class TestProfileShow:
 class TestWatchErrorPaths:
     """Additional error path tests for watch command."""
 
-    def test_watch_invalid_half_life_logs(self, snakemake_dir: Path, tmp_path: Path) -> None:
+    def test_watch_invalid_half_life_logs(self, tmp_path: Path) -> None:
         """Test watch with invalid half_life_logs."""
         with pytest.raises(SystemExit):
             watch(tmp_path, half_life_logs=0)
 
-    def test_watch_negative_half_life_logs(self, snakemake_dir: Path, tmp_path: Path) -> None:
+    def test_watch_negative_half_life_logs(self, tmp_path: Path) -> None:
         """Test watch with negative half_life_logs."""
         with pytest.raises(SystemExit):
             watch(tmp_path, half_life_logs=-5)
 
-    def test_watch_invalid_half_life_days(self, snakemake_dir: Path, tmp_path: Path) -> None:
+    def test_watch_invalid_half_life_days(self, tmp_path: Path) -> None:
         """Test watch with invalid half_life_days."""
         with pytest.raises(SystemExit):
             watch(tmp_path, half_life_days=0.0)
 
-    def test_watch_negative_half_life_days(self, snakemake_dir: Path, tmp_path: Path) -> None:
+    def test_watch_negative_half_life_days(self, tmp_path: Path) -> None:
         """Test watch with negative half_life_days."""
         with pytest.raises(SystemExit):
             watch(tmp_path, half_life_days=-1.0)

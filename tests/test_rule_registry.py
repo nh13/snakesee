@@ -35,7 +35,7 @@ class TestRuleStatistics:
         stats.record_completion(duration=100.0, timestamp=1000.0, threads=4)
 
         assert stats.by_threads is not None
-        thread_stats, matched = stats.by_threads.get_best_match(4)
+        thread_stats, _matched = stats.by_threads.get_best_match(4)
         assert thread_stats is not None
         assert thread_stats.count == 1
 

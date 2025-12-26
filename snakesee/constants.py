@@ -92,6 +92,7 @@ DEFAULT_REFRESH_RATE: float = REFRESH_RATE_CONFIG.default_rate
 
 #: Seconds since last log modification before considering workflow stale/dead
 #: Default is 30 minutes (1800 seconds)
+#: SYNC: This value must match TimeConstants.stale_workflow_threshold in state/config.py
 STALE_WORKFLOW_THRESHOLD_SECONDS: float = 1800.0
 
 #: Default TTL for tool progress cache in seconds

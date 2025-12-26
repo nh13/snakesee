@@ -443,27 +443,28 @@ def compare_states(event_state: EventAccumulator, parsed: WorkflowProgress) -> l
                 pass  # Non-integer job ID
 
     # Check for timing discrepancies in running jobs
+    # Build dict for O(n) lookup instead of O(n²) nested loop
+    parsed_running_by_id = {j.job_id: j for j in parsed.running_jobs if j.job_id}
     for event_job in event_state.running_jobs:
         job_id_str = str(event_job.job_id)
-        for parsed_job in parsed.running_jobs:
-            if parsed_job.job_id == job_id_str:
-                # Compare start times
-                if event_job.start_time is not None and parsed_job.start_time is not None:
-                    time_diff = abs(event_job.start_time - parsed_job.start_time)
-                    if time_diff > 5.0:  # More than 5 seconds difference
-                        discrepancies.append(
-                            Discrepancy(
-                                category="start_time_mismatch",
-                                severity="info",
-                                message=f"Start time differs by {time_diff:.1f}s",
-                                job_id=event_job.job_id,
-                                rule_name=event_job.rule_name,
-                                wildcards=event_job.wildcards,
-                                event_value=event_job.start_time,
-                                parsed_value=parsed_job.start_time,
-                            )
+        parsed_job = parsed_running_by_id.get(job_id_str)
+        if parsed_job is not None:
+            # Compare start times
+            if event_job.start_time is not None and parsed_job.start_time is not None:
+                time_diff = abs(event_job.start_time - parsed_job.start_time)
+                if time_diff > 5.0:  # More than 5 seconds difference
+                    discrepancies.append(
+                        Discrepancy(
+                            category="start_time_mismatch",
+                            severity="info",
+                            message=f"Start time differs by {time_diff:.1f}s",
+                            job_id=event_job.job_id,
+                            rule_name=event_job.rule_name,
+                            wildcards=event_job.wildcards,
+                            event_value=event_job.start_time,
+                            parsed_value=parsed_job.start_time,
                         )
-                break
+                    )
 
     # Check for failed jobs in events but not in parsed
     parsed_failed_ids = {j.job_id for j in parsed.failed_jobs_list if j.job_id}

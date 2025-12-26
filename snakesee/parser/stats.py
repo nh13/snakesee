@@ -87,10 +87,10 @@ def _build_wildcard_stats_for_key(
     stats_by_value: dict[str, RuleTimingStats] = {}
 
     for wc_value, timing_pairs in wc_values.items():
-        # Sort by end_time
-        timing_pairs.sort(key=lambda x: x[1])
-        durations = [pair[0] for pair in timing_pairs]
-        timestamps = [pair[1] for pair in timing_pairs]
+        # Sort by end_time (use sorted() to avoid mutating caller's data)
+        sorted_pairs = sorted(timing_pairs, key=lambda x: x[1])
+        durations = [pair[0] for pair in sorted_pairs]
+        timestamps = [pair[1] for pair in sorted_pairs]
 
         stats_by_value[wc_value] = RuleTimingStats(
             rule=f"{rule}:{wc_key}={wc_value}",

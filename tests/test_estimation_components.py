@@ -271,7 +271,7 @@ class TestHistoricalDataLoader:
         assert stats.durations[0] == pytest.approx(10.0, rel=0.01)
         # Code hash is computed from the "code" field
         assert len(loader.code_hash_to_rules) == 1
-        assert "test_rule" in list(loader.code_hash_to_rules.values())[0]
+        assert "test_rule" in next(iter(loader.code_hash_to_rules.values()))
 
     def test_load_from_metadata_with_wildcards(self, tmp_path: Path) -> None:
         metadata_dir = tmp_path / "metadata"

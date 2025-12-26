@@ -96,27 +96,24 @@ def parse_metadata_files(
         JobInfo instances for each completed job found.
     """
     for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
-        try:
-            rule = data.get("rule")
-            starttime = data.get("starttime")
-            endtime = data.get("endtime")
+        rule = data.get("rule")
+        starttime = data.get("starttime")
+        endtime = data.get("endtime")
 
-            if rule is not None and starttime is not None and endtime is not None:
-                # Extract wildcards if present (Snakemake stores as dict)
-                wildcards_data = data.get("wildcards")
-                wildcards: dict[str, str] | None = None
-                if isinstance(wildcards_data, dict):
-                    wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
+        if rule is not None and starttime is not None and endtime is not None:
+            # Extract wildcards if present (Snakemake stores as dict)
+            wildcards_data = data.get("wildcards")
+            wildcards: dict[str, str] | None = None
+            if isinstance(wildcards_data, dict):
+                wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
 
-                yield JobInfo(
-                    rule=rule,
-                    start_time=starttime,
-                    end_time=endtime,
-                    wildcards=wildcards,
-                    input_size=_calculate_input_size(data.get("input")),
-                )
-        except KeyError:
-            continue
+            yield JobInfo(
+                rule=rule,
+                start_time=starttime,
+                end_time=endtime,
+                wildcards=wildcards,
+                input_size=_calculate_input_size(data.get("input")),
+            )
 
 
 def parse_metadata_files_full(
@@ -137,38 +134,35 @@ def parse_metadata_files_full(
         MetadataRecord instances containing timing and code hash data.
     """
     for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
-        try:
-            rule = data.get("rule")
-            if rule is None:
-                continue
-
-            # Extract timing data
-            starttime = data.get("starttime")
-            endtime = data.get("endtime")
-
-            # Extract wildcards if present
-            wildcards_data = data.get("wildcards")
-            wildcards: dict[str, str] | None = None
-            if isinstance(wildcards_data, dict):
-                wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
-
-            # Extract and hash code
-            code_hash: str | None = None
-            code = data.get("code")
-            if code:
-                normalized_code = " ".join(code.split())
-                code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
-
-            yield MetadataRecord(
-                rule=rule,
-                start_time=starttime,
-                end_time=endtime,
-                wildcards=wildcards,
-                input_size=_calculate_input_size(data.get("input")),
-                code_hash=code_hash,
-            )
-        except KeyError:
+        rule = data.get("rule")
+        if rule is None:
             continue
+
+        # Extract timing data
+        starttime = data.get("starttime")
+        endtime = data.get("endtime")
+
+        # Extract wildcards if present
+        wildcards_data = data.get("wildcards")
+        wildcards: dict[str, str] | None = None
+        if isinstance(wildcards_data, dict):
+            wildcards = {str(k): str(v) for k, v in wildcards_data.items()}
+
+        # Extract and hash code
+        code_hash: str | None = None
+        code = data.get("code")
+        if code:
+            normalized_code = " ".join(code.split())
+            code_hash = hashlib.sha256(normalized_code.encode()).hexdigest()[:16]
+
+        yield MetadataRecord(
+            rule=rule,
+            start_time=starttime,
+            end_time=endtime,
+            wildcards=wildcards,
+            input_size=_calculate_input_size(data.get("input")),
+            code_hash=code_hash,
+        )
 
 
 def collect_rule_code_hashes(

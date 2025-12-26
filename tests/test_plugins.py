@@ -663,7 +663,7 @@ class TestPluginValidation:
         assert isinstance(result, PluginMetadata)
         assert result.name == "bwa"
 
-    def test_validate_plugin_missing_method(self, tmp_path: Path) -> None:
+    def test_validate_plugin_missing_method(self) -> None:
         """Test that plugin missing required methods returns None."""
         from snakesee.plugins.loader import validate_plugin
 

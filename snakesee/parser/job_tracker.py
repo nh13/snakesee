@@ -23,10 +23,10 @@ class JobLifecycleTracker:
     """
 
     __slots__ = (
-        "_started_jobs",
-        "_finished_jobids",
         "_completed_jobs",
+        "_finished_jobids",
         "_job_logs",
+        "_started_jobs",
     )
 
     def __init__(self) -> None:
@@ -125,6 +125,10 @@ class JobLifecycleTracker:
                 log_file=Path(log_path) if log_path else None,
             )
             self._completed_jobs.append(job_info)
+            # Clean up started job data to prevent memory growth
+            del self._started_jobs[jobid]
+            # Also clean up the job log entry
+            self._job_logs.pop(jobid, None)
             return job_info
         return None
 

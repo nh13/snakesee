@@ -107,6 +107,7 @@ class TimeConstants:
     seconds_per_day: int = 86400
     seconds_per_hour: int = 3600
     seconds_per_minute: int = 60
+    # SYNC: This value must match STALE_WORKFLOW_THRESHOLD_SECONDS in constants.py
     stale_workflow_threshold: float = 1800.0  # 30 minutes
     timing_mismatch_tolerance: float = 5.0  # seconds
 

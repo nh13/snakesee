@@ -18,6 +18,7 @@ import logging
 import sys
 from datetime import datetime
 from datetime import timezone
+from typing import ClassVar
 from typing import TextIO
 
 
@@ -95,14 +96,14 @@ class StructuredFormatter(logging.Formatter):
 class ColoredFormatter(logging.Formatter):
     """Colored formatter for human-readable console output."""
 
-    COLORS = {
+    COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",  # Cyan
         "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
         "ERROR": "\033[31m",  # Red
         "CRITICAL": "\033[35m",  # Magenta
     }
-    RESET = "\033[0m"
+    RESET: ClassVar[str] = "\033[0m"
 
     def __init__(self, fmt: str | None = None, use_color: bool = True) -> None:
         super().__init__(fmt)
@@ -137,7 +138,11 @@ def configure_logging(
 
     # Convert string level to int if needed
     if isinstance(level, str):
-        level = getattr(logging, level.upper(), logging.WARNING)
+        numeric_level = getattr(logging, level.upper(), None)
+        if numeric_level is None:
+            logging.warning("Invalid log level '%s', defaulting to WARNING", level)
+            numeric_level = logging.WARNING
+        level = numeric_level
 
     # Get the root snakesee logger
     logger = logging.getLogger("snakesee")

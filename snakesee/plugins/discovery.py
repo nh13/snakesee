@@ -43,26 +43,37 @@ def discover_entry_point_plugins(
     global _entry_point_plugins
     global _entry_point_version_hash
 
-    # Build a version hash of installed packages to detect updates
-    try:
-        version_hash = hash(
-            tuple(
-                (d.metadata["Name"], d.metadata["Version"])
-                for d in distributions()
-                if "Name" in d.metadata and "Version" in d.metadata
+    # Fast path: return cached plugins if not forcing reload and cache exists
+    if _entry_point_plugins is not None and not force_reload:
+        # Only compute version hash if we have a cache to potentially return
+        try:
+            version_hash = hash(
+                tuple(
+                    (d.metadata["Name"], d.metadata["Version"])
+                    for d in distributions()
+                    if "Name" in d.metadata and "Version" in d.metadata
+                )
             )
-        )
-    except (TypeError, OSError) as e:
-        logger.debug("Failed to compute package version hash: %s", e)
-        version_hash = 0
+        except (TypeError, OSError) as e:
+            logger.debug("Failed to compute package version hash: %s", e)
+            version_hash = 0
 
-    # Invalidate cache if package versions changed
-    if (
-        _entry_point_plugins is not None
-        and not force_reload
-        and _entry_point_version_hash == version_hash
-    ):
-        return _entry_point_plugins
+        # Return cached if version hash matches
+        if _entry_point_version_hash == version_hash:
+            return _entry_point_plugins
+    else:
+        # Need to compute version hash for storage after loading
+        try:
+            version_hash = hash(
+                tuple(
+                    (d.metadata["Name"], d.metadata["Version"])
+                    for d in distributions()
+                    if "Name" in d.metadata and "Version" in d.metadata
+                )
+            )
+        except (TypeError, OSError) as e:
+            logger.debug("Failed to compute package version hash: %s", e)
+            version_hash = 0
 
     plugins: list[ToolProgressPlugin] = []
 

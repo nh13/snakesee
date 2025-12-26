@@ -12,7 +12,6 @@ from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 
 from snakesee.models import RuleTimingStats
 
@@ -175,12 +174,6 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         profile: The profile to save.
         path: Path to write the profile to.
     """
-
-    def serialize(obj: object) -> dict[str, Any]:
-        if isinstance(obj, RuleProfile):
-            return asdict(obj)
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
     data = {
         "version": profile.version,
         "created": profile.created,
@@ -191,7 +184,7 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
 
     # Write atomically: write to temp file, then rename
     # This prevents corruption if the program crashes mid-write
-    content = json.dumps(data, indent=2, default=serialize)
+    content = json.dumps(data, indent=2)
     fd, temp_path = tempfile.mkstemp(
         suffix=".tmp",
         prefix=path.name,

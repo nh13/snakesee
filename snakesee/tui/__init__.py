@@ -37,11 +37,11 @@ from snakesee.tui.monitor import LayoutMode
 from snakesee.tui.monitor import WorkflowMonitorTUI
 
 __all__ = [
-    "WorkflowMonitorTUI",
-    "LayoutMode",
+    "DEFAULT_REFRESH_RATE",
     "FG_BLUE",
     "FG_GREEN",
-    "DEFAULT_REFRESH_RATE",
-    "MIN_REFRESH_RATE",
+    "LayoutMode",
     "MAX_REFRESH_RATE",
+    "MIN_REFRESH_RATE",
+    "WorkflowMonitorTUI",
 ]

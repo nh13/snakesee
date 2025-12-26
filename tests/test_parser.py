@@ -1854,7 +1854,7 @@ class TestParserPropertyBased:
         duration=st.floats(min_value=0.1, max_value=1e6, allow_nan=False),
     )
     def test_metadata_parsing_properties(
-        self, rule: str, starttime: float, duration: float, tmp_path: Path
+        self, rule: str, starttime: float, duration: float
     ) -> None:
         """Metadata parsing handles valid data correctly."""
         import tempfile

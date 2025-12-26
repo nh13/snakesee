@@ -355,7 +355,12 @@ def parse_running_jobs_from_log(
 
     # Jobs that started but haven't finished are running
     running: list[JobInfo] = []
-    log_mtime = log_path.stat().st_mtime if log_path.exists() else None
+    # Use try/except to avoid TOCTOU race between exists() and stat()
+    log_mtime: float | None = None
+    try:
+        log_mtime = log_path.stat().st_mtime
+    except OSError:
+        pass
 
     for jobid, (rule, _line_num, wildcards, threads) in started_jobs.items():
         if jobid not in finished_jobids:

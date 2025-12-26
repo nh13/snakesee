@@ -162,8 +162,9 @@ def _check_plugin_dir_security(plugin_dir: Path) -> None:
         )
 
     # Security: warn if plugin directory is world-writable
+    # Use lstat() for consistency with symlink check above
     try:
-        dir_mode = plugin_dir.stat().st_mode
+        dir_mode = plugin_dir.lstat().st_mode
         if dir_mode & stat.S_IWOTH:
             logger.warning(
                 "Plugin directory is world-writable: %s. This is a security risk.",

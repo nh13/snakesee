@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import functools
+import inspect
 from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
@@ -50,8 +51,6 @@ def validate_positive(*param_names: str) -> Callable[[Callable[P, R]], Callable[
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            import inspect
-
             sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
@@ -93,8 +92,6 @@ def validate_non_negative(*param_names: str) -> Callable[[Callable[P, R]], Calla
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            import inspect
-
             sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
@@ -136,8 +133,6 @@ def validate_not_empty(*param_names: str) -> Callable[[Callable[P, R]], Callable
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            import inspect
-
             sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
@@ -185,8 +180,6 @@ def validate_in_range(
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            import inspect
-
             sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()

@@ -74,7 +74,12 @@ class PendingRuleInferrer:
         pending_count: int,
         current_rules: set[str] | None,
     ) -> dict[str, int]:
-        """Infer pending distribution proportionally to completed jobs."""
+        """Infer pending distribution proportionally to completed jobs.
+
+        Note: Due to rounding, the sum of returned values may not exactly
+        equal pending_count. This is expected and the estimation handles
+        this gracefully.
+        """
         if not completed_by_rule:
             return {}
 

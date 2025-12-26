@@ -198,7 +198,8 @@ class WorkflowPaths:
         """
         if not _cached_exists(self.log_dir):
             return None
-        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if _cached_exists(p)]
+        # Files from glob already exist at time of iteration; no need to re-check
+        logs = list(self.log_dir.glob(LOG_GLOB_PATTERN))
         if not logs:
             return None
         logs.sort(key=safe_mtime)
@@ -212,7 +213,8 @@ class WorkflowPaths:
         """
         if not _cached_exists(self.log_dir):
             return []
-        logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if _cached_exists(p)]
+        # Files from glob already exist at time of iteration; no need to re-check
+        logs = list(self.log_dir.glob(LOG_GLOB_PATTERN))
         logs.sort(key=safe_mtime)
         return logs
 
@@ -323,12 +325,11 @@ class WorkflowPaths:
         search_paths.extend(self._search_log_dir(log_dir, rule, wildcards))
 
         # Sort by modification time (newest first) and return first match
+        # is_file() already confirms existence, no need for additional exists check
         existing_logs = [p for p in search_paths if p.is_file()]
         if existing_logs:
             existing_logs.sort(key=safe_mtime, reverse=True)
-            for log in existing_logs:
-                if _cached_exists(log):
-                    return log
+            return existing_logs[0]
 
         return None
 
