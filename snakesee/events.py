@@ -34,7 +34,7 @@ class EventType(str, Enum):
     PROGRESS = "progress"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnakeseeEvent:
     """A single event from the logger plugin.
 
