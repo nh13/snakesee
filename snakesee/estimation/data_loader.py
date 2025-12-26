@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from snakesee.constants import MAX_EVENTS_LINE_LENGTH
 from snakesee.parser import parse_metadata_files_full
 
 if TYPE_CHECKING:
@@ -94,6 +95,15 @@ class HistoricalDataLoader:
             with open(events_file, "r") as f:
                 for line in f:
                     if not line.strip():
+                        continue
+
+                    # Skip excessively long lines to prevent memory issues
+                    if len(line) > MAX_EVENTS_LINE_LENGTH:
+                        logger.debug(
+                            "Skipping oversized line in events file: %d bytes (max %d)",
+                            len(line),
+                            MAX_EVENTS_LINE_LENGTH,
+                        )
                         continue
 
                     try:

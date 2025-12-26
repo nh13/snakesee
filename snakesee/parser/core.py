@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from snakesee.constants import STALE_WORKFLOW_THRESHOLD_SECONDS
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
 from snakesee.models import WildcardTimingStats
@@ -33,9 +34,6 @@ if TYPE_CHECKING:
     from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
-
-# Default threshold for considering a workflow stale/dead (30 minutes)
-STALE_WORKFLOW_THRESHOLD_SECONDS: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -746,8 +744,8 @@ def parse_incomplete_jobs(
                 try:
                     decoded = base64.b64decode(marker.name).decode("utf-8")
                     output_file = Path(decoded)
-                except (ValueError, UnicodeDecodeError):
-                    pass  # Keep output_file as None if decoding fails
+                except (ValueError, UnicodeDecodeError) as e:
+                    logger.debug("Failed to decode base64 marker filename %s: %s", marker.name, e)
 
                 # The marker's mtime is approximately when the job started
                 yield JobInfo(

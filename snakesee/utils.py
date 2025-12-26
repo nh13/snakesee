@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 
+from snakesee.constants import MAX_METADATA_FILE_SIZE
+
 if TYPE_CHECKING:
     from snakesee.types import ProgressCallback
 
@@ -76,6 +78,17 @@ def iterate_metadata_files(
             progress_callback(i + 1, total)
 
         try:
+            # Check file size before parsing to prevent DoS from large files
+            file_size = meta_file.stat().st_size
+            if file_size > MAX_METADATA_FILE_SIZE:
+                logger.debug(
+                    "Skipping oversized metadata file %s: %d bytes (max %d)",
+                    meta_file,
+                    file_size,
+                    MAX_METADATA_FILE_SIZE,
+                )
+                continue
+
             data = json.loads(meta_file.read_text())
             yield meta_file, data
         except json.JSONDecodeError as e:
