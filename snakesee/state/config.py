@@ -54,6 +54,9 @@ class ConfidenceWeights:
         recency: Weight for data recency.
         consistency: Weight for recent run consistency.
         data_coverage: Weight for fraction of rules with data.
+
+    Raises:
+        ValueError: If weights do not sum to 1.0.
     """
 
     sample_size: float = 0.4
@@ -128,6 +131,10 @@ class EstimationConfig:
         high_variance_cv: Coefficient of variation threshold for "high variance".
         default_global_mean: Fallback duration when no data available.
         parallelism_max: Maximum effective parallelism for estimation.
+
+    Raises:
+        ValueError: If any parameter is invalid (e.g., non-positive half_life,
+            parallelism_max < parallelism_min, etc.).
     """
 
     weighting_strategy: WeightingStrategy = "index"

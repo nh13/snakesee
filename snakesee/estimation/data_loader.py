@@ -2,7 +2,6 @@
 
 import json
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +9,7 @@ from snakesee.parser import parse_metadata_files_full
 
 if TYPE_CHECKING:
     from snakesee.state.rule_registry import RuleRegistry
+    from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class HistoricalDataLoader:
     def load_from_metadata(
         self,
         metadata_dir: Path,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: "ProgressCallback | None" = None,
     ) -> None:
         """Load historical execution times from .snakemake/metadata/.
 
