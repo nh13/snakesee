@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
+
+if TYPE_CHECKING:
+    from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ def safe_mtime(path: Path) -> float:
 
 def iterate_metadata_files(
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Iterator[tuple[Path, dict[str, Any]]]:
     """Iterate metadata files with optional progress reporting.
 

@@ -3,11 +3,14 @@
 import logging
 import sys
 import time
-from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
+
+if TYPE_CHECKING:
+    from snakesee.types import ProgressCallback
 
 from rich.console import Console
 from rich.console import Group
@@ -202,7 +205,8 @@ class WorkflowMonitorTUI:
         self._cached_log_mtime: float = 0
 
         # Tool progress cache (to avoid parsing job logs on every refresh)
-        self._tool_progress_cache: dict[str, tuple[float, ToolProgress | None]] = {}
+        # Cache stores: (cached_time, file_mtime, progress) - invalidates if file changes
+        self._tool_progress_cache: dict[str, tuple[float, float, ToolProgress | None]] = {}
         self._tool_progress_cache_ttl: float = 5.0  # seconds
 
         # Event reader for real-time events from logger plugin
@@ -346,7 +350,7 @@ class WorkflowMonitorTUI:
     def _init_thread_stats_from_log(
         self,
         log_paths: list[Path] | None = None,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: "ProgressCallback | None" = None,
     ) -> None:
         """Initialize thread stats from all log files (metadata doesn't have threads).
 
@@ -1395,20 +1399,26 @@ class WorkflowMonitorTUI:
         cache_key = job.job_id if job.job_id else str(job.log_file)
         now = time.time()
 
-        # Check cache validity
-        if cache_key in self._tool_progress_cache:
-            cached_time, cached_progress = self._tool_progress_cache[cache_key]
-            if now - cached_time < self._tool_progress_cache_ttl:
-                return cached_progress
-
         log_path = self.workflow_dir / job.log_file
         if not log_path.exists():
-            self._tool_progress_cache[cache_key] = (now, None)
+            self._tool_progress_cache[cache_key] = (now, 0.0, None)
             return None
 
-        # Parse and cache the result
+        # Get current file mtime for cache invalidation
+        try:
+            current_mtime = log_path.stat().st_mtime
+        except OSError:
+            return None
+
+        # Check cache validity - must be within TTL AND file unchanged
+        if cache_key in self._tool_progress_cache:
+            cached_time, cached_mtime, cached_progress = self._tool_progress_cache[cache_key]
+            if now - cached_time < self._tool_progress_cache_ttl and cached_mtime >= current_mtime:
+                return cached_progress
+
+        # Parse and cache the result with current mtime
         progress = parse_tool_progress(job.rule, log_path)
-        self._tool_progress_cache[cache_key] = (now, progress)
+        self._tool_progress_cache[cache_key] = (now, current_mtime, progress)
         return progress
 
     def _cleanup_tool_progress_cache(self) -> None:
@@ -1422,7 +1432,7 @@ class WorkflowMonitorTUI:
         max_age = self._tool_progress_cache_ttl * 10
         expired = [
             key
-            for key, (cached_time, _) in self._tool_progress_cache.items()
+            for key, (cached_time, _, _) in self._tool_progress_cache.items()
             if now - cached_time > max_age
         ]
         for key in expired:

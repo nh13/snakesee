@@ -6,10 +6,10 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
@@ -18,6 +18,9 @@ from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 from snakesee.parser.log_reader import IncrementalLogReader
 from snakesee.utils import iterate_metadata_files
+
+if TYPE_CHECKING:
+    from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +362,7 @@ def _calculate_input_size(input_files: list[str] | None) -> int | None:
 
 def parse_metadata_files(
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Iterator[JobInfo]:
     """
     Parse completed job information from Snakemake metadata files.
@@ -400,7 +403,7 @@ def parse_metadata_files(
 
 def parse_metadata_files_full(
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Iterator[MetadataRecord]:
     """
     Parse all metadata from Snakemake metadata files in a single pass.
@@ -452,7 +455,7 @@ def parse_metadata_files_full(
 
 def collect_rule_code_hashes(
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, set[str]]:
     """
     Collect code hashes for each rule from metadata files.
@@ -989,7 +992,7 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
 
 def collect_rule_timing_stats(
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, RuleTimingStats]:
     """
     Collect historical timing statistics per rule from metadata.
@@ -1041,7 +1044,7 @@ def collect_rule_timing_stats(
 
 def collect_wildcard_timing_stats(  # noqa: C901
     metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, dict[str, WildcardTimingStats]]:
     """
     Collect timing statistics per rule, conditioned on wildcards.

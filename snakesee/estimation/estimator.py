@@ -1,7 +1,6 @@
 """Time estimation for Snakemake workflow progress."""
 
 import math
-from collections.abc import Callable
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING
@@ -21,6 +20,7 @@ from snakesee.state.config import EstimationConfig
 
 if TYPE_CHECKING:
     from snakesee.state.rule_registry import RuleRegistry
+    from snakesee.types import ProgressCallback
 
 # Backward compatibility alias
 _levenshtein_distance = levenshtein_distance
@@ -141,7 +141,7 @@ class TimeEstimator:
     def load_from_metadata(
         self,
         metadata_dir: Path,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: "ProgressCallback | None" = None,
     ) -> None:
         """
         Load historical execution times from .snakemake/metadata/.
@@ -506,19 +506,78 @@ class TimeEstimator:
             method="simple",
         )
 
-    def _estimate_weighted(  # noqa: C901
+    def _estimate_parallelism(self, progress: WorkflowProgress, global_mean: float) -> float:
+        """Estimate effective parallelism from workflow progress.
+
+        Uses historical completion rate when available, otherwise falls back
+        to current running job count with conservative clamping.
+
+        Args:
+            progress: Current workflow progress.
+            global_mean: Global mean job duration.
+
+        Returns:
+            Estimated parallelism factor (>= 1.0).
+        """
+        elapsed = progress.elapsed_seconds
+        if elapsed and elapsed > 0 and progress.completed_jobs > 0:
+            # Infer historical parallelism from completion rate
+            historical_rate = progress.completed_jobs / elapsed
+            if historical_rate > 0:
+                avg_job_time = global_mean
+                historical_parallelism = historical_rate * avg_job_time
+                # Clamp to reasonable range and use sqrt for conservative adjustment
+                return max(1.0, min(8.0, math.sqrt(historical_parallelism)))
+            return 1.0
+        # Fall back to current running jobs but cap the effect
+        return max(1.0, min(4.0, math.sqrt(len(progress.running_jobs))))
+
+    def _calculate_confidence_scores(
+        self,
+        rule_completed: dict[str, int],
+        effective_stats: dict[str, RuleTimingStats],
+    ) -> tuple[float, float, float, float]:
+        """Calculate confidence component scores.
+
+        Args:
+            rule_completed: Dict of rule name to completion count.
+            effective_stats: Dict of rule name to timing stats.
+
+        Returns:
+            Tuple of (sample_confidence, avg_recency, avg_consistency, data_coverage).
+        """
+        data_coverage = len(rule_completed) / max(1, len(effective_stats))
+        total_samples = sum(s.count for s in effective_stats.values())
+        sample_confidence = min(1.0, total_samples / self.config.min_samples_for_confidence)
+
+        # Calculate average recency and consistency across rules with data
+        recency_scores: list[float] = []
+        consistency_scores: list[float] = []
+        for rule in rule_completed:
+            if rule in effective_stats:
+                stats = effective_stats[rule]
+                recency_scores.append(self._get_recency_factor(stats))
+                consistency_scores.append(stats.recent_consistency())
+
+        avg_recency = sum(recency_scores) / len(recency_scores) if recency_scores else 0.5
+        avg_consistency = (
+            sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.5
+        )
+
+        return sample_confidence, avg_recency, avg_consistency, data_coverage
+
+    def _estimate_weighted(
         self,
         progress: WorkflowProgress,
-        running_elapsed: dict[str, float],
+        running_elapsed: dict[str, float],  # noqa: ARG002 - kept for API compatibility
     ) -> TimeEstimate:
-        """
-        Weighted estimation using per-rule historical timing.
+        """Weighted estimation using per-rule historical timing.
 
         Uses exponentially weighted moving averages favoring recent executions.
 
         Args:
             progress: Current workflow progress.
-            running_elapsed: Dict mapping rule names to elapsed seconds.
+            running_elapsed: Dict mapping rule names to elapsed seconds (unused, for API compat).
 
         Returns:
             TimeEstimate using weighted historical data.
@@ -586,24 +645,8 @@ class TimeEstimator:
             total_expected += remaining
             total_variance += variance
 
-        # Estimate parallelism from historical completion rate (more stable than current)
-        # Use a conservative parallelism estimate based on completed jobs and elapsed time
-        elapsed = progress.elapsed_seconds
-        if elapsed and elapsed > 0 and progress.completed_jobs > 0:
-            # Infer historical parallelism from completion rate
-            historical_rate = progress.completed_jobs / elapsed
-            if historical_rate > 0:
-                avg_job_time = global_mean
-                historical_parallelism = historical_rate * avg_job_time
-                # Clamp to reasonable range and use sqrt for conservative adjustment
-                parallelism = max(1.0, min(8.0, math.sqrt(historical_parallelism)))
-            else:
-                parallelism = 1.0
-        else:
-            # Fall back to current running jobs but cap the effect
-            parallelism = max(1.0, min(4.0, math.sqrt(len(progress.running_jobs))))
-
-        # Apply parallelism adjustment conservatively (use sqrt to dampen swings)
+        # Estimate parallelism and apply adjustment
+        parallelism = self._estimate_parallelism(progress, global_mean)
         effective_time = total_expected / parallelism
 
         # Calculate confidence bounds
@@ -612,29 +655,13 @@ class TimeEstimator:
         lower = max(0, effective_time - 2 * std_dev)
         upper = effective_time + 2 * std_dev
 
-        # Confidence based on data quality, recency, and consistency
-        data_coverage = len(rule_completed) / max(1, len(effective_stats))
-        total_samples = sum(s.count for s in effective_stats.values())
-        sample_confidence = min(1.0, total_samples / self.config.min_samples_for_confidence)
-
-        # Calculate average recency and consistency across rules with data
-        recency_scores: list[float] = []
-        consistency_scores: list[float] = []
-        for rule in rule_completed:
-            if rule in effective_stats:
-                stats = effective_stats[rule]
-                recency_scores.append(self._get_recency_factor(stats))
-                consistency_scores.append(stats.recent_consistency())
-
-        avg_recency = sum(recency_scores) / len(recency_scores) if recency_scores else 0.5
-        avg_consistency = (
-            sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.5
+        # Calculate confidence from multiple factors
+        sample_conf, avg_recency, avg_consistency, data_coverage = (
+            self._calculate_confidence_scores(rule_completed, effective_stats)
         )
-
-        # Combine factors using configured weights
         weights = self.config.confidence_weights
         base_confidence = (
-            weights.sample_size * sample_confidence
+            weights.sample_size * sample_conf
             + weights.recency * avg_recency
             + weights.consistency * avg_consistency
             + weights.data_coverage * data_coverage
