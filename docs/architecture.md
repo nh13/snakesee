@@ -12,13 +12,16 @@ snakesee/
 ├── events.py            # Event file reading and streaming
 ├── exceptions.py        # Application-specific exceptions
 ├── models.py            # Core data models (JobInfo, WorkflowProgress, etc.)
-├── tui.py               # Terminal user interface (Rich-based)
 ├── estimator.py         # Time estimation orchestration
 ├── formatting.py        # Duration and time formatting utilities
 ├── profile.py           # Portable timing profile storage
 ├── utils.py             # Shared utility functions
 ├── validation.py        # State comparison utilities
 ├── variance.py          # Variance calculation for confidence
+│
+├── tui/                 # Terminal user interface (Rich-based)
+│   ├── __init__.py      # TUI module exports
+│   └── monitor.py       # WorkflowMonitorTUI class
 │
 ├── parser/              # Log parsing and metadata extraction
 │   ├── __init__.py      # Public parser API
@@ -157,7 +160,7 @@ Minimum coverage requirement: 65%
 ## Future Refactoring Notes
 
 ### parser/core.py Split (Recommended)
-The `parser/core.py` (1539 lines) could be split into focused modules:
+The `parser/core.py` could be split into focused modules:
 
 1. **parser/metadata.py**: Metadata file parsing
    - `MetadataRecord`, `parse_metadata_files`, `parse_metadata_files_full`
@@ -178,8 +181,8 @@ The `parser/core.py` (1539 lines) could be split into focused modules:
 The `parser/__init__.py` already acts as a facade, so this split would be
 backward-compatible.
 
-### tui.py Split (Recommended)
-The `tui.py` (2620 lines) could be split using MVC pattern:
+### tui/monitor.py Split (Optional)
+The `tui/monitor.py` could be further split using MVC pattern:
 
 1. **tui/model.py**: State and data management
 2. **tui/view.py**: Rich console rendering
