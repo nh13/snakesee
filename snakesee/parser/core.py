@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,12 +16,26 @@ from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
 from snakesee.parser.log_reader import IncrementalLogReader
+
+# Import regex patterns from single source of truth
+from snakesee.parser.patterns import ERROR_IN_RULE_PATTERN
+from snakesee.parser.patterns import FINISHED_JOB_PATTERN
+from snakesee.parser.patterns import JOBID_PATTERN
+from snakesee.parser.patterns import LOG_PATTERN
+from snakesee.parser.patterns import PROGRESS_PATTERN
+from snakesee.parser.patterns import RULE_START_PATTERN
+from snakesee.parser.patterns import THREADS_PATTERN
+from snakesee.parser.patterns import TIMESTAMP_PATTERN
+from snakesee.parser.patterns import WILDCARDS_PATTERN
 from snakesee.utils import iterate_metadata_files
 
 if TYPE_CHECKING:
     from snakesee.types import ProgressCallback
 
 logger = logging.getLogger(__name__)
+
+# Default threshold for considering a workflow stale/dead (30 minutes)
+STALE_WORKFLOW_THRESHOLD_SECONDS: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -56,39 +69,6 @@ class MetadataRecord:
             wildcards=self.wildcards,
             input_size=self.input_size,
         )
-
-
-# Pattern: "15 of 50 steps (30%) done"
-PROGRESS_PATTERN = re.compile(r"(\d+) of (\d+) steps \((\d+(?:\.\d+)?)%\) done")
-
-# Pattern for rule start: "rule align:" or "localrule all:"
-RULE_START_PATTERN = re.compile(r"(?:local)?rule (\w+):")
-
-# Pattern for job ID in log: "    jobid: 5"
-JOBID_PATTERN = re.compile(r"\s+jobid:\s*(\d+)")
-
-# Pattern for finished job:
-# - Old format: "Finished job 5." or "[date] Finished job 5."
-# - Snakemake 9.x format: "Finished jobid: 5" or "Finished jobid: 5 (Rule: name)"
-FINISHED_JOB_PATTERN = re.compile(r"Finished (?:job |jobid:\s*)(\d+)")
-
-# Pattern for error in job: "Error in rule X" or job failure indicators
-ERROR_PATTERN = re.compile(r"Error in rule (\w+):|Error executing rule|RuleException")
-
-# Pattern for "Error in rule X:" specifically (to capture rule name)
-ERROR_IN_RULE_PATTERN = re.compile(r"Error in rule (\w+):")
-
-# Pattern for timestamp lines: "[Mon Dec 15 22:34:30 2025]"
-TIMESTAMP_PATTERN = re.compile(r"\[(\w{3} \w{3} +\d+ \d+:\d+:\d+ \d+)\]")
-
-# Pattern for wildcards line: "    wildcards: sample=A, batch=1"
-WILDCARDS_PATTERN = re.compile(r"\s+wildcards:\s*(.+)")
-
-# Pattern for threads line: "    threads: 4"
-THREADS_PATTERN = re.compile(r"\s+threads:\s*(\d+)")
-
-# Pattern for log line: "    log: logs/sample.log"
-LOG_PATTERN = re.compile(r"\s+log:\s*(.+)")
 
 
 def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
@@ -295,7 +275,11 @@ def parse_job_stats_counts_from_log(log_path: Path) -> dict[str, int]:
     return counts
 
 
-def parse_progress_from_log(log_path: Path) -> tuple[int, int]:
+def parse_progress_from_log(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> tuple[int, int]:
     """
     Parse current progress from a snakemake log file.
 
@@ -303,13 +287,15 @@ def parse_progress_from_log(log_path: Path) -> tuple[int, int]:
 
     Args:
         log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
 
     Returns:
         Tuple of (completed_count, total_count). Returns (0, 0) if no progress found.
     """
     completed, total = 0, 0
     try:
-        for line in log_path.read_text().splitlines():
+        lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
+        for line in lines:
             if match := PROGRESS_PATTERN.search(line):
                 completed = int(match.group(1))
                 total = int(match.group(2))
@@ -528,7 +514,11 @@ def collect_rule_code_hashes(
     return hash_to_rules
 
 
-def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
+def parse_running_jobs_from_log(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> list[JobInfo]:
     """
     Parse currently running jobs by analyzing the log file.
 
@@ -536,6 +526,7 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
 
     Args:
         log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
 
     Returns:
         List of JobInfo for jobs that appear to be running.
@@ -553,7 +544,7 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
     current_log_path: str | None = None
 
     try:
-        lines = log_path.read_text().splitlines()
+        lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line_num, line in enumerate(lines):
             # Track current rule being executed
             if match := RULE_START_PATTERN.match(line):
@@ -624,7 +615,11 @@ def parse_running_jobs_from_log(log_path: Path) -> list[JobInfo]:
     return running
 
 
-def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
+def parse_failed_jobs_from_log(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> list[JobInfo]:
     """
     Parse failed jobs from the snakemake log file.
 
@@ -633,6 +628,7 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
 
     Args:
         log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
 
     Returns:
         List of JobInfo for jobs that failed.
@@ -650,7 +646,7 @@ def parse_failed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     job_logs: dict[str, str] = {}
 
     try:
-        lines = log_path.read_text().splitlines()
+        lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
             # Track current rule
             if match := RULE_START_PATTERN.match(line):
@@ -775,23 +771,40 @@ def _parse_timestamp(timestamp_str: str) -> float | None:
         return None
 
 
-def _get_first_log_timestamp(log_path: Path) -> float | None:
+def _get_first_log_timestamp(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> float | None:
     """Extract the first timestamp from a snakemake log file.
 
     This provides a more accurate workflow start time than the file's ctime,
     since the log file may be created before jobs actually start.
+
+    Args:
+        log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
     """
     try:
-        with log_path.open() as f:
-            for line in f:
+        if _cached_lines is not None:
+            for line in _cached_lines:
                 if match := TIMESTAMP_PATTERN.match(line):
                     return _parse_timestamp(match.group(1))
+        else:
+            with log_path.open() as f:
+                for line in f:
+                    if match := TIMESTAMP_PATTERN.match(line):
+                        return _parse_timestamp(match.group(1))
     except OSError:
         pass
     return None
 
 
-def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
+def parse_completed_jobs_from_log(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> list[JobInfo]:
     """
     Parse completed jobs with timing from a snakemake log file.
 
@@ -801,6 +814,7 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
 
     Args:
         log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
 
     Returns:
         List of JobInfo for completed jobs with timing information.
@@ -819,7 +833,7 @@ def parse_completed_jobs_from_log(log_path: Path) -> list[JobInfo]:
     current_log_path: str | None = None
 
     try:
-        lines = log_path.read_text().splitlines()
+        lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
             # Check for timestamp
             if match := TIMESTAMP_PATTERN.match(line):
@@ -933,7 +947,10 @@ def parse_threads_from_log(log_path: Path) -> dict[str, int]:
     return threads_map
 
 
-def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) -> bool:
+def is_workflow_running(
+    snakemake_dir: Path,
+    stale_threshold: float = STALE_WORKFLOW_THRESHOLD_SECONDS,
+) -> bool:
     """
     Check if a workflow is currently running.
 
@@ -1165,12 +1182,22 @@ def _filter_completions_by_timeframe(
         return []  # Can't determine timeframe - return empty to avoid stale data
 
 
-def _augment_completions_with_threads(completions: list[JobInfo], log_path: Path) -> list[JobInfo]:
+def _augment_completions_with_threads(
+    completions: list[JobInfo],
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> list[JobInfo]:
     """Augment completions with threads from log parsing.
 
     Metadata completions don't have threads - match by rule + end_time.
+
+    Args:
+        completions: List of completed jobs to augment.
+        log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
     """
-    log_completions = parse_completed_jobs_from_log(log_path)
+    log_completions = parse_completed_jobs_from_log(log_path, _cached_lines=_cached_lines)
     # Build lookup: (rule, end_time_rounded) -> threads
     threads_lookup: dict[tuple[str, int], int] = {}
     for lc in log_completions:
@@ -1348,17 +1375,30 @@ def parse_workflow_state(
         log_reader.set_log_path(log_path)
         log_reader.read_new_lines()
 
+    # Cache log file lines to avoid repeated reads when not using log_reader
+    # This is a significant performance optimization for large log files
+    cached_lines: list[str] | None = None
+    if log_reader is None and log_path is not None:
+        try:
+            cached_lines = log_path.read_text().splitlines()
+        except OSError:
+            cached_lines = []
+
     # Parse progress from log file (or use reader state)
     if log_reader is not None and log_path is not None:
         completed, total = log_reader.progress
     else:
-        completed, total = (0, 0) if log_path is None else parse_progress_from_log(log_path)
+        completed, total = (
+            (0, 0)
+            if log_path is None
+            else parse_progress_from_log(log_path, _cached_lines=cached_lines)
+        )
 
     # Get workflow start time for filtering incomplete markers
     # Prefer the first timestamp in the log (when jobs actually started) over file ctime
     start_time: float | None = None
     if log_path is not None:
-        start_time = _get_first_log_timestamp(log_path)
+        start_time = _get_first_log_timestamp(log_path, _cached_lines=cached_lines)
         if start_time is None:
             # Fall back to file ctime if no timestamps in log yet
             try:
@@ -1375,7 +1415,9 @@ def parse_workflow_state(
 
     # Augment completions with threads from log (metadata doesn't have threads)
     if log_path is not None and completions:
-        completions = _augment_completions_with_threads(completions, log_path)
+        completions = _augment_completions_with_threads(
+            completions, log_path, _cached_lines=cached_lines
+        )
 
     completions.sort(key=lambda j: j.end_time or 0, reverse=True)
 
@@ -1387,8 +1429,8 @@ def parse_workflow_state(
             running = log_reader.running_jobs
             failed_list = log_reader.failed_jobs
         else:
-            running = parse_running_jobs_from_log(log_path)
-            failed_list = parse_failed_jobs_from_log(log_path)
+            running = parse_running_jobs_from_log(log_path, _cached_lines=cached_lines)
+            failed_list = parse_failed_jobs_from_log(log_path, _cached_lines=cached_lines)
 
     # Check for incomplete markers (jobs that were in progress when workflow was interrupted)
     incomplete_dir = snakemake_dir / "incomplete"

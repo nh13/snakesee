@@ -15,17 +15,8 @@ Related modules:
     snakesee.validation: Validates parsed state against events
 """
 
+# Re-export regex patterns from single source of truth
 # Re-export new modular components
-from snakesee.parser.core import ERROR_IN_RULE_PATTERN
-from snakesee.parser.core import ERROR_PATTERN
-from snakesee.parser.core import FINISHED_JOB_PATTERN
-from snakesee.parser.core import JOBID_PATTERN
-from snakesee.parser.core import LOG_PATTERN
-from snakesee.parser.core import PROGRESS_PATTERN
-from snakesee.parser.core import RULE_START_PATTERN
-from snakesee.parser.core import THREADS_PATTERN
-from snakesee.parser.core import TIMESTAMP_PATTERN
-from snakesee.parser.core import WILDCARDS_PATTERN
 from snakesee.parser.core import MetadataRecord
 from snakesee.parser.core import _augment_completions_with_threads
 from snakesee.parser.core import _parse_non_negative_int
@@ -61,6 +52,16 @@ from snakesee.parser.line_parser import ParseEvent
 from snakesee.parser.line_parser import ParseEventType
 from snakesee.parser.line_parser import ParsingContext
 from snakesee.parser.log_reader import IncrementalLogReader
+from snakesee.parser.patterns import ERROR_IN_RULE_PATTERN
+from snakesee.parser.patterns import ERROR_PATTERN
+from snakesee.parser.patterns import FINISHED_JOB_PATTERN
+from snakesee.parser.patterns import JOBID_PATTERN
+from snakesee.parser.patterns import LOG_PATTERN
+from snakesee.parser.patterns import PROGRESS_PATTERN
+from snakesee.parser.patterns import RULE_START_PATTERN
+from snakesee.parser.patterns import THREADS_PATTERN
+from snakesee.parser.patterns import TIMESTAMP_PATTERN
+from snakesee.parser.patterns import WILDCARDS_PATTERN
 
 __all__ = [
     # New modular components

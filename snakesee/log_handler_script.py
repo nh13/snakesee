@@ -26,6 +26,7 @@ import fcntl
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ EVENT_FILE_NAME = ".snakesee_events.jsonl"
 JSON_SEPARATORS: tuple[str, str] = (",", ":")
 
 # Global state for tracking job start times and metadata
+# Protected by _state_lock for thread safety
+_state_lock = threading.Lock()
 _job_start_times: dict[int, float] = {}
 _job_rules: dict[int, str] = {}
 _job_wildcards: dict[int, dict[str, str]] = {}
@@ -52,13 +55,25 @@ _workflow_lock_fd: int | None = None  # File descriptor for workflow-level locki
 
 def _close_event_file() -> None:
     """Close the event file handle on exit."""
-    global _event_file
+    global _event_file, _workflow_lock_fd
     if _event_file is not None:
         try:
             _event_file.close()
         except OSError as e:
             logger.debug("Failed to close event file: %s", e)
         _event_file = None
+
+    # Also close the workflow lock FD if open
+    if _workflow_lock_fd is not None:
+        try:
+            fcntl.flock(_workflow_lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(_workflow_lock_fd)
+        except OSError as e:
+            logger.debug("Failed to close workflow lock: %s", e)
+        _workflow_lock_fd = None
 
 
 # Register cleanup on exit
@@ -100,8 +115,16 @@ def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> b
             time.sleep(0.01)
 
 
-def _write_event(event_data: dict[str, Any]) -> None:
-    """Write an event to the event file with proper locking."""
+# Maximum retries for event writing
+MAX_EVENT_WRITE_RETRIES: int = 3
+
+
+def _write_event(event_data: dict[str, Any], *, _retry_count: int = 0) -> None:
+    """Write an event to the event file with proper locking and retry logic.
+
+    Uses exponential backoff on lock acquisition failure, with up to
+    MAX_EVENT_WRITE_RETRIES attempts.
+    """
     f = _get_event_file()
     # Remove None values to reduce file size
     event_data = {k: v for k, v in event_data.items() if v is not None}
@@ -109,7 +132,22 @@ def _write_event(event_data: dict[str, Any]) -> None:
 
     fd = f.fileno()
     if not _acquire_lock_with_timeout(fd):
-        logger.warning("Failed to acquire event file lock within timeout, skipping event")
+        if _retry_count < MAX_EVENT_WRITE_RETRIES:
+            # Exponential backoff: 100ms, 200ms, 400ms
+            backoff = 0.1 * (2**_retry_count)
+            logger.debug(
+                "Lock acquisition failed, retrying in %.1fs (attempt %d/%d)",
+                backoff,
+                _retry_count + 1,
+                MAX_EVENT_WRITE_RETRIES,
+            )
+            time.sleep(backoff)
+            _write_event(event_data, _retry_count=_retry_count + 1)
+            return
+        logger.warning(
+            "Failed to acquire event file lock after %d attempts, event may be lost",
+            MAX_EVENT_WRITE_RETRIES,
+        )
         return
 
     try:
@@ -180,14 +218,15 @@ def _handle_job_info(msg: dict[str, Any], timestamp: float) -> None:
     threads = msg.get("threads")
     resources = _extract_resources(msg)
 
-    # Store for later correlation
+    # Store for later correlation (thread-safe)
     if jobid is not None:
-        _job_rules[jobid] = rule_name
-        if wildcards:
-            _job_wildcards[jobid] = wildcards
-        if threads is not None:
-            _job_threads[jobid] = threads
-        _job_start_times[jobid] = timestamp
+        with _state_lock:
+            _job_rules[jobid] = rule_name
+            if wildcards:
+                _job_wildcards[jobid] = wildcards
+            if threads is not None:
+                _job_threads[jobid] = threads
+            _job_start_times[jobid] = timestamp
 
     # Extract file lists
     input_files = None
@@ -237,18 +276,23 @@ def _handle_job_started(msg: dict[str, Any], timestamp: float) -> None:
     if jobid is None:
         return
 
-    # Only set start time if not already set by _handle_job_info
-    if jobid not in _job_start_times:
-        _job_start_times[jobid] = timestamp
+    # Thread-safe state access
+    with _state_lock:
+        # Only set start time if not already set by _handle_job_info
+        if jobid not in _job_start_times:
+            _job_start_times[jobid] = timestamp
+        rule_name = _job_rules.get(jobid)
+        wildcards = _job_wildcards.get(jobid)
+        threads = _job_threads.get(jobid)
 
     _write_event(
         {
             "event_type": "job_started",
             "timestamp": timestamp,
             "job_id": jobid,
-            "rule_name": _job_rules.get(jobid),
-            "wildcards": _job_wildcards.get(jobid),
-            "threads": _job_threads.get(jobid),
+            "rule_name": rule_name,
+            "wildcards": wildcards,
+            "threads": threads,
         }
     )
 
@@ -259,7 +303,13 @@ def _handle_job_finished(msg: dict[str, Any], timestamp: float) -> None:
     if jobid is None:
         return
 
-    start_time = _job_start_times.pop(jobid, None)
+    # Thread-safe state cleanup
+    with _state_lock:
+        start_time = _job_start_times.pop(jobid, None)
+        rule_name = _job_rules.pop(jobid, None)
+        wildcards = _job_wildcards.pop(jobid, None)
+        threads = _job_threads.pop(jobid, None)
+
     duration = timestamp - start_time if start_time else None
 
     _write_event(
@@ -267,9 +317,9 @@ def _handle_job_finished(msg: dict[str, Any], timestamp: float) -> None:
             "event_type": "job_finished",
             "timestamp": timestamp,
             "job_id": jobid,
-            "rule_name": _job_rules.pop(jobid, None),
-            "wildcards": _job_wildcards.pop(jobid, None),
-            "threads": _job_threads.pop(jobid, None),
+            "rule_name": rule_name,
+            "wildcards": wildcards,
+            "threads": threads,
             "duration": duration,
         }
     )
@@ -280,24 +330,24 @@ def _handle_job_error(msg: dict[str, Any], timestamp: float) -> None:
     jobid = msg.get("jobid")
     rule_name = msg.get("name") or msg.get("rule")
 
-    if rule_name is None and jobid is not None:
-        rule_name = _job_rules.get(jobid)
-
-    start_time = None
-    if jobid is not None:
-        start_time = _job_start_times.pop(jobid, None)
-    duration = timestamp - start_time if start_time else None
-
     error_msg = msg.get("msg") or msg.get("message")
     if error_msg is not None:
         error_msg = str(error_msg)
 
+    # Thread-safe state cleanup
+    start_time = None
     wildcards = None
     threads = None
     if jobid is not None:
-        wildcards = _job_wildcards.pop(jobid, None)
-        threads = _job_threads.pop(jobid, None)
-        _job_rules.pop(jobid, None)
+        with _state_lock:
+            if rule_name is None:
+                rule_name = _job_rules.get(jobid)
+            start_time = _job_start_times.pop(jobid, None)
+            wildcards = _job_wildcards.pop(jobid, None)
+            threads = _job_threads.pop(jobid, None)
+            _job_rules.pop(jobid, None)
+
+    duration = timestamp - start_time if start_time else None
 
     _write_event(
         {
@@ -345,10 +395,16 @@ def _ensure_workflow_started(timestamp: float) -> None:
     lock_path = Path.cwd() / ".snakesee_events.lock"
 
     # Acquire exclusive lock to make check-and-truncate atomic
+    lock_fd: int | None = None
     try:
-        _workflow_lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
-        if not _acquire_lock_with_timeout(_workflow_lock_fd, FILE_LOCK_TIMEOUT * 2):
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        if not _acquire_lock_with_timeout(lock_fd, FILE_LOCK_TIMEOUT * 2):
             logger.warning("Failed to acquire workflow lock within timeout")
+            # Close the FD to prevent leak on timeout
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
             return
 
         # Double-check after acquiring lock (another process may have initialized)
@@ -375,11 +431,17 @@ def _ensure_workflow_started(timestamp: float) -> None:
             }
         )
         _workflow_started_emitted = True
+        _workflow_lock_fd = lock_fd  # Store for later cleanup
+        lock_fd = None  # Prevent closing in finally since we're keeping it
     finally:
-        # Release lock but keep lock file for other processes
-        if _workflow_lock_fd is not None:
+        # Release and close lock if we still own it
+        if lock_fd is not None:
             try:
-                fcntl.flock(_workflow_lock_fd, fcntl.LOCK_UN)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
             except OSError:
                 pass
 

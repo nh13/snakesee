@@ -645,7 +645,7 @@ class TimeEstimate:
         if self.seconds_remaining == float("inf"):
             return "unknown"
 
-        expected_str = _format_duration(self.seconds_remaining)
+        expected_str = format_duration(self.seconds_remaining)
 
         # High confidence, narrow range: just show estimate
         if (
@@ -657,8 +657,8 @@ class TimeEstimate:
 
         # Medium confidence: show range
         if self.confidence > 0.4:
-            lower_str = _format_duration(max(0, self.lower_bound))
-            upper_str = _format_duration(self.upper_bound)
+            lower_str = format_duration(max(0, self.lower_bound))
+            upper_str = format_duration(self.upper_bound)
             return f"{lower_str} - {upper_str}"
 
         # Low confidence: show with caveat
@@ -734,23 +734,6 @@ class WorkflowProgress:
             - len(self.running_jobs)
             - len(self.incomplete_jobs_list),
         )
-
-
-def _format_duration(seconds: float) -> str:
-    """
-    Format seconds as human-readable duration.
-
-    Internal helper that delegates to the formatting module.
-
-    Args:
-        seconds: Duration in seconds.
-
-    Returns:
-        Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
-    """
-    from snakesee.formatting import format_duration as _fmt_duration
-
-    return _fmt_duration(seconds)
 
 
 def format_duration(seconds: float) -> str:
