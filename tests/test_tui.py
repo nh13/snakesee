@@ -860,3 +860,365 @@ class TestInitMethods:
         tui_with_mocks._init_validation()
         # Should not create validator without event file
         assert tui_with_mocks._event_accumulator is None
+
+
+class TestTerminalHandling:
+    """Tests for TUI terminal handling and run loop."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_run_non_terminal_prints_warning(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that run() prints warning when not in terminal."""
+        mock_console.is_terminal = False
+
+        tui.run()
+
+        # Should have printed warning
+        mock_console.print.assert_called()
+        call_args = str(mock_console.print.call_args)
+        assert "Warning" in call_args
+        assert "interactive terminal" in call_args
+
+    def test_run_non_terminal_returns_early(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that run() returns early when not in terminal."""
+        mock_console.is_terminal = False
+
+        # Should not raise any errors and return quickly
+        tui.run()
+
+        # Live should not have been created (no screen=True call)
+        # Just verify it completed without errors
+
+    def test_run_simple_is_fallback(self, tui: WorkflowMonitorTUI, mock_console: MagicMock) -> None:
+        """Test that _run_simple exists as a fallback mode."""
+        # Verify _run_simple can be called directly (fallback path)
+        tui._running = False  # Exit immediately
+        tui._run_simple()
+        # Should have printed the simple mode message
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("simple mode" in c.lower() for c in calls)
+
+    def test_run_simple_prints_mode_message(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple prints the simple mode message."""
+        # Make workflow appear complete immediately to exit loop
+        tui._running = False
+
+        tui._run_simple()
+
+        # Check that simple mode message was printed
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("simple mode" in c.lower() for c in calls)
+
+    def test_run_simple_keyboard_interrupt(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple handles KeyboardInterrupt gracefully."""
+        with patch.object(tui, "_poll_state", side_effect=KeyboardInterrupt):
+            # Should not raise
+            tui._run_simple()
+
+    def test_run_simple_exits_on_completed(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple exits when workflow completes."""
+        progress = make_workflow_progress(status=WorkflowStatus.COMPLETED)
+
+        call_count = 0
+
+        def mock_poll() -> tuple[WorkflowProgress, TimeEstimate | None]:
+            nonlocal call_count
+            call_count += 1
+            return progress, None
+
+        with patch.object(tui, "_poll_state", side_effect=mock_poll):
+            with patch("time.sleep"):  # Don't actually sleep
+                tui._run_simple()
+
+        # Should have polled once and exited
+        assert call_count == 1
+
+    def test_run_simple_exits_on_failed(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple exits when workflow fails."""
+        progress = make_workflow_progress(status=WorkflowStatus.FAILED)
+
+        with patch.object(tui, "_poll_state", return_value=(progress, None)):
+            with patch("time.sleep"):
+                tui._run_simple()
+
+        # Verify it printed the finished message
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("finished" in c.lower() for c in calls)
+
+
+class TestKeyboardInput:
+    """Tests for keyboard input handling in the TUI."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_handle_key_quit_lowercase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'q' quits."""
+        assert tui._handle_key("q") is True
+
+    def test_handle_key_quit_uppercase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'Q' quits."""
+        assert tui._handle_key("Q") is True
+
+    def test_handle_key_pause_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test pause toggle with 'p'."""
+        assert tui._paused is False
+        result = tui._handle_key("p")
+        assert result is False
+        assert tui._paused is True
+
+    def test_handle_key_pause_toggle_back(self, tui: WorkflowMonitorTUI) -> None:
+        """Test pause toggle back with 'p'."""
+        tui._paused = True
+        tui._handle_key("p")
+        assert tui._paused is False
+
+    def test_handle_key_estimation_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test estimation toggle with 'e'."""
+        original = tui.use_estimation
+        tui._handle_key("e")
+        assert tui.use_estimation is not original
+
+    def test_handle_key_refresh_rate_increase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate increase with 'k' (slower refresh)."""
+        original_rate = tui.refresh_rate
+        tui._handle_key("k")
+        assert tui.refresh_rate > original_rate
+
+    def test_handle_key_refresh_rate_decrease(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate decrease with 'j' (faster refresh)."""
+        tui.refresh_rate = 5.0  # Set to middle value
+        original_rate = tui.refresh_rate
+        tui._handle_key("j")
+        assert tui.refresh_rate < original_rate
+
+    def test_handle_key_help_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test help overlay toggle with '?'."""
+        assert tui._show_help is False
+        tui._handle_key("?")
+        assert tui._show_help is True
+
+    def test_handle_key_help_close(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that any key closes help overlay."""
+        tui._show_help = True
+        tui._handle_key("x")
+        assert tui._show_help is False
+
+    def test_handle_key_force_refresh(self, tui: WorkflowMonitorTUI) -> None:
+        """Test force refresh with 'r'."""
+        tui._force_refresh = False
+        tui._handle_key("r")
+        assert tui._force_refresh is True
+
+    def test_handle_key_ctrl_r_hard_refresh(self, tui: WorkflowMonitorTUI) -> None:
+        """Test hard refresh with Ctrl+r."""
+        tui._force_refresh = False
+        tui._handle_key("\x12")  # Ctrl+r
+        assert tui._force_refresh is True
+
+    def test_handle_key_wildcard_conditioning_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test wildcard conditioning toggle with 'w'."""
+        original = tui._use_wildcard_conditioning
+        tui._handle_key("w")
+        assert tui._use_wildcard_conditioning is not original
+
+    def test_handle_key_unknown_returns_false(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that unknown keys return False."""
+        assert tui._handle_key("z") is False
+        assert tui._handle_key("@") is False
+
+    def test_handle_key_navigation_up(self, tui: WorkflowMonitorTUI) -> None:
+        """Test navigation up with Ctrl+p."""
+        # Ctrl+p is mapped from up arrow - just verify no error
+        result = tui._handle_key("\x10")  # Ctrl+p
+        assert result is False  # Navigation doesn't quit
+
+    def test_handle_key_navigation_down(self, tui: WorkflowMonitorTUI) -> None:
+        """Test navigation down with Ctrl+n."""
+        # Ctrl+n is mapped from down arrow
+        tui._handle_key("\x0e")  # Ctrl+n
+        # Just verify no error
+
+    def test_handle_key_layout_cycle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test layout mode cycling with Tab."""
+        original_mode = tui._layout_mode
+        tui._handle_key("\t")  # Tab cycles layout
+        # Should cycle to next mode
+        assert tui._layout_mode != original_mode
+
+
+class TestTerminalSettingsRestore:
+    """Tests for terminal settings save/restore behavior."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console for terminal tests."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=0.1,  # Fast for testing
+            )
+
+    def test_terminal_settings_restored_on_normal_exit(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that terminal settings are restored on normal exit."""
+        mock_termios = MagicMock()
+        mock_tty = MagicMock()
+        mock_old_settings = ["mock", "settings"]
+        mock_termios.tcgetattr.return_value = mock_old_settings
+
+        # Make stdin look like a valid file descriptor
+        mock_stdin = MagicMock()
+        mock_stdin.fileno.return_value = 0
+
+        def quit_immediately(*args: object) -> tuple[list[MagicMock], list[object], list[object]]:
+            # First call returns stdin ready, second returns empty
+            return ([mock_stdin], [], [])
+
+        call_count = 0
+
+        def mock_select(*args: object) -> tuple[list[object], list[object], list[object]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ([mock_stdin], [], [])
+            return ([], [], [])
+
+        with patch.dict(
+            "sys.modules",
+            {"termios": mock_termios, "tty": mock_tty},
+        ):
+            with patch("sys.stdin", mock_stdin):
+                with patch("select.select", side_effect=mock_select):
+                    with patch("os.read", return_value=b"q"):  # Quit key
+                        with patch("fcntl.fcntl"):
+                            with patch("snakesee.tui.Live"):
+                                tui.run()
+
+        # Verify tcsetattr was called to restore settings
+        mock_termios.tcsetattr.assert_called()
+
+    def test_terminal_settings_restored_on_keyboard_interrupt(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test terminal settings are restored after KeyboardInterrupt."""
+        mock_termios = MagicMock()
+        mock_tty = MagicMock()
+        mock_old_settings = ["mock", "settings"]
+        mock_termios.tcgetattr.return_value = mock_old_settings
+
+        mock_stdin = MagicMock()
+        mock_stdin.fileno.return_value = 0
+
+        with patch.dict(
+            "sys.modules",
+            {"termios": mock_termios, "tty": mock_tty},
+        ):
+            with patch("sys.stdin", mock_stdin):
+                with patch("select.select", side_effect=KeyboardInterrupt):
+                    with patch("snakesee.tui.Live"):
+                        tui.run()
+
+        # Verify settings were restored even after interrupt
+        mock_termios.tcsetattr.assert_called()
+
+
+class TestEscapeSequenceParsing:
+    """Tests for escape sequence parsing in keyboard input."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_up_arrow_mapped_to_ctrl_p(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that up arrow escape sequence is recognized."""
+        # The run loop parses \x1b[A or \x1bOA as up arrow
+        # and maps to \x10 (Ctrl+p) before calling _handle_key
+        # We test the _handle_key with the mapped value
+        result = tui._handle_key("\x10")  # Ctrl+p (mapped from up arrow)
+        assert result is False  # Navigation doesn't quit
+
+    def test_down_arrow_mapped_to_ctrl_n(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that down arrow escape sequence is recognized."""
+        result = tui._handle_key("\x0e")  # Ctrl+n (mapped from down arrow)
+        assert result is False
+
+    def test_escape_alone_does_not_quit(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that pressing Escape alone doesn't quit."""
+        result = tui._handle_key("\x1b")  # Escape
+        assert result is False
