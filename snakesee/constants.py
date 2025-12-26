@@ -112,3 +112,7 @@ MAX_EVENTS_LINE_LENGTH: int = FILE_SIZE_LIMITS.max_events_line_length
 
 #: TTL for filesystem existence check cache in seconds
 EXISTS_CACHE_TTL: float = CACHE_CONFIG.exists_cache_ttl
+
+#: Minimum samples required for wildcard/combination conditioning
+#: Used by WildcardTimingStats and RuleRegistry for statistical validity
+MIN_SAMPLES_FOR_CONDITIONING: int = 3

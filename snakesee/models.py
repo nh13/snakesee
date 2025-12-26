@@ -470,7 +470,10 @@ class WildcardTimingStats:
     wildcard_key: str
     stats_by_value: dict[str, RuleTimingStats] = field(default_factory=dict)
 
-    MIN_SAMPLES_FOR_CONDITIONING: ClassVar[int] = 3  # Need at least 3 samples per value
+    # Import at class level to avoid circular imports, reference shared constant
+    MIN_SAMPLES_FOR_CONDITIONING: ClassVar[int] = (
+        3  # Synced with constants.MIN_SAMPLES_FOR_CONDITIONING
+    )
 
     def get_stats_for_value(self, value: str) -> RuleTimingStats | None:
         """
@@ -514,7 +517,12 @@ class WildcardTimingStats:
                 continue  # Need at least 2 different values to compare
 
             # Calculate between-group variance (variance of means)
-            means = [s.mean_duration for s in wts.stats_by_value.values() if s.count > 0]
+            # Only include values with enough samples for conditioning
+            means = [
+                s.mean_duration
+                for s in wts.stats_by_value.values()
+                if s.count >= WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING
+            ]
             if len(means) < 2:
                 continue
 
@@ -528,8 +536,9 @@ class WildcardTimingStats:
                     best_variance_ratio = variance_ratio
                     best_key = key
 
-        # Only return if variance ratio is meaningful (> 0.1)
-        return best_key if best_variance_ratio > 0.1 else None
+        # Only return if variance ratio is meaningful (> 0.05)
+        # This corresponds to ~22% coefficient of variation between groups
+        return best_key if best_variance_ratio > 0.05 else None
 
 
 @dataclass
@@ -667,6 +676,7 @@ class WorkflowProgress:
     incomplete_jobs_list: list[JobInfo] = field(default_factory=list)
     running_jobs: list[JobInfo] = field(default_factory=list)
     recent_completions: list[JobInfo] = field(default_factory=list)
+    pending_jobs_list: list[JobInfo] = field(default_factory=list)
     start_time: float | None = None
     log_file: Path | None = None
 

@@ -1875,3 +1875,109 @@ class TestParserPropertyBased:
             assert jobs[0].rule == rule
             assert jobs[0].start_time == starttime
             assert jobs[0].end_time == endtime
+
+
+class TestParseAllJobsFromLog:
+    """Tests for parse_all_jobs_from_log function."""
+
+    def test_parse_jobs_with_wildcards_and_threads(self, tmp_path: Path) -> None:
+        """Test parsing all scheduled jobs with wildcards and threads."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""Building DAG of jobs...
+rule align:
+    input: data/sample_A.fastq
+    output: results/sample_A.bam
+    wildcards: sample=A
+    threads: 4
+    jobid: 1
+
+rule align:
+    input: data/sample_B.fastq
+    output: results/sample_B.bam
+    wildcards: sample=B
+    threads: 8
+    jobid: 2
+
+[Mon Dec 16 10:00:00 2024]
+Finished job 1.
+""")
+        jobs = parse_all_jobs_from_log(log_file)
+
+        assert len(jobs) == 2
+        # Jobs should be parsed with their wildcards and threads
+        job1 = next(j for j in jobs if j.job_id == "1")
+        assert job1.rule == "align"
+        assert job1.wildcards == {"sample": "A"}
+        assert job1.threads == 4
+
+        job2 = next(j for j in jobs if j.job_id == "2")
+        assert job2.rule == "align"
+        assert job2.wildcards == {"sample": "B"}
+        assert job2.threads == 8
+
+    def test_parse_jobs_no_wildcards(self, tmp_path: Path) -> None:
+        """Test parsing jobs without wildcards."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule all:
+    input: results/final.txt
+    jobid: 0
+
+rule process:
+    input: data/input.txt
+    output: results/output.txt
+    threads: 2
+    jobid: 1
+""")
+        jobs = parse_all_jobs_from_log(log_file)
+
+        assert len(jobs) == 2
+        job0 = next(j for j in jobs if j.job_id == "0")
+        assert job0.rule == "all"
+        assert job0.wildcards is None
+        assert job0.threads is None
+
+        job1 = next(j for j in jobs if j.job_id == "1")
+        assert job1.rule == "process"
+        assert job1.threads == 2
+
+    def test_parse_jobs_empty_log(self, tmp_path: Path) -> None:
+        """Test parsing empty log file."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("")
+
+        jobs = parse_all_jobs_from_log(log_file)
+        assert jobs == []
+
+    def test_parse_jobs_nonexistent_file(self, tmp_path: Path) -> None:
+        """Test parsing nonexistent log file."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "nonexistent.log"
+
+        jobs = parse_all_jobs_from_log(log_file)
+        assert jobs == []
+
+    def test_parse_jobs_deduplicates_by_jobid(self, tmp_path: Path) -> None:
+        """Test that duplicate job IDs are deduplicated."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        # Same job ID appearing twice (e.g., from log restart)
+        log_file.write_text("""rule align:
+    wildcards: sample=A
+    jobid: 1
+
+rule align:
+    wildcards: sample=A
+    jobid: 1
+""")
+        jobs = parse_all_jobs_from_log(log_file)
+
+        assert len(jobs) == 1
+        assert jobs[0].job_id == "1"

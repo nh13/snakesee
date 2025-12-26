@@ -25,6 +25,7 @@ Related modules:
 # Import job parsing and workflow state from core
 from snakesee.parser.core import _augment_completions_with_threads
 from snakesee.parser.core import is_workflow_running
+from snakesee.parser.core import parse_all_jobs_from_log
 from snakesee.parser.core import parse_completed_jobs_from_log
 from snakesee.parser.core import parse_failed_jobs_from_log
 from snakesee.parser.core import parse_incomplete_jobs
@@ -95,6 +96,7 @@ __all__ = [
     "parse_progress_from_log",
     "parse_rules_from_log",
     "parse_running_jobs_from_log",
+    "parse_all_jobs_from_log",
     "parse_threads_from_log",
     "parse_workflow_state",
     # Patterns (for advanced usage)

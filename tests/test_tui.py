@@ -108,9 +108,9 @@ class TestWorkflowMonitorTUI:
 
     def test_handle_key_toggle_wildcard_conditioning(self, tui: WorkflowMonitorTUI) -> None:
         """Test wildcard conditioning toggle key handler."""
-        assert tui._use_wildcard_conditioning is False
+        assert tui._use_wildcard_conditioning is True  # Now enabled by default
         tui._handle_key("w")
-        assert tui._use_wildcard_conditioning is True
+        assert tui._use_wildcard_conditioning is False
 
     def test_handle_key_toggle_help(self, tui: WorkflowMonitorTUI) -> None:
         """Test help toggle key handler."""

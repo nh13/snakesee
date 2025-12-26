@@ -253,6 +253,35 @@ class TimeEstimator:
             half_life_logs=self.half_life_logs,
         )
 
+    def _try_combination_estimate(
+        self, rule: str, wildcards: dict[str, str] | None, threads: int | None
+    ) -> tuple[float, float] | None:
+        """Try to get estimate from full wildcard+threads combination stats.
+
+        This provides the most precise estimate when we have historical data
+        for the exact same combination of wildcards and threads.
+
+        Args:
+            rule: The rule name.
+            wildcards: Wildcard values for the job.
+            threads: Thread count for the job.
+
+        Returns:
+            Tuple of (expected_duration, variance) if combination stats available, None otherwise.
+        """
+        combo_stats = self._rule_registry.get_combination_stats(rule, wildcards, threads)
+        if combo_stats is None:
+            return None
+
+        combo_mean = self._get_weighted_mean(combo_stats)
+        # Very tight variance for exact combination match
+        combo_var = (
+            combo_stats.std_dev**2
+            if combo_stats.count > 1
+            else (combo_mean * self.config.variance.exact_wildcard_match) ** 2
+        )
+        return combo_mean, combo_var
+
     def _try_thread_estimate(self, rule: str, threads: int) -> tuple[float, float] | None:
         """Try to get estimate from thread-specific stats.
 
@@ -402,11 +431,12 @@ class TimeEstimator:
         Get expected duration and variance for a specific job.
 
         Uses a cascade of estimation strategies in priority order:
-        1. Thread-specific stats (highest priority for running job ETA)
-        2. Wildcard-specific stats (if enabled)
-        3. Rule-level stats (with optional size scaling)
-        4. Fuzzy matching for renamed/similar rules
-        5. Global mean fallback
+        1. Full combination stats (wildcards + threads together)
+        2. Thread-specific stats
+        3. Wildcard-specific stats (if enabled)
+        4. Rule-level stats (with optional size scaling)
+        5. Fuzzy matching for renamed/similar rules
+        6. Global mean fallback
 
         Args:
             rule: The rule name.
@@ -417,29 +447,36 @@ class TimeEstimator:
         Returns:
             Tuple of (expected_duration, variance).
         """
-        # Strategy 1: Thread-specific stats (highest priority for running job ETA)
+        # Strategy 1: Full combination stats (wildcards + threads together)
+        # This is the most precise when we have data for the exact combination
+        if self.use_wildcard_conditioning and (wildcards or threads is not None):
+            result = self._try_combination_estimate(rule, wildcards, threads)
+            if result is not None:
+                return result
+
+        # Strategy 2: Thread-specific stats
         if threads is not None:
             result = self._try_thread_estimate(rule, threads)
             if result is not None:
                 return result
 
-        # Strategy 2: Wildcard-specific stats (if enabled)
+        # Strategy 3: Wildcard-specific stats (if enabled)
         if self.use_wildcard_conditioning and wildcards:
             result = self._try_wildcard_estimate(rule, wildcards)
             if result is not None:
                 return result
 
-        # Strategy 3: Rule-level stats (with optional size scaling)
+        # Strategy 4: Rule-level stats (with optional size scaling)
         result = self._try_rule_estimate(rule, input_size)
         if result is not None:
             return result
 
-        # Strategy 4: Fuzzy matching for renamed/similar rules
+        # Strategy 5: Fuzzy matching for renamed/similar rules
         result = self._try_fuzzy_match_estimate(rule)
         if result is not None:
             return result
 
-        # Strategy 5: Global mean fallback
+        # Strategy 6: Global mean fallback
         global_mean = self.global_mean_duration()
         return global_mean, (global_mean * self.config.variance.global_fallback) ** 2
 
@@ -732,22 +769,36 @@ class TimeEstimator:
         total_variance = 0.0
         global_mean = self.global_mean_duration()
 
-        for rule, count in pending_rules.items():
-            if rule in effective_stats:
-                stats = effective_stats[rule]
-                rule_mean = self._get_weighted_mean(stats)
-                rule_var = (
-                    stats.std_dev**2
-                    if stats.count > 1
-                    else (rule_mean * self.config.variance.rule_fallback) ** 2
+        # Use wildcard-conditioned estimates for pending jobs if we have actual job list
+        if progress.pending_jobs_list:
+            # We have actual pending jobs with wildcards - use per-job estimates
+            for job in progress.pending_jobs_list:
+                expected, variance = self.get_estimate_for_job(
+                    rule=job.rule,
+                    wildcards=job.wildcards,
+                    input_size=job.input_size,
+                    threads=job.threads,
                 )
-            else:
-                # Unknown rule: use global mean with higher uncertainty
-                rule_mean = global_mean
-                rule_var = (global_mean * self.config.variance.global_fallback) ** 2
+                total_expected += expected
+                total_variance += variance
+        else:
+            # Fall back to rule-count-based estimation
+            for rule, count in pending_rules.items():
+                if rule in effective_stats:
+                    stats = effective_stats[rule]
+                    rule_mean = self._get_weighted_mean(stats)
+                    rule_var = (
+                        stats.std_dev**2
+                        if stats.count > 1
+                        else (rule_mean * self.config.variance.rule_fallback) ** 2
+                    )
+                else:
+                    # Unknown rule: use global mean with higher uncertainty
+                    rule_mean = global_mean
+                    rule_var = (global_mean * self.config.variance.global_fallback) ** 2
 
-            total_expected += count * rule_mean
-            total_variance += count * rule_var
+                total_expected += count * rule_mean
+                total_variance += count * rule_var
 
         # Add time for running jobs - use wildcard-specific estimates when available
         for job in progress.running_jobs:
@@ -769,9 +820,10 @@ class TimeEstimator:
         parallelism = self._estimate_parallelism(progress, global_mean)
         effective_time = total_expected / parallelism
 
-        # Calculate confidence bounds
+        # Calculate confidence bounds (variance also scales with parallelism)
         fallback_std = effective_time * self.config.variance.rule_fallback
-        std_dev = math.sqrt(total_variance) if total_variance > 0 else fallback_std
+        # When jobs run in parallel, both expected time and variance scale down
+        std_dev = (math.sqrt(total_variance) / parallelism) if total_variance > 0 else fallback_std
         lower = max(0, effective_time - 2 * std_dev)
         upper = effective_time + 2 * std_dev
 

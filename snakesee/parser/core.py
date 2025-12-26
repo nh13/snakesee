@@ -71,6 +71,7 @@ __all__ = [
     "parse_incomplete_jobs",
     "parse_completed_jobs_from_log",
     "parse_threads_from_log",
+    "parse_all_jobs_from_log",
     "is_workflow_running",
     "parse_workflow_state",
 ]
@@ -698,6 +699,90 @@ def parse_threads_from_log(log_path: Path) -> dict[str, int]:
         logger.info("Could not read log file %s: %s", log_path, e)
 
     return threads_map
+
+
+def parse_all_jobs_from_log(
+    log_path: Path,
+    *,
+    _cached_lines: list[str] | None = None,
+) -> list[JobInfo]:
+    """
+    Parse all scheduled jobs from a snakemake log file.
+
+    Extracts job information (rule, wildcards, threads, jobid) from the log
+    by parsing job blocks. This captures ALL jobs that snakemake scheduled,
+    including those not yet started.
+
+    This is useful for getting pending jobs with their wildcards when the
+    snakesee logger plugin is not available.
+
+    Args:
+        log_path: Path to the snakemake log file.
+        _cached_lines: Pre-read log lines (internal optimization).
+
+    Returns:
+        List of JobInfo for all scheduled jobs.
+    """
+    all_jobs: list[JobInfo] = []
+    seen_jobids: set[str] = set()
+
+    current_rule: str | None = None
+    current_jobid: str | None = None
+    current_wildcards: dict[str, str] | None = None
+    current_threads: int | None = None
+
+    try:
+        lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
+        for line in lines:
+            # Track current rule being scheduled
+            if match := RULE_START_PATTERN.match(line):
+                # Save previous job if complete
+                if current_rule is not None and current_jobid is not None:
+                    if current_jobid not in seen_jobids:
+                        seen_jobids.add(current_jobid)
+                        all_jobs.append(
+                            JobInfo(
+                                rule=current_rule,
+                                job_id=current_jobid,
+                                wildcards=current_wildcards,
+                                threads=current_threads,
+                            )
+                        )
+
+                # Start new job block
+                current_rule = match.group(1)
+                current_jobid = None
+                current_wildcards = None
+                current_threads = None
+
+            # Capture wildcards within rule block
+            elif match := WILDCARDS_PATTERN.match(line):
+                current_wildcards = _parse_wildcards(match.group(1))
+
+            # Capture threads within rule block
+            elif match := THREADS_PATTERN.match(line):
+                current_threads = int(match.group(1))
+
+            # Capture jobid within rule block
+            elif match := JOBID_PATTERN.match(line):
+                current_jobid = match.group(1)
+
+        # Don't forget the last job
+        if current_rule is not None and current_jobid is not None:
+            if current_jobid not in seen_jobids:
+                all_jobs.append(
+                    JobInfo(
+                        rule=current_rule,
+                        job_id=current_jobid,
+                        wildcards=current_wildcards,
+                        threads=current_threads,
+                    )
+                )
+
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
+
+    return all_jobs
 
 
 def is_workflow_running(

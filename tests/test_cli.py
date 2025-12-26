@@ -58,7 +58,7 @@ class TestWatch:
                 refresh_rate=2.0,
                 use_estimation=False,
                 profile_path=None,  # Auto-discovery returns None when no profile exists
-                use_wildcard_conditioning=False,
+                use_wildcard_conditioning=True,  # Now enabled by default
                 weighting_strategy="index",
                 half_life_logs=10,
                 half_life_days=7.0,

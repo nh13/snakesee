@@ -394,6 +394,149 @@ class TestWildcardConditioning:
         assert 50 < mean < 200  # Should not match sample1 or sample2 exactly
         assert var > 0
 
+    def test_pending_jobs_use_wildcard_conditioning(self) -> None:
+        """Test estimate_remaining uses wildcard-specific estimates for pending jobs."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        # sample1 takes ~10s, sample2 takes ~100s
+        # Need at least 3 samples per value for MIN_SAMPLES_FOR_CONDITIONING
+        for val in [10.0, 12.0, 8.0]:
+            registry.record_completion("align", val, 1000.0, wildcards={"sample": "sample1"})
+        for val in [100.0, 110.0, 90.0]:
+            registry.record_completion("align", val, 2000.0, wildcards={"sample": "sample2"})
+
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
+
+        # Create progress with pending jobs that have wildcards
+        progress = WorkflowProgress(
+            workflow_dir=Path("."),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=5,
+            completed_jobs=2,
+            running_jobs=[],
+            recent_completions=[
+                JobInfo(rule="align", start_time=1000.0, end_time=1010.0),
+                JobInfo(rule="align", start_time=1010.0, end_time=1020.0),
+            ],
+            # Two pending jobs: one sample1 (~10s), one sample2 (~100s)
+            pending_jobs_list=[
+                JobInfo(rule="align", wildcards={"sample": "sample1"}),
+                JobInfo(rule="align", wildcards={"sample": "sample2"}),
+            ],
+            start_time=1000.0,
+        )
+
+        estimate = estimator.estimate_remaining(progress)
+        assert estimate.method == "weighted"
+        # Should be around 10s + 100s = 110s (before parallelism adjustment)
+        # With parallelism of ~1, estimate should be roughly 110s
+        assert estimate.seconds_remaining > 50  # Not just using sample1
+        assert estimate.seconds_remaining < 200  # Not double-counting or overestimating
+
+    def test_pending_jobs_fallback_without_wildcards(self) -> None:
+        """Test estimate_remaining falls back to rule stats when pending_jobs_list is empty."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        # Add some rule-level stats (average ~50s)
+        for val in [45.0, 50.0, 55.0]:
+            registry.record_completion("align", val, 1000.0 + val)
+
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
+
+        # Create progress without pending_jobs_list
+        progress = WorkflowProgress(
+            workflow_dir=Path("."),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=5,
+            completed_jobs=2,
+            running_jobs=[],
+            recent_completions=[
+                JobInfo(rule="align", start_time=1000.0, end_time=1050.0),
+                JobInfo(rule="align", start_time=1050.0, end_time=1100.0),
+            ],
+            # Empty pending_jobs_list - should use rule-level inference
+            pending_jobs_list=[],
+            start_time=1000.0,
+        )
+
+        estimate = estimator.estimate_remaining(progress)
+        assert estimate.method == "weighted"
+        # Should use rule-level stats (~50s per job, 3 pending jobs before parallelism)
+        assert estimate.seconds_remaining > 0
+
+
+class TestCombinationConditioning:
+    """Tests for full wildcard+threads combination matching."""
+
+    def test_combination_matching_exact(self) -> None:
+        """Test get_estimate_for_job uses combination stats when available."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        # sample1 + threads=4 takes ~10s
+        for val in [10.0, 11.0, 9.0]:
+            registry.record_completion(
+                "align", val, 1000.0, threads=4, wildcards={"sample": "sample1"}
+            )
+        # sample1 + threads=8 takes ~5s (faster with more threads)
+        for val in [5.0, 5.5, 4.5]:
+            registry.record_completion(
+                "align", val, 2000.0, threads=8, wildcards={"sample": "sample1"}
+            )
+        # sample2 + threads=4 takes ~100s (larger sample)
+        for val in [100.0, 105.0, 95.0]:
+            registry.record_completion(
+                "align", val, 3000.0, threads=4, wildcards={"sample": "sample2"}
+            )
+
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
+
+        # sample1 + threads=4 should get ~10s
+        mean, var = estimator.get_estimate_for_job(
+            "align", wildcards={"sample": "sample1"}, threads=4
+        )
+        assert 8 < mean < 12  # Should be around 10s
+
+        # sample1 + threads=8 should get ~5s
+        mean2, var2 = estimator.get_estimate_for_job(
+            "align", wildcards={"sample": "sample1"}, threads=8
+        )
+        assert 4 < mean2 < 6  # Should be around 5s
+
+        # sample2 + threads=4 should get ~100s
+        mean3, var3 = estimator.get_estimate_for_job(
+            "align", wildcards={"sample": "sample2"}, threads=4
+        )
+        assert 90 < mean3 < 110  # Should be around 100s
+
+    def test_combination_fallback_to_wildcard(self) -> None:
+        """Test combination falls back to wildcard stats when no exact match."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        # Only have sample1 + threads=4 combination data
+        for val in [10.0, 11.0, 9.0]:
+            registry.record_completion(
+                "align", val, 1000.0, threads=4, wildcards={"sample": "sample1"}
+            )
+        # Add more sample1 data without threads=8 (enough for wildcard conditioning)
+        for val in [12.0, 13.0, 11.0]:
+            registry.record_completion(
+                "align", val, 2000.0, threads=2, wildcards={"sample": "sample1"}
+            )
+
+        estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
+
+        # sample1 + threads=16 has no exact combination match
+        # Should fall back to wildcard stats for sample1 (mix of thread counts)
+        mean, var = estimator.get_estimate_for_job(
+            "align", wildcards={"sample": "sample1"}, threads=16
+        )
+        # Should be around the wildcard average for sample1 (~10-12s range)
+        assert 8 < mean < 14
+
 
 class TestRuleRegistryIntegration:
     """Tests for TimeEstimator integration with RuleRegistry (Phase 11)."""

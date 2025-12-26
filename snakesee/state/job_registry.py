@@ -250,6 +250,16 @@ class JobRegistry:
         with self._lock:
             return [self._jobs[key] for key in self._by_status[JobStatus.INCOMPLETE]]
 
+    def submitted(self) -> list[Job]:
+        """Get all submitted (pending) jobs that haven't started yet."""
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.SUBMITTED]]
+
+    def pending(self) -> list[Job]:
+        """Get all pending jobs (not yet submitted)."""
+        with self._lock:
+            return [self._jobs[key] for key in self._by_status[JobStatus.PENDING]]
+
     def by_rule(self, rule: str) -> list[Job]:
         """Get all jobs for a specific rule."""
         with self._lock:
@@ -272,6 +282,10 @@ class JobRegistry:
     def failed_job_infos(self) -> list[JobInfo]:
         """Get failed jobs as JobInfo for backward compatibility."""
         return [job.to_job_info() for job in self.failed()]
+
+    def submitted_job_infos(self) -> list[JobInfo]:
+        """Get submitted (pending) jobs as JobInfo for backward compatibility."""
+        return [job.to_job_info() for job in self.submitted()]
 
     def clear(self) -> None:
         """Clear all jobs from the registry."""

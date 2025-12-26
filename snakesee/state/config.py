@@ -148,6 +148,7 @@ class EstimationConfig:
     time: TimeConstants = field(default_factory=TimeConstants)
 
     # Sample size thresholds
+    # Synced with constants.MIN_SAMPLES_FOR_CONDITIONING
     min_samples_for_conditioning: int = 3
     min_pairs_for_size_scaling: int = 3
     min_samples_for_confidence: int = 10

@@ -130,7 +130,7 @@ class WorkflowMonitorTUI:
         refresh_rate: float = DEFAULT_REFRESH_RATE,
         use_estimation: bool = True,
         profile_path: Path | None = None,
-        use_wildcard_conditioning: bool = False,
+        use_wildcard_conditioning: bool = True,
         weighting_strategy: WeightingStrategy = "index",
         half_life_logs: int = 10,
         half_life_days: float = 7.0,
@@ -221,6 +221,9 @@ class WorkflowMonitorTUI:
         self._event_reader: EventReader | None = None
         self._events_enabled: bool = True
         self._init_event_reader()
+
+        # All scheduled jobs from log (for pending job estimation without logger plugin)
+        self._all_scheduled_jobs: dict[str, JobInfo] = {}
 
         # Incremental log reader for efficient polling
         self._log_reader: IncrementalLogReader | None = None
@@ -397,7 +400,8 @@ class WorkflowMonitorTUI:
                 )
 
     def _init_current_rules_from_log(self) -> None:
-        """Parse current rules and job counts from the latest log."""
+        """Parse current rules, job counts, and all scheduled jobs from the latest log."""
+        from snakesee.parser import parse_all_jobs_from_log
         from snakesee.parser import parse_job_stats_counts_from_log
         from snakesee.parser import parse_job_stats_from_log
 
@@ -418,6 +422,11 @@ class WorkflowMonitorTUI:
         job_counts = parse_job_stats_counts_from_log(log_path)
         if job_counts:
             self._estimator.expected_job_counts = job_counts
+
+        # Parse all scheduled jobs with wildcards for pending job estimation
+        all_jobs = parse_all_jobs_from_log(log_path)
+        if all_jobs:
+            self._all_scheduled_jobs = {job.job_id: job for job in all_jobs if job.job_id}
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
@@ -515,13 +524,39 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         running_jobs: list[JobInfo],
     ) -> None:
-        """Handle JOB_SUBMITTED event - capture threads info."""
+        """Handle JOB_SUBMITTED event - track pending job with wildcards."""
+        from snakesee.state.job_registry import Job
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
+
+        # Create or update job in registry with SUBMITTED status
+        existing_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        if existing_job is None:
+            # Create new job with SUBMITTED status
+            new_job = Job(
+                key=job_id_str,
+                rule=event.rule_name or "unknown",
+                status=JobStatus.SUBMITTED,
+                job_id=job_id_str,
+                wildcards=dict(event.wildcards) if event.wildcards else {},
+                threads=event.threads,
+            )
+            self._workflow_state.jobs.add(new_job)
+        else:
+            # Update existing job with submitted info
+            if event.wildcards:
+                existing_job.wildcards = dict(event.wildcards)
+            if event.threads is not None:
+                existing_job.threads = event.threads
+
+        # Also store threads for backward compatibility
         if event.threads is not None:
             self._workflow_state.jobs.store_threads(job_id_str, event.threads)
-        # Look up threads from JobRegistry (may have been set by apply_event or store_threads)
+
+        # Update running_jobs list if this job is already running
         registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
         threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
@@ -543,11 +578,19 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         running_jobs: list[JobInfo],
     ) -> None:
-        """Handle JOB_STARTED event - update start time, threads, and wildcards."""
+        """Handle JOB_STARTED event - transition from SUBMITTED to RUNNING."""
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
+
+        # Transition job from SUBMITTED to RUNNING
         registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        if registry_job is not None:
+            registry_job.start_time = event.timestamp
+            self._workflow_state.jobs.set_status(registry_job, JobStatus.RUNNING)
+
         threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
             if job.job_id == job_id_str:
@@ -568,11 +611,19 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         completions: list[JobInfo],
     ) -> None:
-        """Handle JOB_FINISHED event - update completion with accurate duration."""
+        """Handle JOB_FINISHED event - transition to COMPLETED."""
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None or event.duration is None:
             return
         job_id_str = str(event.job_id)
         registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+
+        # Transition job to COMPLETED
+        if registry_job is not None:
+            registry_job.end_time = event.timestamp
+            self._workflow_state.jobs.set_status(registry_job, JobStatus.COMPLETED)
+
         threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(completions):
             if job.job_id == job_id_str:
@@ -643,6 +694,33 @@ class WorkflowMonitorTUI:
             )
         return len(failed_list)
 
+    def _compute_pending_jobs_from_scheduled(
+        self,
+        running_jobs: list[JobInfo],
+        completions: list[JobInfo],
+    ) -> list[JobInfo]:
+        """Compute pending jobs by subtracting running/completed from all scheduled.
+
+        When the snakesee logger plugin isn't available, we fall back to parsing
+        all scheduled jobs from the snakemake log. This method computes which of
+        those scheduled jobs are still pending (not yet running or completed).
+
+        Args:
+            running_jobs: Currently running jobs.
+            completions: Completed jobs.
+
+        Returns:
+            List of pending jobs with their wildcards and threads.
+        """
+        if not self._all_scheduled_jobs:
+            return []
+        running_ids = {job.job_id for job in running_jobs if job.job_id}
+        completed_ids = {job.job_id for job in completions if job.job_id}
+        excluded_ids = running_ids | completed_ids
+        return [
+            job for job_id, job in self._all_scheduled_jobs.items() if job_id not in excluded_ids
+        ]
+
     def _apply_events_to_progress(
         self, progress: WorkflowProgress, events: list[SnakeseeEvent]
     ) -> WorkflowProgress:
@@ -707,6 +785,15 @@ class WorkflowMonitorTUI:
                         log_file=job.log_file,
                     )
 
+        # Get pending jobs from the registry (jobs submitted but not yet started)
+        pending_jobs_list = self._workflow_state.jobs.submitted_job_infos()
+
+        # Fallback: if no pending jobs from events, compute from log-based scheduled jobs
+        if not pending_jobs_list:
+            pending_jobs_list = self._compute_pending_jobs_from_scheduled(
+                new_running_jobs, new_completions
+            )
+
         # Return updated progress
         return WorkflowProgress(
             workflow_dir=progress.workflow_dir,
@@ -717,6 +804,7 @@ class WorkflowMonitorTUI:
             failed_jobs_list=new_failed_list,
             running_jobs=new_running_jobs,
             recent_completions=new_completions,
+            pending_jobs_list=pending_jobs_list,
             start_time=progress.start_time,
             log_file=progress.log_file,
         )
@@ -2643,6 +2731,17 @@ class WorkflowMonitorTUI:
         if events:
             progress = self._apply_events_to_progress(progress, events)
             self._force_refresh = True
+
+        # Always populate pending_jobs_list from log-based scheduled jobs
+        # (even when no new events, we need this for wildcard-conditioned ETA)
+        if not progress.pending_jobs_list:
+            from dataclasses import replace
+
+            pending_jobs_list = self._compute_pending_jobs_from_scheduled(
+                progress.running_jobs, progress.recent_completions
+            )
+            if pending_jobs_list:
+                progress = replace(progress, pending_jobs_list=pending_jobs_list)
 
         # Update rule_stats with newly completed jobs (for Rule Statistics panel)
         self._update_rule_stats_from_completions(progress)

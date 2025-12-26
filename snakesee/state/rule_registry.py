@@ -26,6 +26,30 @@ def _make_empty_rule_stats(rule: str = "") -> RuleTimingStats:
     return RuleTimingStats(rule=rule)
 
 
+def _make_combination_key(wildcards: dict[str, str] | None, threads: int | None) -> str | None:
+    """Create a composite key from wildcards and threads.
+
+    Args:
+        wildcards: Wildcard values dict.
+        threads: Thread count.
+
+    Returns:
+        Composite key like "batch=1:sample=A:threads=4" or None if no data.
+    """
+    parts: list[str] = []
+
+    # Add sorted wildcard key=value pairs
+    if wildcards:
+        for key in sorted(wildcards.keys()):
+            parts.append(f"{key}={wildcards[key]}")
+
+    # Add threads if provided
+    if threads is not None:
+        parts.append(f"threads={threads}")
+
+    return ":".join(parts) if parts else None
+
+
 @dataclass
 class RuleStatistics:
     """Complete timing statistics for a single rule.
@@ -38,6 +62,7 @@ class RuleStatistics:
         aggregate: Overall timing statistics for the rule.
         by_threads: Thread-specific timing statistics.
         by_wildcard: Wildcard-specific timing statistics.
+        by_combination: Full wildcard+threads combination statistics.
         expected_count: Expected number of jobs for this rule (if known).
     """
 
@@ -45,6 +70,7 @@ class RuleStatistics:
     aggregate: RuleTimingStats = field(default_factory=_make_empty_rule_stats)
     by_threads: ThreadTimingStats | None = None
     by_wildcard: dict[str, WildcardTimingStats] = field(default_factory=dict)
+    by_combination: dict[str, RuleTimingStats] = field(default_factory=dict)
     expected_count: int | None = None
 
     def __post_init__(self) -> None:
@@ -117,6 +143,15 @@ class RuleStatistics:
                 value_stats = wts.stats_by_value[wc_value]
                 value_stats.durations.append(duration)
                 value_stats.timestamps.append(timestamp)
+
+        # Update combination stats (full wildcard+threads key)
+        combo_key = _make_combination_key(wildcards, threads)
+        if combo_key:
+            if combo_key not in self.by_combination:
+                self.by_combination[combo_key] = RuleTimingStats(rule=f"{self.rule}@{combo_key}")
+            combo_stats = self.by_combination[combo_key]
+            combo_stats.durations.append(duration)
+            combo_stats.timestamps.append(timestamp)
 
 
 class RuleRegistry:
@@ -324,6 +359,40 @@ class RuleRegistry:
         """Get all rule names."""
         with self._lock:
             return list(self._rules.keys())
+
+    def get_combination_stats(
+        self, rule: str, wildcards: dict[str, str] | None, threads: int | None
+    ) -> RuleTimingStats | None:
+        """Get timing stats for a specific wildcard+threads combination.
+
+        Args:
+            rule: Rule name.
+            wildcards: Wildcard values dict.
+            threads: Thread count.
+
+        Returns:
+            RuleTimingStats for the combination, or None if not found or insufficient samples.
+        """
+        from snakesee.constants import MIN_SAMPLES_FOR_CONDITIONING
+
+        combo_key = _make_combination_key(wildcards, threads)
+        if combo_key is None:
+            return None
+
+        with self._lock:
+            stats = self._rules.get(rule)
+            if stats is None:
+                return None
+
+            combo_stats = stats.by_combination.get(combo_key)
+            if combo_stats is None:
+                return None
+
+            # Require minimum samples for conditioning
+            if combo_stats.count < MIN_SAMPLES_FOR_CONDITIONING:
+                return None
+
+            return combo_stats
 
     def total_sample_count(self) -> int:
         """Get total number of samples across all rules."""

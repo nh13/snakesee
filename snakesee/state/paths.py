@@ -162,9 +162,10 @@ class WorkflowPaths:
     @property
     def has_events(self) -> bool:
         """Check if events file exists and has content."""
-        if not _cached_exists(self.events_file):
+        try:
+            return self.events_file.stat().st_size > 0
+        except OSError:
             return False
-        return self.events_file.stat().st_size > 0
 
     @property
     def has_locks(self) -> bool:

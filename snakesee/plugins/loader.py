@@ -187,8 +187,12 @@ def _load_plugins_from_file(plugin_file: Path) -> list[ToolProgressPlugin]:
     """
     plugins: list[ToolProgressPlugin] = []
 
-    # Create a unique module name based on the file path
-    module_name = f"snakesee_user_plugin_{plugin_file.stem}"
+    # Create a unique module name based on the full file path to avoid collisions
+    # when different directories have files with the same name
+    import hashlib
+
+    path_hash = hashlib.md5(str(plugin_file.resolve()).encode()).hexdigest()[:8]
+    module_name = f"snakesee_user_plugin_{plugin_file.stem}_{path_hash}"
 
     # Load the module
     spec = importlib.util.spec_from_file_location(module_name, plugin_file)

@@ -143,6 +143,7 @@ class WorkflowState:
             running_jobs=[job.to_job_info() for job in self.jobs.running()],
             failed_jobs=self.failed_count,
             failed_jobs_list=[job.to_job_info() for job in self.jobs.failed()],
+            pending_jobs_list=[job.to_job_info() for job in self.jobs.submitted()],
             start_time=self.start_time,
             log_file=self.current_log,
         )

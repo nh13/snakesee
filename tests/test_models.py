@@ -386,12 +386,13 @@ class TestWildcardTimingStats:
         from snakesee.models import WildcardTimingStats
 
         # sample key: A=100, B=500 (high between-group variance)
+        # Need at least 3 samples per value for MIN_SAMPLES_FOR_CONDITIONING
         sample_wts = WildcardTimingStats(
             rule="align",
             wildcard_key="sample",
             stats_by_value={
-                "A": RuleTimingStats(rule="align:sample=A", durations=[100.0]),
-                "B": RuleTimingStats(rule="align:sample=B", durations=[500.0]),
+                "A": RuleTimingStats(rule="align:sample=A", durations=[100.0, 102.0, 98.0]),
+                "B": RuleTimingStats(rule="align:sample=B", durations=[500.0, 510.0, 490.0]),
             },
         )
 
@@ -400,8 +401,8 @@ class TestWildcardTimingStats:
             rule="align",
             wildcard_key="batch",
             stats_by_value={
-                "1": RuleTimingStats(rule="align:batch=1", durations=[100.0]),
-                "2": RuleTimingStats(rule="align:batch=2", durations=[110.0]),
+                "1": RuleTimingStats(rule="align:batch=1", durations=[100.0, 102.0, 98.0]),
+                "2": RuleTimingStats(rule="align:batch=2", durations=[110.0, 112.0, 108.0]),
             },
         )
 

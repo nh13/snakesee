@@ -55,7 +55,7 @@ def watch(
     refresh: float = 2.0,
     no_estimate: bool = False,
     profile: Path | None = None,
-    wildcard_timing: bool = False,
+    wildcard_timing: bool = True,
     weighting_strategy: Literal["index", "time"] = "index",
     half_life_logs: int = 10,
     half_life_days: float = 7.0,
@@ -72,8 +72,8 @@ def watch(
         no_estimate: Disable time estimation from historical data.
         profile: Optional path to a timing profile (.snakesee-profile.json)
                  for bootstrapping estimates. If not specified, will auto-discover.
-        wildcard_timing: Enable wildcard conditioning for estimates (estimate per
-                         sample/batch). Can also be toggled with 'w' key in TUI.
+        wildcard_timing: Use wildcard conditioning for estimates (estimate per
+                         sample/batch). Enabled by default. Toggle with 'w' key in TUI.
         weighting_strategy: Strategy for weighting historical timing data.
                            "index" (default) - weight by run index, ideal for active
                            development where each run may fix issues.
