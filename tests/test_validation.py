@@ -839,3 +839,232 @@ class TestValidateInRangeDecorator:
             func(-0.1)
         with pytest.raises(InvalidParameterError):
             func(1.1)
+
+
+class TestEventAccumulatorAdvanced:
+    """Additional tests for EventAccumulator edge cases."""
+
+    def test_process_events_batch(self) -> None:
+        """Test batch processing of events."""
+        acc = EventAccumulator()
+        events = [
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=1,
+                rule_name="align",
+            ),
+            SnakeseeEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=1001.0,
+                job_id=1,
+            ),
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1100.0,
+                job_id=1,
+                duration=99.0,
+            ),
+        ]
+        acc.process_events(events)
+
+        assert len(acc.jobs) == 1
+        assert acc.jobs[1].status == "finished"
+
+    def test_prune_completed_jobs(self) -> None:
+        """Test pruning of completed jobs when over limit."""
+        acc = EventAccumulator(max_jobs=5)
+
+        # Add 10 completed jobs
+        for i in range(10):
+            acc.process_event(
+                SnakeseeEvent(
+                    event_type=EventType.JOB_SUBMITTED,
+                    timestamp=float(1000 + i),
+                    job_id=i,
+                    rule_name="job",
+                )
+            )
+            acc.process_event(
+                SnakeseeEvent(
+                    event_type=EventType.JOB_FINISHED,
+                    timestamp=float(1100 + i),
+                    job_id=i,
+                )
+            )
+        acc._prune_if_needed()
+
+        # Should have pruned to max_jobs
+        assert len(acc.jobs) <= 5
+
+    def test_submitted_jobs_property(self) -> None:
+        """Test submitted_jobs property."""
+        acc = EventAccumulator()
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=1,
+                rule_name="align",
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1001.0,
+                job_id=2,
+                rule_name="sort",
+            )
+        )
+
+        submitted = acc.submitted_jobs
+        assert len(submitted) == 2
+
+    def test_finished_jobs_property(self) -> None:
+        """Test finished_jobs property."""
+        acc = EventAccumulator()
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_FINISHED,
+                timestamp=1100.0,
+                job_id=1,
+                rule_name="align",
+            )
+        )
+
+        finished = acc.finished_jobs
+        assert len(finished) == 1
+
+
+class TestValidationLoggerAdvanced:
+    """Additional tests for ValidationLogger edge cases."""
+
+    def test_log_discrepancy_with_wildcards(self, tmp_path: Path) -> None:
+        """Test logging discrepancy with wildcards."""
+        logger = ValidationLogger(tmp_path)
+        logger.log_discrepancy(
+            Discrepancy(
+                category="timing_mismatch",
+                severity="info",
+                message="Start time differs",
+                wildcards={"sample": "A", "lane": "L001"},
+            )
+        )
+        logger.close()
+
+        log_file = tmp_path / ".snakesee_validation.log"
+        content = log_file.read_text()
+        assert "sample=A" in content
+        assert "lane=L001" in content
+
+    def test_log_discrepancies_batch(self, tmp_path: Path) -> None:
+        """Test logging multiple discrepancies."""
+        logger = ValidationLogger(tmp_path)
+        discrepancies = [
+            Discrepancy(category="cat1", severity="warning", message="msg1"),
+            Discrepancy(category="cat2", severity="error", message="msg2"),
+        ]
+        logger.log_discrepancies(discrepancies)
+        logger.close()
+
+        log_file = tmp_path / ".snakesee_validation.log"
+        content = log_file.read_text()
+        assert "cat1" in content
+        assert "cat2" in content
+
+
+class TestCompareStatesAdvanced:
+    """Additional tests for compare_states edge cases."""
+
+    def _make_progress(
+        self,
+        tmp_path: Path,
+        total: int = 10,
+        completed: int = 5,
+        running: list[JobInfo] | None = None,
+        failed: int = 0,
+        failed_list: list[JobInfo] | None = None,
+    ) -> WorkflowProgress:
+        """Create a WorkflowProgress for testing."""
+        return WorkflowProgress(
+            workflow_dir=tmp_path,
+            status=WorkflowStatus.RUNNING,
+            total_jobs=total,
+            completed_jobs=completed,
+            failed_jobs=failed,
+            failed_jobs_list=failed_list or [],
+            running_jobs=running or [],
+            recent_completions=[],
+        )
+
+    def test_start_time_mismatch(self, tmp_path: Path) -> None:
+        """Test detection of start time mismatch between event and parsed job."""
+        acc = EventAccumulator()
+        acc.workflow_started = True
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_SUBMITTED,
+                timestamp=1000.0,
+                job_id=42,
+                rule_name="align",
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=1001.0,
+                job_id=42,
+            )
+        )
+
+        # Parsed job has different start time (more than 5 seconds difference)
+        running_job = JobInfo(rule="align", job_id="42", start_time=1010.0)
+        progress = self._make_progress(tmp_path, running=[running_job])
+
+        discrepancies = compare_states(acc, progress)
+        timing_disc = [d for d in discrepancies if d.category == "start_time_mismatch"]
+        assert len(timing_disc) == 1
+
+    def test_completed_jobs_mismatch(self, tmp_path: Path) -> None:
+        """Test detection of completed jobs count mismatch."""
+        acc = EventAccumulator()
+        acc.workflow_started = True
+        acc.completed_jobs = 10
+
+        progress = self._make_progress(tmp_path, completed=5)
+
+        discrepancies = compare_states(acc, progress)
+        comp_disc = [d for d in discrepancies if d.category == "completed_jobs"]
+        assert len(comp_disc) == 1
+        assert comp_disc[0].event_value == 10
+        assert comp_disc[0].parsed_value == 5
+
+    def test_failed_count_mismatch(self, tmp_path: Path) -> None:
+        """Test detection of failed job count mismatch."""
+        acc = EventAccumulator()
+        acc.workflow_started = True
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_ERROR,
+                timestamp=1050.0,
+                job_id=1,
+                rule_name="sort",
+            )
+        )
+        acc.process_event(
+            SnakeseeEvent(
+                event_type=EventType.JOB_ERROR,
+                timestamp=1060.0,
+                job_id=2,
+                rule_name="align",
+            )
+        )
+
+        # Parsed state shows only 1 failed job
+        progress = self._make_progress(tmp_path, failed=1)
+
+        discrepancies = compare_states(acc, progress)
+        failed_disc = [d for d in discrepancies if d.category == "failed_count"]
+        assert len(failed_disc) == 1
+        assert failed_disc[0].event_value == 2
+        assert failed_disc[0].parsed_value == 1
