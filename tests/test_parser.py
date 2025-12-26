@@ -1321,3 +1321,186 @@ class TestCollectRuleCodeHashes:
         # Should not crash
         hashes = collect_rule_code_hashes(metadata_dir)
         assert isinstance(hashes, dict)
+
+
+class TestDetermineFinalWorkflowStatus:
+    """Tests for _determine_final_workflow_status helper."""
+
+    def test_running_with_active_jobs(self) -> None:
+        """Running jobs on latest log with running workflow -> RUNNING."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _determine_final_workflow_status
+
+        running = [JobInfo(rule="test", job_id="1")]
+        status = _determine_final_workflow_status(
+            running=running,
+            failed_list=[],
+            incomplete_list=[],
+            completed=5,
+            total=10,
+            is_latest_log=True,
+            workflow_is_running=True,
+        )
+        assert status == WorkflowStatus.RUNNING
+
+    def test_failed_with_failures(self) -> None:
+        """Failed jobs present -> FAILED."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _determine_final_workflow_status
+
+        failed = [JobInfo(rule="test", job_id="1")]
+        status = _determine_final_workflow_status(
+            running=[],
+            failed_list=failed,
+            incomplete_list=[],
+            completed=5,
+            total=10,
+            is_latest_log=True,
+            workflow_is_running=False,
+        )
+        assert status == WorkflowStatus.FAILED
+
+    def test_incomplete_with_markers(self) -> None:
+        """Incomplete markers present -> INCOMPLETE."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _determine_final_workflow_status
+
+        incomplete = [JobInfo(rule="test", job_id="1")]
+        status = _determine_final_workflow_status(
+            running=[],
+            failed_list=[],
+            incomplete_list=incomplete,
+            completed=5,
+            total=10,
+            is_latest_log=True,
+            workflow_is_running=False,
+        )
+        assert status == WorkflowStatus.INCOMPLETE
+
+    def test_incomplete_partial_completion(self) -> None:
+        """Not all jobs done and not running -> INCOMPLETE."""
+        from snakesee.parser.core import _determine_final_workflow_status
+
+        status = _determine_final_workflow_status(
+            running=[],
+            failed_list=[],
+            incomplete_list=[],
+            completed=5,
+            total=10,
+            is_latest_log=True,
+            workflow_is_running=False,
+        )
+        assert status == WorkflowStatus.INCOMPLETE
+
+    def test_completed_all_done(self) -> None:
+        """All jobs completed, not running -> COMPLETED."""
+        from snakesee.parser.core import _determine_final_workflow_status
+
+        status = _determine_final_workflow_status(
+            running=[],
+            failed_list=[],
+            incomplete_list=[],
+            completed=10,
+            total=10,
+            is_latest_log=True,
+            workflow_is_running=False,
+        )
+        assert status == WorkflowStatus.COMPLETED
+
+
+class TestReconcileJobLists:
+    """Tests for _reconcile_job_lists helper."""
+
+    def test_removes_failed_from_running(self) -> None:
+        """Failed jobs should be removed from running list."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _reconcile_job_lists
+
+        running = [
+            JobInfo(rule="test1", job_id="1"),
+            JobInfo(rule="test2", job_id="2"),
+        ]
+        failed = [JobInfo(rule="test1", job_id="1")]
+        incomplete: list[JobInfo] = []
+
+        new_running, new_incomplete = _reconcile_job_lists(
+            running, failed, incomplete, workflow_is_running=True
+        )
+
+        assert len(new_running) == 1
+        assert new_running[0].job_id == "2"
+        assert new_incomplete == []
+
+    def test_clears_running_when_not_running(self) -> None:
+        """When workflow not running, running list should be cleared."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _reconcile_job_lists
+
+        running = [JobInfo(rule="test", job_id="1")]
+        incomplete = [JobInfo(rule="test2", job_id="2")]
+
+        new_running, new_incomplete = _reconcile_job_lists(
+            running, [], incomplete, workflow_is_running=False
+        )
+
+        assert new_running == []
+        assert new_incomplete == incomplete
+
+    def test_clears_incomplete_when_running(self) -> None:
+        """When workflow is running, incomplete markers should be cleared."""
+        from snakesee.models import JobInfo
+        from snakesee.parser.core import _reconcile_job_lists
+
+        running = [JobInfo(rule="test", job_id="1")]
+        incomplete = [JobInfo(rule="test2", job_id="2")]
+
+        new_running, new_incomplete = _reconcile_job_lists(
+            running, [], incomplete, workflow_is_running=True
+        )
+
+        assert new_running == running
+        assert new_incomplete == []
+
+
+class TestCollectFilteredCompletions:
+    """Tests for _collect_filtered_completions helper."""
+
+    def test_returns_empty_for_no_log(self) -> None:
+        """Returns empty list when no log path."""
+        from snakesee.parser.core import _collect_filtered_completions
+
+        result = _collect_filtered_completions(
+            all_completions=[],
+            log_path=None,
+            cutoff_time=None,
+            log_reader=None,
+        )
+        assert result == []
+
+    def test_uses_log_reader_completions(self, tmp_path: Path) -> None:
+        """Uses log reader completions when available and no metadata match."""
+        from snakesee.parser import IncrementalLogReader
+        from snakesee.parser.core import _collect_filtered_completions
+
+        # Create a log file with a completed job
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""[Mon Dec 16 10:00:00 2024]
+rule test:
+    jobid: 1
+[Mon Dec 16 10:01:00 2024]
+Finished job 1.
+""")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Call with empty all_completions to force reader fallback
+        result = _collect_filtered_completions(
+            all_completions=[],
+            log_path=log_file,
+            cutoff_time=None,
+            log_reader=reader,
+        )
+
+        assert len(result) == 1
+        assert result[0].rule == "test"
