@@ -164,48 +164,6 @@ def _parse_non_negative_int(value: str, field_name: str = "value") -> int | None
         return None
 
 
-def find_latest_log(snakemake_dir: Path) -> Path | None:
-    """
-    Find the most recent snakemake log file.
-
-    Args:
-        snakemake_dir: Path to the .snakemake directory.
-
-    Returns:
-        Path to the most recent log file, or None if no logs exist.
-
-    Note:
-        This function is preserved for backward compatibility.
-        New code should use WorkflowPaths.find_latest_log() directly.
-    """
-    from snakesee.state.paths import WorkflowPaths
-
-    # snakemake_dir is workflow_dir/.snakemake, so parent is workflow_dir
-    paths = WorkflowPaths(snakemake_dir.parent)
-    return paths.find_latest_log()
-
-
-def find_all_logs(snakemake_dir: Path) -> list[Path]:
-    """
-    Find all snakemake log files, sorted by modification time (oldest first).
-
-    Args:
-        snakemake_dir: Path to the .snakemake directory.
-
-    Returns:
-        List of paths to all log files, sorted oldest to newest.
-
-    Note:
-        This function is preserved for backward compatibility.
-        New code should use WorkflowPaths.find_all_logs() directly.
-    """
-    from snakesee.state.paths import WorkflowPaths
-
-    # snakemake_dir is workflow_dir/.snakemake, so parent is workflow_dir
-    paths = WorkflowPaths(snakemake_dir.parent)
-    return paths.find_all_logs()
-
-
 def parse_job_stats_from_log(log_path: Path) -> set[str]:
     """
     Parse the 'Job stats' table from a Snakemake log to get the set of rules.
@@ -1327,6 +1285,7 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
         True if workflow appears to be actively running, False otherwise.
     """
     from snakesee.state.clock import get_clock
+    from snakesee.state.paths import WorkflowPaths
 
     locks_dir = snakemake_dir / "locks"
     if not locks_dir.exists():
@@ -1352,7 +1311,9 @@ def is_workflow_running(snakemake_dir: Path, stale_threshold: float = 1800.0) ->
             pass
 
     # Fall back to log freshness check when no incomplete markers
-    log_file = find_latest_log(snakemake_dir)
+    # snakemake_dir is .snakemake, so parent is workflow_dir
+    paths = WorkflowPaths(snakemake_dir.parent)
+    log_file = paths.find_latest_log()
     if log_file is None:
         # No log file but locks exist - assume running (early startup)
         return True
@@ -1582,11 +1543,15 @@ def parse_workflow_state(
     Returns:
         Current workflow state as a WorkflowProgress instance.
     """
-    snakemake_dir = workflow_dir / ".snakemake"
+    from snakesee.state.paths import WorkflowPaths
+
+    paths = WorkflowPaths(workflow_dir)
+    snakemake_dir = paths.snakemake_dir
 
     # Use specified log file or find latest
-    log_path = log_file if log_file is not None else find_latest_log(snakemake_dir)
-    is_latest_log = log_file is None or log_file == find_latest_log(snakemake_dir)
+    latest_log = paths.find_latest_log()
+    log_path = log_file if log_file is not None else latest_log
+    is_latest_log = log_file is None or log_file == latest_log
 
     # Determine status from lock files (only relevant for latest log)
     workflow_is_running = is_latest_log and is_workflow_running(snakemake_dir)

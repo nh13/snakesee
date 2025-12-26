@@ -8,13 +8,13 @@ from snakesee.parser import IncrementalLogReader
 from snakesee.parser import _parse_wildcards
 from snakesee.parser import collect_rule_timing_stats
 from snakesee.parser import collect_wildcard_timing_stats
-from snakesee.parser import find_latest_log
 from snakesee.parser import is_workflow_running
 from snakesee.parser import parse_failed_jobs_from_log
 from snakesee.parser import parse_metadata_files
 from snakesee.parser import parse_progress_from_log
 from snakesee.parser import parse_running_jobs_from_log
 from snakesee.parser import parse_workflow_state
+from snakesee.state.paths import WorkflowPaths
 
 
 class TestParseWildcards:
@@ -47,23 +47,26 @@ class TestParseWildcards:
 
 
 class TestFindLatestLog:
-    """Tests for find_latest_log function."""
+    """Tests for WorkflowPaths.find_latest_log function."""
 
     def test_no_log_dir(self, tmp_path: Path) -> None:
         """Test when log directory doesn't exist."""
         smk_dir = tmp_path / ".snakemake"
         smk_dir.mkdir()
-        assert find_latest_log(smk_dir) is None
+        paths = WorkflowPaths(tmp_path)
+        assert paths.find_latest_log() is None
 
     def test_empty_log_dir(self, snakemake_dir: Path) -> None:
         """Test when log directory is empty."""
-        assert find_latest_log(snakemake_dir) is None
+        paths = WorkflowPaths(snakemake_dir.parent)
+        assert paths.find_latest_log() is None
 
     def test_single_log(self, snakemake_dir: Path) -> None:
         """Test with a single log file."""
         log_file = snakemake_dir / "log" / "2024-01-01T120000.000000.snakemake.log"
         log_file.write_text("test")
-        assert find_latest_log(snakemake_dir) == log_file
+        paths = WorkflowPaths(snakemake_dir.parent)
+        assert paths.find_latest_log() == log_file
 
     def test_multiple_logs(self, snakemake_dir: Path) -> None:
         """Test returns most recent log."""
@@ -76,7 +79,8 @@ class TestFindLatestLog:
         new_log = snakemake_dir / "log" / "2024-01-02T120000.000000.snakemake.log"
         new_log.write_text("new")
 
-        assert find_latest_log(snakemake_dir) == new_log
+        paths = WorkflowPaths(snakemake_dir.parent)
+        assert paths.find_latest_log() == new_log
 
 
 class TestParseProgressFromLog:

@@ -39,6 +39,7 @@ from snakesee.parser import parse_workflow_state
 from snakesee.plugins import parse_tool_progress
 from snakesee.plugins.base import ToolProgress
 from snakesee.state.clock import get_clock
+from snakesee.state.paths import WorkflowPaths
 from snakesee.state.workflow_state import WorkflowState
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
@@ -280,10 +281,8 @@ class WorkflowMonitorTUI:
         has_profile = self.profile_path is not None and self.profile_path.exists()
 
         # Check if there's anything to load (worth showing progress)
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        from snakesee.parser import find_all_logs
-
-        log_paths = find_all_logs(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_paths = paths.find_all_logs()
 
         # Skip progress display if nothing to load
         if not has_metadata and not has_profile and not log_paths:
@@ -357,12 +356,12 @@ class WorkflowMonitorTUI:
             log_paths: Optional list of log paths to process (avoids re-discovering).
             progress_callback: Optional callback(current, total) for progress reporting.
         """
-        from snakesee.parser import find_all_logs
         from snakesee.parser import parse_completed_jobs_from_log
+        from snakesee.state.paths import WorkflowPaths
 
         if log_paths is None:
-            snakemake_dir = self.workflow_dir / ".snakemake"
-            log_paths = find_all_logs(snakemake_dir)
+            paths = WorkflowPaths(self.workflow_dir)
+            log_paths = paths.find_all_logs()
 
         if not log_paths:
             return
@@ -387,15 +386,14 @@ class WorkflowMonitorTUI:
 
     def _init_current_rules_from_log(self) -> None:
         """Parse current rules and job counts from the latest log."""
-        from snakesee.parser import find_latest_log
         from snakesee.parser import parse_job_stats_counts_from_log
         from snakesee.parser import parse_job_stats_from_log
 
         if self._estimator is None:
             return
 
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        log_path = find_latest_log(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_path = paths.find_latest_log()
         if log_path is None:
             return
 
@@ -426,17 +424,13 @@ class WorkflowMonitorTUI:
         Creates a reader for the current log file, enabling efficient
         incremental parsing instead of re-reading the entire file on each poll.
         """
-        from snakesee.parser import find_latest_log
-
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        log_path = find_latest_log(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_path = paths.find_latest_log()
         if log_path is not None:
             self._log_reader = IncrementalLogReader(log_path)
         else:
             # Create with a placeholder path; will be updated when log appears
-            self._log_reader = IncrementalLogReader(
-                snakemake_dir / "log" / "placeholder.snakemake.log"
-            )
+            self._log_reader = IncrementalLogReader(paths.log_dir / "placeholder.snakemake.log")
 
     def _init_validation(self) -> None:
         """Initialize validation if event file exists.
