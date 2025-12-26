@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.console import Group
@@ -1886,16 +1887,16 @@ class WorkflowMonitorTUI:
 
         if self._log_source == "running":
             if running_jobs:
-                self._selected_job_index = min(
-                    self._selected_job_index,
-                    len(running_jobs) - 1,
+                # Clamp index to valid bounds (consistent with _make_running_table)
+                self._selected_job_index = max(
+                    0, min(self._selected_job_index, len(running_jobs) - 1)
                 )
                 selected_job = running_jobs[self._selected_job_index]
         elif self._log_source == "completions":
             if completions:
-                self._selected_completion_index = min(
-                    self._selected_completion_index,
-                    len(completions) - 1,
+                # Clamp index to valid bounds (consistent with _make_completions_table)
+                self._selected_completion_index = max(
+                    0, min(self._selected_completion_index, len(completions) - 1)
                 )
                 selected_job = completions[self._selected_completion_index]
                 job_status = "failed" if id(selected_job) in failed_ids else "completed"
@@ -2498,10 +2499,13 @@ class WorkflowMonitorTUI:
             progress, estimate = self._poll_state()
 
         # Save terminal settings and switch to raw mode for single-key input
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
+        # Initialize before try block so finally can safely check
+        fd: int | None = None
+        old_settings: list[Any] | None = None
 
         try:
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
             # Set terminal to raw mode (cbreak would also work)
             tty.setcbreak(fd)
 
@@ -2573,8 +2577,9 @@ class WorkflowMonitorTUI:
         except KeyboardInterrupt:
             pass  # Clean exit on Ctrl+C
         finally:
-            # Restore terminal settings
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            # Restore terminal settings if they were saved
+            if old_settings is not None and fd is not None:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     def _run_simple(self) -> None:
         """

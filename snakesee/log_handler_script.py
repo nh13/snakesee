@@ -29,6 +29,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from typing import TextIO
 
 # Logger for this module - debug level by default to avoid noise
 logger = logging.getLogger(__name__)
@@ -44,8 +45,9 @@ _job_start_times: dict[int, float] = {}
 _job_rules: dict[int, str] = {}
 _job_wildcards: dict[int, dict[str, str]] = {}
 _job_threads: dict[int, int] = {}
-_event_file: Any = None
+_event_file: TextIO | None = None
 _workflow_started_emitted: bool = False
+_workflow_lock_fd: int | None = None  # File descriptor for workflow-level locking
 
 
 def _close_event_file() -> None:
@@ -63,13 +65,39 @@ def _close_event_file() -> None:
 atexit.register(_close_event_file)
 
 
-def _get_event_file() -> Any:
+def _get_event_file() -> TextIO:
     """Get or open the event file handle."""
     global _event_file
     if _event_file is None:
         event_path = Path.cwd() / EVENT_FILE_NAME
         _event_file = open(event_path, "a", encoding="utf-8")
     return _event_file
+
+
+# Default timeout for file lock operations (seconds)
+FILE_LOCK_TIMEOUT: float = 5.0
+
+
+def _acquire_lock_with_timeout(fd: int, timeout: float = FILE_LOCK_TIMEOUT) -> bool:
+    """Acquire an exclusive file lock with timeout.
+
+    Args:
+        fd: File descriptor to lock.
+        timeout: Maximum time to wait for lock in seconds.
+
+    Returns:
+        True if lock was acquired, False if timeout expired.
+    """
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.time() >= deadline:
+                return False
+            # Brief sleep before retry (10ms)
+            time.sleep(0.01)
 
 
 def _write_event(event_data: dict[str, Any]) -> None:
@@ -79,13 +107,17 @@ def _write_event(event_data: dict[str, Any]) -> None:
     event_data = {k: v for k, v in event_data.items() if v is not None}
     line = json.dumps(event_data, separators=JSON_SEPARATORS, default=str) + "\n"
 
+    fd = f.fileno()
+    if not _acquire_lock_with_timeout(fd):
+        logger.warning("Failed to acquire event file lock within timeout, skipping event")
+        return
+
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(line)
         f.flush()
-        os.fsync(f.fileno())
+        os.fsync(fd)
     finally:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _extract_wildcards(msg: dict[str, Any]) -> dict[str, str] | None:
@@ -108,11 +140,8 @@ def _extract_resources(msg: dict[str, Any]) -> dict[str, Any] | None:
     if res is None:
         return None
 
-    def is_serializable(v: Any) -> bool:
-        return isinstance(v, (str, int, float, bool, type(None)))
-
-    def extract_value(v: Any) -> Any:
-        if is_serializable(v):
+    def extract_value(v: Any) -> str | int | float | bool | None:
+        if isinstance(v, (str, int, float, bool, type(None))):
             return v
         try:
             s = str(v)
@@ -304,11 +333,39 @@ def _ensure_workflow_started(timestamp: float) -> None:
 
     This also clears any stale events from previous workflow runs by
     truncating the event file before writing the first event.
+
+    Uses file locking to ensure atomicity when multiple processes
+    might start simultaneously.
     """
-    global _workflow_started_emitted, _event_file
-    if not _workflow_started_emitted:
+    global _workflow_started_emitted, _event_file, _workflow_lock_fd
+    if _workflow_started_emitted:
+        return
+
+    event_path = Path.cwd() / EVENT_FILE_NAME
+    lock_path = Path.cwd() / ".snakesee_events.lock"
+
+    # Acquire exclusive lock to make check-and-truncate atomic
+    try:
+        _workflow_lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        if not _acquire_lock_with_timeout(_workflow_lock_fd, FILE_LOCK_TIMEOUT * 2):
+            logger.warning("Failed to acquire workflow lock within timeout")
+            return
+
+        # Double-check after acquiring lock (another process may have initialized)
+        # mypy doesn't understand global can change between checks (thread safety pattern)
+        if _workflow_started_emitted:
+            return  # type: ignore[unreachable]
+
+        # Close existing file handle if open (prevents file descriptor leak)
+        existing_file = _event_file
+        if existing_file is not None:
+            try:
+                existing_file.close()
+            except OSError:
+                pass
+            _event_file = None
+
         # Truncate event file to clear stale data from previous runs
-        event_path = Path.cwd() / EVENT_FILE_NAME
         _event_file = open(event_path, "w", encoding="utf-8")
 
         _write_event(
@@ -318,6 +375,13 @@ def _ensure_workflow_started(timestamp: float) -> None:
             }
         )
         _workflow_started_emitted = True
+    finally:
+        # Release lock but keep lock file for other processes
+        if _workflow_lock_fd is not None:
+            try:
+                fcntl.flock(_workflow_lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 def log_handler(msg: dict[str, Any]) -> None:
