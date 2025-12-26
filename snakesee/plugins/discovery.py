@@ -22,6 +22,25 @@ _entry_point_plugins: list[ToolProgressPlugin] | None = None
 _entry_point_version_hash: int = 0
 
 
+def _compute_version_hash() -> int:
+    """Compute a hash of installed package versions to detect updates.
+
+    Returns:
+        Hash of (name, version) tuples, or 0 on error.
+    """
+    try:
+        return hash(
+            tuple(
+                (d.metadata["Name"], d.metadata["Version"])
+                for d in distributions()
+                if "Name" in d.metadata and "Version" in d.metadata
+            )
+        )
+    except (TypeError, OSError) as e:
+        logger.debug("Failed to compute package version hash: %s", e)
+        return 0
+
+
 def discover_entry_point_plugins(
     force_reload: bool = False,
 ) -> list[ToolProgressPlugin]:
@@ -43,37 +62,15 @@ def discover_entry_point_plugins(
     global _entry_point_plugins
     global _entry_point_version_hash
 
-    # Fast path: return cached plugins if not forcing reload and cache exists
-    if _entry_point_plugins is not None and not force_reload:
-        # Only compute version hash if we have a cache to potentially return
-        try:
-            version_hash = hash(
-                tuple(
-                    (d.metadata["Name"], d.metadata["Version"])
-                    for d in distributions()
-                    if "Name" in d.metadata and "Version" in d.metadata
-                )
-            )
-        except (TypeError, OSError) as e:
-            logger.debug("Failed to compute package version hash: %s", e)
-            version_hash = 0
+    version_hash = _compute_version_hash()
 
-        # Return cached if version hash matches
-        if _entry_point_version_hash == version_hash:
-            return _entry_point_plugins
-    else:
-        # Need to compute version hash for storage after loading
-        try:
-            version_hash = hash(
-                tuple(
-                    (d.metadata["Name"], d.metadata["Version"])
-                    for d in distributions()
-                    if "Name" in d.metadata and "Version" in d.metadata
-                )
-            )
-        except (TypeError, OSError) as e:
-            logger.debug("Failed to compute package version hash: %s", e)
-            version_hash = 0
+    # Return cached plugins if valid and not forcing reload
+    if (
+        _entry_point_plugins is not None
+        and not force_reload
+        and _entry_point_version_hash == version_hash
+    ):
+        return _entry_point_plugins
 
     plugins: list[ToolProgressPlugin] = []
 
