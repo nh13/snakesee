@@ -492,3 +492,93 @@ class TestRuleRegistryIntegration:
         mean3 = estimator.global_mean_duration()
         assert mean3 == pytest.approx(91.67, rel=0.01)  # (100+50+125)/3
         assert estimator._global_mean_cache_sample_count == 3
+
+
+class TestEstimatorHelperMethods:
+    """Tests for extracted helper methods in TimeEstimator."""
+
+    def test_estimate_parallelism_with_history(self) -> None:
+        """Test parallelism estimation from historical completion rate."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        estimator = TimeEstimator(rule_registry=registry)
+
+        # Create progress with history: 10 jobs in 100 seconds = 0.1 jobs/sec
+        # With global mean of 60s, parallelism = 0.1 * 60 = 6 -> sqrt(6) ≈ 2.45
+        progress = WorkflowProgress(
+            workflow_dir=Path("/tmp"),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=20,
+            completed_jobs=10,
+            running_jobs=[],
+            start_time=0.0,
+        )
+        # Mock elapsed time
+        progress = WorkflowProgress(
+            workflow_dir=Path("/tmp"),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=20,
+            completed_jobs=10,
+            running_jobs=[],
+            start_time=0.0,
+        )
+
+        # Test with no elapsed time (fallback path)
+        parallelism = estimator._estimate_parallelism(progress, 60.0)
+        assert parallelism >= 1.0
+
+    def test_estimate_parallelism_fallback(self) -> None:
+        """Test parallelism fallback when no history available."""
+        estimator = TimeEstimator()
+
+        running = [
+            JobInfo(rule="align", job_id="1"),
+            JobInfo(rule="align", job_id="2"),
+            JobInfo(rule="align", job_id="3"),
+            JobInfo(rule="align", job_id="4"),
+        ]
+
+        progress = WorkflowProgress(
+            workflow_dir=Path("/tmp"),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=10,
+            completed_jobs=0,
+            running_jobs=running,
+        )
+
+        parallelism = estimator._estimate_parallelism(progress, 60.0)
+        # With 4 running jobs, fallback is min(4, sqrt(4)) = 2
+        assert parallelism == pytest.approx(2.0)
+
+    def test_calculate_confidence_scores_empty(self) -> None:
+        """Test confidence calculation with no data."""
+        estimator = TimeEstimator()
+
+        sample_conf, recency, consistency, coverage = estimator._calculate_confidence_scores({}, {})
+
+        assert sample_conf == 0.0
+        assert recency == 0.5  # Default when no data
+        assert consistency == 0.5  # Default when no data
+        assert coverage == 0.0
+
+    def test_calculate_confidence_scores_with_data(self) -> None:
+        """Test confidence calculation with data."""
+        from snakesee.state.rule_registry import RuleRegistry
+
+        registry = RuleRegistry()
+        # Add consistent timing data
+        for i in range(5):
+            registry.record_completion("align", 100.0 + i, 1000.0 + i * 100)
+
+        estimator = TimeEstimator(rule_registry=registry)
+        rule_completed = {"align": 5}
+
+        sample_conf, recency, consistency, coverage = estimator._calculate_confidence_scores(
+            rule_completed, estimator.rule_stats
+        )
+
+        assert sample_conf > 0.0
+        assert recency > 0.0
+        assert consistency > 0.0
+        assert coverage > 0.0
