@@ -311,13 +311,19 @@ class LogHandler(LogHandlerBase):
             timestamp: Event timestamp.
         """
         jobid = getattr(record, "jobid", None)
+        # Only emit job_error events for actual jobs (with job_id)
+        # RuleException messages come through without job_id and should be ignored
+        # since the actual job failure event follows with the job_id
+        if jobid is None:
+            return
+
         # rule_name attribute, not name (which is the logger name)
         rule_name = getattr(record, "rule_name", None)
         if rule_name is None:
             rule_name = getattr(record, "rule", None)
 
         # Fall back to stored rule name if not in record
-        if rule_name is None and jobid is not None:
+        if rule_name is None:
             rule_name = self._job_rules.get(jobid)
 
         start_time = None

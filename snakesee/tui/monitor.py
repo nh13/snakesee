@@ -699,16 +699,18 @@ class WorkflowMonitorTUI:
         self,
         running_jobs: list[JobInfo],
         completions: list[JobInfo],
+        failed_jobs: list[JobInfo] | None = None,
     ) -> list[JobInfo]:
-        """Compute pending jobs by subtracting running/completed from all scheduled.
+        """Compute pending jobs by subtracting running/completed/failed from all scheduled.
 
         When the snakesee logger plugin isn't available, we fall back to parsing
         all scheduled jobs from the snakemake log. This method computes which of
-        those scheduled jobs are still pending (not yet running or completed).
+        those scheduled jobs are still pending (not yet running, completed, or failed).
 
         Args:
             running_jobs: Currently running jobs.
             completions: Completed jobs.
+            failed_jobs: Failed jobs (to exclude from pending).
 
         Returns:
             List of pending jobs with their wildcards and threads.
@@ -717,7 +719,8 @@ class WorkflowMonitorTUI:
             return []
         running_ids = {job.job_id for job in running_jobs if job.job_id}
         completed_ids = {job.job_id for job in completions if job.job_id}
-        excluded_ids = running_ids | completed_ids
+        failed_ids = {job.job_id for job in (failed_jobs or []) if job.job_id}
+        excluded_ids = running_ids | completed_ids | failed_ids
         return [
             job for job_id, job in self._all_scheduled_jobs.items() if job_id not in excluded_ids
         ]
@@ -742,10 +745,8 @@ class WorkflowMonitorTUI:
         new_completed = progress.completed_jobs
         new_running_jobs = list(progress.running_jobs)
         new_completions = list(progress.recent_completions)
-        new_failed = progress.failed_jobs
-        new_failed_list = list(progress.failed_jobs_list)
 
-        # Process events to update state
+        # Process events FIRST to update registry state
         for event in events:
             # Route event through centralized JobRegistry (Phase 10)
             self._workflow_state.jobs.apply_event(event)
@@ -764,8 +765,18 @@ class WorkflowMonitorTUI:
                 self._handle_job_finished_event(event, new_completions)
                 # Record stats to RuleRegistry for newly completed jobs
                 self._record_job_stats_from_event(event)
-            elif event.event_type == EventType.JOB_ERROR:
-                new_failed = self._handle_job_error_event(event, new_failed_list)
+            # JOB_ERROR is handled by apply_event above (updates registry)
+
+        # AFTER events are processed, merge failed jobs from registry with log-parsed
+        # Registry is source of truth (events), log parsing may miss some failures
+        registry_failed = self._workflow_state.jobs.failed_job_infos()
+        registry_failed_ids = {job.job_id for job in registry_failed if job.job_id}
+        # Start with registry failed (authoritative), add any log-parsed that registry missed
+        new_failed_list = list(registry_failed)
+        for job in progress.failed_jobs_list:
+            if job.job_id and job.job_id not in registry_failed_ids:
+                new_failed_list.append(job)
+        new_failed = len(new_failed_list)
 
         # Apply stored threads/wildcards to running jobs that may have lost them
         # (log-parsed jobs may not have threads if the line order varies)
@@ -792,7 +803,7 @@ class WorkflowMonitorTUI:
         # Fallback: if no pending jobs from events, compute from log-based scheduled jobs
         if not pending_jobs_list:
             pending_jobs_list = self._compute_pending_jobs_from_scheduled(
-                new_running_jobs, new_completions
+                new_running_jobs, new_completions, new_failed_list
             )
 
         # Return updated progress
@@ -2748,6 +2759,24 @@ class WorkflowMonitorTUI:
         if events:
             progress = self._apply_events_to_progress(progress, events)
             self._force_refresh = True
+        else:
+            # Even without new events, merge registry-tracked failed jobs into progress
+            # This ensures failed jobs discovered via earlier events are not lost
+            # when log re-parsing misses them
+            registry_failed = self._workflow_state.jobs.failed_job_infos()
+            if registry_failed:
+                from dataclasses import replace
+
+                registry_failed_ids = {job.job_id for job in registry_failed if job.job_id}
+                merged_failed = list(registry_failed)
+                for job in progress.failed_jobs_list:
+                    if job.job_id and job.job_id not in registry_failed_ids:
+                        merged_failed.append(job)
+                progress = replace(
+                    progress,
+                    failed_jobs=len(merged_failed),
+                    failed_jobs_list=merged_failed,
+                )
 
         # Always populate pending_jobs_list from log-based scheduled jobs
         # (even when no new events, we need this for wildcard-conditioned ETA)
@@ -2755,7 +2784,7 @@ class WorkflowMonitorTUI:
             from dataclasses import replace
 
             pending_jobs_list = self._compute_pending_jobs_from_scheduled(
-                progress.running_jobs, progress.recent_completions
+                progress.running_jobs, progress.recent_completions, progress.failed_jobs_list
             )
             if pending_jobs_list:
                 progress = replace(progress, pending_jobs_list=pending_jobs_list)

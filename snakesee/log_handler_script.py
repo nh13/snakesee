@@ -332,6 +332,12 @@ def _handle_job_finished(msg: dict[str, Any], timestamp: float) -> None:
 def _handle_job_error(msg: dict[str, Any], timestamp: float) -> None:
     """Handle job failure."""
     jobid = msg.get("jobid")
+    # Only emit job_error events for actual jobs (with job_id)
+    # RuleException messages come through without job_id and should be ignored
+    # since the actual job failure event follows with the job_id
+    if jobid is None:
+        return
+
     rule_name = msg.get("name") or msg.get("rule")
 
     error_msg = msg.get("msg") or msg.get("message")
