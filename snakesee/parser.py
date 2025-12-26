@@ -11,7 +11,6 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from typing import TypedDict
 
 from snakesee.models import JobInfo
@@ -19,6 +18,7 @@ from snakesee.models import RuleTimingStats
 from snakesee.models import WildcardTimingStats
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
+from snakesee.utils import iterate_metadata_files
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +120,6 @@ def _parse_wildcards(wildcards_str: str) -> dict[str, str]:
             key, value = part.split("=", 1)
             wildcards[key.strip()] = value.strip()
     return wildcards
-
-
-def _safe_mtime(p: Path) -> float:
-    """Get mtime, returning 0 if file was deleted (race condition)."""
-    try:
-        return p.stat().st_mtime
-    except FileNotFoundError:
-        return 0
 
 
 def _parse_positive_int(value: str, field_name: str = "value") -> int | None:
@@ -727,50 +719,6 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
     return rule_counts
 
 
-def _iterate_metadata_files(
-    metadata_dir: Path,
-    progress_callback: Callable[[int, int], None] | None = None,
-) -> Iterator[tuple[Path, dict[str, Any]]]:
-    """Iterate metadata files with optional progress reporting.
-
-    Args:
-        metadata_dir: Path to .snakemake/metadata/ directory.
-        progress_callback: Optional callback(current, total) for progress reporting.
-
-    Yields:
-        Tuples of (file_path, parsed_json_data) for each valid metadata file.
-    """
-    if not metadata_dir.exists():
-        return
-
-    # Get file list upfront if progress is requested for accurate reporting
-    if progress_callback is not None:
-        files = [f for f in metadata_dir.rglob("*") if f.is_file()]
-        total = len(files)
-    else:
-        files = None
-        total = 0
-
-    file_iter = files if files is not None else metadata_dir.rglob("*")
-
-    for i, meta_file in enumerate(file_iter):
-        if files is None and not meta_file.is_file():
-            continue
-
-        if progress_callback is not None:
-            progress_callback(i + 1, total)
-
-        try:
-            data = json.loads(meta_file.read_text())
-            yield meta_file, data
-        except json.JSONDecodeError as e:
-            logger.debug("Malformed JSON in metadata file %s: %s", meta_file, e)
-            continue
-        except OSError as e:
-            logger.debug("Error reading metadata file %s: %s", meta_file, e)
-            continue
-
-
 def _calculate_input_size(input_files: list[str] | None) -> int | None:
     """Calculate total input size from file list.
 
@@ -809,7 +757,7 @@ def parse_metadata_files(
     Yields:
         JobInfo instances for each completed job found.
     """
-    for _path, data in _iterate_metadata_files(metadata_dir, progress_callback):
+    for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
         try:
             rule = data.get("rule")
             starttime = data.get("starttime")
@@ -850,7 +798,7 @@ def parse_metadata_files_full(
     Yields:
         MetadataRecord instances containing timing and code hash data.
     """
-    for _path, data in _iterate_metadata_files(metadata_dir, progress_callback):
+    for _path, data in iterate_metadata_files(metadata_dir, progress_callback):
         try:
             rule = data.get("rule")
             if rule is None:

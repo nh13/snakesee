@@ -13,6 +13,7 @@ from snakesee.plugins.fgbio import FgbioPlugin
 from snakesee.plugins.samtools import SamtoolsIndexPlugin
 from snakesee.plugins.samtools import SamtoolsSortPlugin
 from snakesee.plugins.star import STARPlugin
+from snakesee.utils import safe_mtime
 
 __all__ = [
     "ToolProgress",
@@ -285,14 +286,6 @@ def parse_tool_progress(
     return plugin.parse_progress(content)
 
 
-def _safe_mtime(p: Path) -> float:
-    """Get mtime, returning 0 if file was deleted (race condition)."""
-    try:
-        return p.stat().st_mtime
-    except FileNotFoundError:
-        return 0
-
-
 def _search_log_dir(
     log_dir: Path,
     rule_name: str,
@@ -373,7 +366,7 @@ def find_rule_log(
     # Sort by modification time (newest first) and return first match
     existing_logs = [p for p in search_paths if p.is_file()]
     if existing_logs:
-        existing_logs.sort(key=_safe_mtime, reverse=True)
+        existing_logs.sort(key=safe_mtime, reverse=True)
         # Return first file that still exists
         for log in existing_logs:
             if log.exists():
