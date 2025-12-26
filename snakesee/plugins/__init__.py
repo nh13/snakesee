@@ -1,6 +1,7 @@
 """Plugin system for tool-specific progress parsing."""
 
 import importlib.util
+import logging
 import sys
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -14,6 +15,8 @@ from snakesee.plugins.samtools import SamtoolsIndexPlugin
 from snakesee.plugins.samtools import SamtoolsSortPlugin
 from snakesee.plugins.star import STARPlugin
 from snakesee.utils import safe_mtime
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ToolProgress",
@@ -108,9 +111,8 @@ def load_user_plugins(
             try:
                 plugins = _load_plugins_from_file(plugin_file)
                 loaded_plugins.extend(plugins)
-            except Exception:
-                # Skip files that fail to load
-                # In a production system, you might want to log this
+            except (ImportError, SyntaxError, OSError) as e:
+                logger.debug("Failed to load plugin from %s: %s", plugin_file, e)
                 continue
 
     _user_plugins = loaded_plugins
@@ -157,8 +159,8 @@ def _load_plugins_from_file(plugin_file: Path) -> list[ToolProgressPlugin]:
         ):
             try:
                 plugins.append(obj())
-            except Exception:
-                # Skip plugins that fail to instantiate
+            except (TypeError, AttributeError, RuntimeError) as e:
+                logger.debug("Failed to instantiate plugin %s: %s", name, e)
                 continue
 
     return plugins
@@ -197,12 +199,11 @@ def discover_entry_point_plugins(
                 plugin_class = ep.load()
                 if isinstance(plugin_class, type) and issubclass(plugin_class, ToolProgressPlugin):
                     plugins.append(plugin_class())
-            except Exception:
-                # Skip broken plugins silently
+            except (ImportError, TypeError, AttributeError) as e:
+                logger.debug("Failed to load entry point plugin %s: %s", ep.name, e)
                 continue
-    except Exception:
-        # Entry points not available or error occurred
-        pass
+    except (TypeError, OSError) as e:
+        logger.debug("Error discovering entry points: %s", e)
 
     _entry_point_plugins = plugins
     return plugins
