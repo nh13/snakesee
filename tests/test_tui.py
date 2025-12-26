@@ -1396,3 +1396,246 @@ class TestKeyboardEdgeCases:
 
         # Should not crash and offset should be valid
         assert tui._log_scroll_offset >= 0
+
+
+class TestJobSelectionModeKeyHandling:
+    """Tests for key handling in job selection mode."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_help_key_works_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '?' shows help in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._show_help is False
+
+        result = tui._handle_key("?")
+
+        assert result is False  # Should not quit
+        assert tui._show_help is True
+
+    def test_sort_cycle_forward_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 's' cycles sort table in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._sort_table is None
+
+        tui._handle_key("s")
+        assert tui._sort_table == "running"
+
+        tui._handle_key("s")
+        assert tui._sort_table == "completions"
+
+    def test_sort_cycle_backward_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'S' cycles sort table backward in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._sort_table is None
+
+        tui._handle_key("S")
+        assert tui._sort_table == "stats"
+
+        tui._handle_key("S")
+        assert tui._sort_table == "pending"
+
+    def test_column_sort_keys_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 1-4 keys work for column sorting in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"  # Must select a table first
+        tui._sort_column = 0
+        tui._sort_ascending = True
+
+        # Press '2' to sort by column 2
+        tui._handle_key("2")
+        assert tui._sort_column == 1  # 0-indexed
+
+        # Press '2' again to reverse sort
+        tui._handle_key("2")
+        assert tui._sort_column == 1
+        assert tui._sort_ascending is False
+
+    def test_column_sort_key_3_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '3' key works in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"
+
+        tui._handle_key("3")
+        assert tui._sort_column == 2
+
+    def test_column_sort_key_4_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '4' key works for running/stats tables in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"
+
+        tui._handle_key("4")
+        assert tui._sort_column == 3
+
+    def test_job_selection_mode_still_handles_navigation(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that job navigation still works after sort keys added."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 5
+
+        # Ctrl+p should still navigate up
+        tui._handle_key("\x10")
+        assert tui._selected_job_index == 4
+
+    def test_job_selection_mode_escape_still_exits(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that Escape still exits job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+
+        tui._handle_key("\x1b")
+
+        assert tui._job_selection_mode is False
+        assert tui._log_source is None
+
+    def test_help_closes_with_any_key_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that help overlay closes with any key while in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._show_help = True
+
+        # Any key should close help, even in job selection mode
+        tui._handle_key("x")
+
+        assert tui._show_help is False
+        # Should still be in job selection mode
+        assert tui._job_selection_mode is True
+
+    def test_help_closes_before_job_selection_handles_key(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that help closes before job selection mode processes the key."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._show_help = True
+        tui._selected_job_index = 5
+
+        # Ctrl+p would normally navigate, but should just close help
+        tui._handle_key("\x10")
+
+        assert tui._show_help is False
+        # Job index should NOT have changed (key was consumed by help close)
+        assert tui._selected_job_index == 5
+
+
+class TestJobIdColumnWidth:
+    """Tests for dynamic job ID column width calculation."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_empty_jobs_returns_minimum_width(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that empty job list returns minimum width of 2."""
+        width = tui._get_job_id_column_width([])
+        assert width == 2
+
+    def test_single_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for single-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="1"),
+            JobInfo(rule="test", job_id="5"),
+            JobInfo(rule="test", job_id="9"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2  # Minimum is 2
+
+    def test_double_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for double-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="10"),
+            JobInfo(rule="test", job_id="50"),
+            JobInfo(rule="test", job_id="99"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2
+
+    def test_triple_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for triple-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="100"),
+            JobInfo(rule="test", job_id="500"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 3
+
+    def test_large_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for large job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="12345"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 5
+
+    def test_mixed_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width uses maximum job ID."""
+        jobs = [
+            JobInfo(rule="test", job_id="5"),
+            JobInfo(rule="test", job_id="1000"),
+            JobInfo(rule="test", job_id="50"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 4  # 1000 requires 4 digits
+
+    def test_jobs_without_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width based on job count when no job IDs."""
+        jobs = [
+            JobInfo(rule="test"),
+            JobInfo(rule="test"),
+            JobInfo(rule="test"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2  # 3 jobs, single digit, minimum 2
+
+    def test_many_jobs_without_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width scales with job count when no job IDs."""
+        jobs = [JobInfo(rule="test") for _ in range(150)]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 3  # 150 requires 3 digits
+
+    def test_non_numeric_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test handling of non-numeric job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="abc"),
+            JobInfo(rule="test", job_id="xyz123"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        # Should handle gracefully (uses string length heuristic)
+        assert width >= 2
