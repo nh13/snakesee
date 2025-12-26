@@ -3,6 +3,24 @@
 This module consolidates configuration constants and magic numbers
 used across multiple modules to ensure consistency and make tuning easier.
 
+Configuration is organized into two modules:
+
+1. This module (constants.py): Runtime configuration
+   - RefreshRateConfig: TUI refresh rates
+   - CacheConfig: Caching behavior and TTLs
+   - FileSizeLimits: Security limits for file parsing
+
+2. snakesee.state.config: Estimation-specific configuration
+   - EstimationConfig: Time estimation parameters
+   - VarianceMultipliers: Variance settings per estimation method
+   - ConfidenceWeights: Confidence calculation weights
+   - ConfidenceThresholds: Decision thresholds
+   - TimeConstants: Time-related constants
+
+Note: Both modules define stale_workflow_threshold (here as STALE_WORKFLOW_THRESHOLD_SECONDS,
+in state.config as TimeConstants.stale_workflow_threshold). These should be kept in sync
+at their default value of 1800.0 seconds (30 minutes).
+
 For estimation-specific configuration, see :class:`snakesee.state.config.EstimationConfig`.
 """
 
