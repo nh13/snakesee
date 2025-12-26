@@ -989,23 +989,23 @@ class TestParseNonNegativeInt:
 
 
 class TestSafeMtime:
-    """Tests for _safe_mtime function."""
+    """Tests for safe_mtime function."""
 
     def test_existing_file(self, tmp_path: Path) -> None:
         """Test getting mtime of existing file."""
-        from snakesee.parser import _safe_mtime
+        from snakesee.utils import safe_mtime
 
         test_file = tmp_path / "test.txt"
         test_file.write_text("content")
-        mtime = _safe_mtime(test_file)
+        mtime = safe_mtime(test_file)
         assert mtime > 0
 
     def test_nonexistent_file(self, tmp_path: Path) -> None:
         """Test getting mtime of nonexistent file returns 0."""
-        from snakesee.parser import _safe_mtime
+        from snakesee.utils import safe_mtime
 
         nonexistent = tmp_path / "does_not_exist.txt"
-        assert _safe_mtime(nonexistent) == 0
+        assert safe_mtime(nonexistent) == 0
 
 
 class TestParseJobStatsFromLog:

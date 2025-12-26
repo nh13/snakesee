@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from snakesee.utils import safe_mtime
+
 # Default names for snakemake directories and files
 SNAKEMAKE_DIR = ".snakemake"
 METADATA_DIR = "metadata"
@@ -20,14 +22,6 @@ LOG_GLOB_PATTERN = "*.snakemake.log"
 EVENT_FILE_NAME = ".snakesee_events.jsonl"
 VALIDATION_LOG_NAME = ".snakesee_validation.log"
 DEFAULT_PROFILE_NAME = ".snakesee-profile.json"
-
-
-def _safe_mtime(path: Path) -> float:
-    """Get mtime, returning 0 if file was deleted (race condition)."""
-    try:
-        return path.stat().st_mtime
-    except FileNotFoundError:
-        return 0.0
 
 
 @dataclass(frozen=True)
@@ -166,7 +160,7 @@ class WorkflowPaths:
         logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if p.exists()]
         if not logs:
             return None
-        logs.sort(key=_safe_mtime)
+        logs.sort(key=safe_mtime)
         return logs[-1]
 
     def find_all_logs(self) -> list[Path]:
@@ -178,7 +172,7 @@ class WorkflowPaths:
         if not self.log_dir.exists():
             return []
         logs = [p for p in self.log_dir.glob(LOG_GLOB_PATTERN) if p.exists()]
-        logs.sort(key=_safe_mtime)
+        logs.sort(key=safe_mtime)
         return logs
 
     def find_logs_sorted_newest_first(self) -> list[Path]:
@@ -290,7 +284,7 @@ class WorkflowPaths:
         # Sort by modification time (newest first) and return first match
         existing_logs = [p for p in search_paths if p.is_file()]
         if existing_logs:
-            existing_logs.sort(key=_safe_mtime, reverse=True)
+            existing_logs.sort(key=safe_mtime, reverse=True)
             for log in existing_logs:
                 if log.exists():
                     return log
