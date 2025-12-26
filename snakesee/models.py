@@ -10,6 +10,7 @@ from statistics import stdev
 from typing import ClassVar
 from typing import Literal
 
+from snakesee.state.clock import ClockUtils
 from snakesee.state.clock import get_clock
 
 logger = logging.getLogger(__name__)
@@ -68,15 +69,14 @@ class JobInfo:
         if self.start_time is None:
             return None
         end = self.end_time or get_clock().now()
-        elapsed = end - self.start_time
-        if elapsed < 0:
+        result = ClockUtils.calculate_duration(self.start_time, end, f"job {self.rule}")
+        if not result.is_valid:
             logger.warning(
                 "Negative elapsed time detected for job %s: %.2fs (clock skew?)",
                 self.rule,
-                elapsed,
+                result.raw_value,
             )
-            return 0.0
-        return elapsed
+        return result.value
 
     @property
     def duration(self) -> float | None:
@@ -87,15 +87,16 @@ class JobInfo:
             Duration in seconds (always >= 0), or None if job not completed.
         """
         if self.start_time is not None and self.end_time is not None:
-            duration = self.end_time - self.start_time
-            if duration < 0:
+            result = ClockUtils.calculate_duration(
+                self.start_time, self.end_time, f"job {self.rule}"
+            )
+            if not result.is_valid:
                 logger.warning(
                     "Negative duration detected for job %s: %.2fs (clock skew?)",
                     self.rule,
-                    duration,
+                    result.raw_value,
                 )
-                return 0.0
-            return duration
+            return result.value
         return None
 
 
@@ -239,13 +240,12 @@ class RuleTimingStats:
         Returns:
             Time-weighted mean duration.
         """
-        now = get_clock().now()
         half_life_seconds = half_life_days * 86400  # Convert days to seconds
 
         weights: list[float] = []
         for ts in self.timestamps:
-            age_seconds = max(0, now - ts)  # Ensure non-negative
-            weight = 0.5 ** (age_seconds / half_life_seconds)
+            age = ClockUtils.age_seconds(ts)
+            weight = 0.5 ** (age / half_life_seconds)
             weights.append(weight)
 
         weighted_sum = sum(d * w for d, w in zip(self.durations, weights, strict=True))
@@ -406,11 +406,12 @@ class RuleTimingStats:
         if half_life_days is None:
             half_life_days = self.DEFAULT_HALF_LIFE_DAYS
 
-        now = get_clock().now()
         half_life_seconds = half_life_days * 86400
 
         # Calculate average weight of data points
-        weights = [0.5 ** (max(0, now - ts) / half_life_seconds) for ts in self.timestamps]
+        weights = [
+            0.5 ** (ClockUtils.age_seconds(ts) / half_life_seconds) for ts in self.timestamps
+        ]
         avg_weight = sum(weights) / len(weights) if weights else 0.5
 
         return min(1.0, avg_weight)

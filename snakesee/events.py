@@ -162,7 +162,7 @@ class EventReader:
                     self._offset = f.tell()
             except OSError as e:
                 # File access error - log and return empty list
-                logger.debug("Error reading event file %s: %s", self.event_file, e)
+                logger.info("Error reading event file %s: %s", self.event_file, e)
 
         return events
 

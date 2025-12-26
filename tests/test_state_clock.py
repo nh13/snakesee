@@ -5,6 +5,8 @@ from collections.abc import Generator
 
 import pytest
 
+from snakesee.state.clock import ClockUtils
+from snakesee.state.clock import DurationResult
 from snakesee.state.clock import FrozenClock
 from snakesee.state.clock import OffsetClock
 from snakesee.state.clock import SystemClock
@@ -153,3 +155,110 @@ def cleanup_clock() -> Generator[None, None, None]:
     """Reset clock after each test."""
     yield
     reset_clock()
+
+
+class TestDurationResult:
+    """Tests for DurationResult."""
+
+    def test_valid_duration(self) -> None:
+        """Test DurationResult with valid (positive) duration."""
+        result = DurationResult(value=10.0, raw_value=10.0, is_valid=True, context="test")
+        assert result.value == 10.0
+        assert result.raw_value == 10.0
+        assert result.is_valid is True
+        assert result.context == "test"
+
+    def test_invalid_duration(self) -> None:
+        """Test DurationResult with invalid (negative) duration."""
+        result = DurationResult(value=0.0, raw_value=-5.0, is_valid=False, context="clock skew")
+        assert result.value == 0.0
+        assert result.raw_value == -5.0
+        assert result.is_valid is False
+        assert result.context == "clock skew"
+
+    def test_repr(self) -> None:
+        """Test DurationResult repr."""
+        result = DurationResult(value=5.0, raw_value=5.0, is_valid=True, context="job")
+        assert "DurationResult" in repr(result)
+        assert "value=5.0" in repr(result)
+
+
+class TestClockUtils:
+    """Tests for ClockUtils."""
+
+    def test_calculate_duration_valid(self) -> None:
+        """Test calculate_duration with valid timestamps."""
+        result = ClockUtils.calculate_duration(100.0, 150.0, "test job")
+        assert result.value == 50.0
+        assert result.raw_value == 50.0
+        assert result.is_valid is True
+        assert result.context == "test job"
+
+    def test_calculate_duration_zero(self) -> None:
+        """Test calculate_duration with zero duration."""
+        result = ClockUtils.calculate_duration(100.0, 100.0)
+        assert result.value == 0.0
+        assert result.raw_value == 0.0
+        assert result.is_valid is True
+
+    def test_calculate_duration_negative_clamped(self) -> None:
+        """Test calculate_duration with negative duration (clock skew)."""
+        result = ClockUtils.calculate_duration(150.0, 100.0, "clock skew job")
+        assert result.value == 0.0  # Clamped to zero
+        assert result.raw_value == -50.0  # Original negative value
+        assert result.is_valid is False
+        assert result.context == "clock skew job"
+
+    def test_elapsed_since_with_frozen_clock(self) -> None:
+        """Test elapsed_since with a frozen clock."""
+        clock = FrozenClock(1000.0)
+        set_clock(clock)
+        result = ClockUtils.elapsed_since(900.0, "test elapsed")
+        assert result.value == 100.0
+        assert result.is_valid is True
+
+    def test_elapsed_since_explicit_clock(self) -> None:
+        """Test elapsed_since with explicit clock parameter."""
+        clock = FrozenClock(2000.0)
+        result = ClockUtils.elapsed_since(1800.0, "explicit clock", clock=clock)
+        assert result.value == 200.0
+        assert result.is_valid is True
+
+    def test_validate_duration_positive(self) -> None:
+        """Test validate_duration with positive value."""
+        result = ClockUtils.validate_duration(25.5, "job duration")
+        assert result.value == 25.5
+        assert result.is_valid is True
+
+    def test_validate_duration_zero(self) -> None:
+        """Test validate_duration with zero value."""
+        result = ClockUtils.validate_duration(0.0)
+        assert result.value == 0.0
+        assert result.is_valid is True
+
+    def test_validate_duration_negative(self) -> None:
+        """Test validate_duration with negative value."""
+        result = ClockUtils.validate_duration(-10.0, "bad duration")
+        assert result.value == 0.0
+        assert result.raw_value == -10.0
+        assert result.is_valid is False
+
+    def test_age_seconds_with_frozen_clock(self) -> None:
+        """Test age_seconds with frozen clock."""
+        clock = FrozenClock(1000.0)
+        set_clock(clock)
+        age = ClockUtils.age_seconds(900.0)
+        assert age == 100.0
+
+    def test_age_seconds_future_timestamp_clamped(self) -> None:
+        """Test age_seconds with future timestamp is clamped to zero."""
+        clock = FrozenClock(1000.0)
+        set_clock(clock)
+        age = ClockUtils.age_seconds(1100.0)
+        assert age == 0.0  # Future timestamps clamped to zero
+
+    def test_age_seconds_explicit_clock(self) -> None:
+        """Test age_seconds with explicit clock parameter."""
+        clock = FrozenClock(500.0)
+        age = ClockUtils.age_seconds(300.0, clock=clock)
+        assert age == 200.0

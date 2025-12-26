@@ -121,9 +121,9 @@ class IncrementalLogReader:
             except FileNotFoundError:
                 pass
             except PermissionError as e:
-                logger.debug("Permission denied reading log file %s: %s", self.log_path, e)
+                logger.info("Permission denied reading log file %s: %s", self.log_path, e)
             except OSError as e:
-                logger.debug("Error reading log file %s: %s", self.log_path, e)
+                logger.info("Error reading log file %s: %s", self.log_path, e)
 
             return lines_processed
 

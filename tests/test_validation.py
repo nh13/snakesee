@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from snakesee.events import EventType
 from snakesee.events import SnakeseeEvent
+from snakesee.exceptions import InvalidParameterError
 from snakesee.models import JobInfo
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
@@ -11,6 +14,14 @@ from snakesee.validation import Discrepancy
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
+from snakesee.validation import require_in_range
+from snakesee.validation import require_non_negative
+from snakesee.validation import require_not_empty
+from snakesee.validation import require_positive
+from snakesee.validation import validate_in_range
+from snakesee.validation import validate_non_negative
+from snakesee.validation import validate_not_empty
+from snakesee.validation import validate_positive
 
 
 class TestEventAccumulator:
@@ -614,3 +625,217 @@ class TestOutOfOrderEvents:
         # This is expected - events are processed in arrival order, not timestamp order
         assert acc.jobs[1].rule_name == "align"
         assert acc.jobs[1].status == "running"
+
+
+# =============================================================================
+# Tests for Parameter Validation Functions
+# =============================================================================
+
+
+class TestRequirePositive:
+    """Tests for require_positive function."""
+
+    def test_positive_value(self) -> None:
+        """Test that positive values pass through."""
+        assert require_positive(5.0, "test") == 5.0
+        assert require_positive(1, "test") == 1
+        assert require_positive(0.001, "test") == 0.001
+
+    def test_zero_raises(self) -> None:
+        """Test that zero raises InvalidParameterError."""
+        with pytest.raises(InvalidParameterError) as exc_info:
+            require_positive(0, "param")
+        assert exc_info.value.parameter == "param"
+        assert exc_info.value.value == 0
+
+    def test_negative_raises(self) -> None:
+        """Test that negative values raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError):
+            require_positive(-5.0, "param")
+
+
+class TestRequireNonNegative:
+    """Tests for require_non_negative function."""
+
+    def test_positive_value(self) -> None:
+        """Test that positive values pass through."""
+        assert require_non_negative(5.0, "test") == 5.0
+
+    def test_zero_passes(self) -> None:
+        """Test that zero passes through."""
+        assert require_non_negative(0, "test") == 0
+        assert require_non_negative(0.0, "test") == 0.0
+
+    def test_negative_raises(self) -> None:
+        """Test that negative values raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError) as exc_info:
+            require_non_negative(-1.0, "param")
+        assert exc_info.value.parameter == "param"
+
+
+class TestRequireNotEmpty:
+    """Tests for require_not_empty function."""
+
+    def test_non_empty_list(self) -> None:
+        """Test that non-empty lists pass through."""
+        result = require_not_empty([1, 2, 3], "items")
+        assert result == [1, 2, 3]
+
+    def test_non_empty_tuple(self) -> None:
+        """Test that non-empty tuples pass through."""
+        result = require_not_empty((1, 2), "items")
+        assert result == (1, 2)
+
+    def test_empty_list_raises(self) -> None:
+        """Test that empty lists raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError) as exc_info:
+            require_not_empty([], "items")
+        assert exc_info.value.parameter == "items"
+
+    def test_empty_tuple_raises(self) -> None:
+        """Test that empty tuples raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError):
+            require_not_empty((), "items")
+
+
+class TestRequireInRange:
+    """Tests for require_in_range function."""
+
+    def test_value_in_range(self) -> None:
+        """Test that values in range pass through."""
+        assert require_in_range(5, "x", min_value=0, max_value=10) == 5
+        assert require_in_range(0, "x", min_value=0, max_value=10) == 0
+        assert require_in_range(10, "x", min_value=0, max_value=10) == 10
+
+    def test_below_min_raises(self) -> None:
+        """Test that values below minimum raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError) as exc_info:
+            require_in_range(-1, "x", min_value=0)
+        assert ">= 0" in exc_info.value.constraint
+
+    def test_above_max_raises(self) -> None:
+        """Test that values above maximum raise InvalidParameterError."""
+        with pytest.raises(InvalidParameterError) as exc_info:
+            require_in_range(11, "x", max_value=10)
+        assert "<= 10" in exc_info.value.constraint
+
+    def test_no_constraints(self) -> None:
+        """Test that any value passes with no constraints."""
+        assert require_in_range(-100, "x") == -100
+        assert require_in_range(1000, "x") == 1000
+
+
+class TestValidatePositiveDecorator:
+    """Tests for validate_positive decorator."""
+
+    def test_decorator_passes_valid_values(self) -> None:
+        """Test that decorator allows positive values."""
+
+        @validate_positive("x", "y")
+        def func(x: float, y: int) -> float:
+            return x + y
+
+        assert func(1.0, 2) == 3.0
+
+    def test_decorator_rejects_zero(self) -> None:
+        """Test that decorator rejects zero."""
+
+        @validate_positive("x")
+        def func(x: float) -> float:
+            return x
+
+        with pytest.raises(InvalidParameterError):
+            func(0.0)
+
+    def test_decorator_rejects_negative(self) -> None:
+        """Test that decorator rejects negative values."""
+
+        @validate_positive("x")
+        def func(x: float) -> float:
+            return x
+
+        with pytest.raises(InvalidParameterError):
+            func(-1.0)
+
+    def test_decorator_allows_none(self) -> None:
+        """Test that decorator allows None values."""
+
+        @validate_positive("x")
+        def func(x: float | None = None) -> float | None:
+            return x
+
+        assert func(None) is None
+
+
+class TestValidateNonNegativeDecorator:
+    """Tests for validate_non_negative decorator."""
+
+    def test_decorator_passes_valid_values(self) -> None:
+        """Test that decorator allows non-negative values."""
+
+        @validate_non_negative("x")
+        def func(x: float) -> float:
+            return x
+
+        assert func(0.0) == 0.0
+        assert func(5.0) == 5.0
+
+    def test_decorator_rejects_negative(self) -> None:
+        """Test that decorator rejects negative values."""
+
+        @validate_non_negative("x")
+        def func(x: float) -> float:
+            return x
+
+        with pytest.raises(InvalidParameterError):
+            func(-0.001)
+
+
+class TestValidateNotEmptyDecorator:
+    """Tests for validate_not_empty decorator."""
+
+    def test_decorator_passes_valid_values(self) -> None:
+        """Test that decorator allows non-empty sequences."""
+
+        @validate_not_empty("items")
+        def func(items: list[int]) -> int:
+            return sum(items)
+
+        assert func([1, 2, 3]) == 6
+
+    def test_decorator_rejects_empty(self) -> None:
+        """Test that decorator rejects empty sequences."""
+
+        @validate_not_empty("items")
+        def func(items: list[int]) -> int:
+            return sum(items)
+
+        with pytest.raises(InvalidParameterError):
+            func([])
+
+
+class TestValidateInRangeDecorator:
+    """Tests for validate_in_range decorator."""
+
+    def test_decorator_passes_valid_values(self) -> None:
+        """Test that decorator allows values in range."""
+
+        @validate_in_range("confidence", min_value=0.0, max_value=1.0)
+        def func(confidence: float) -> float:
+            return confidence
+
+        assert func(0.5) == 0.5
+        assert func(0.0) == 0.0
+        assert func(1.0) == 1.0
+
+    def test_decorator_rejects_out_of_range(self) -> None:
+        """Test that decorator rejects values out of range."""
+
+        @validate_in_range("confidence", min_value=0.0, max_value=1.0)
+        def func(confidence: float) -> float:
+            return confidence
+
+        with pytest.raises(InvalidParameterError):
+            func(-0.1)
+        with pytest.raises(InvalidParameterError):
+            func(1.1)
