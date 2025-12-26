@@ -927,3 +927,393 @@ Finished job 2.
         # Newest first
         assert completed[0].rule == "second"
         assert completed[1].rule == "first"
+
+
+class TestParsePositiveInt:
+    """Tests for _parse_positive_int function."""
+
+    def test_valid_positive_int(self) -> None:
+        """Test parsing valid positive integers."""
+        from snakesee.parser import _parse_positive_int
+
+        assert _parse_positive_int("1") == 1
+        assert _parse_positive_int("42") == 42
+        assert _parse_positive_int("1000") == 1000
+
+    def test_invalid_not_a_number(self) -> None:
+        """Test parsing non-numeric strings."""
+        from snakesee.parser import _parse_positive_int
+
+        assert _parse_positive_int("not_a_number") is None
+        assert _parse_positive_int("abc") is None
+        assert _parse_positive_int("") is None
+
+    def test_invalid_zero(self) -> None:
+        """Test parsing zero (not positive)."""
+        from snakesee.parser import _parse_positive_int
+
+        assert _parse_positive_int("0") is None
+
+    def test_invalid_negative(self) -> None:
+        """Test parsing negative numbers."""
+        from snakesee.parser import _parse_positive_int
+
+        assert _parse_positive_int("-1") is None
+        assert _parse_positive_int("-100") is None
+
+
+class TestParseNonNegativeInt:
+    """Tests for _parse_non_negative_int function."""
+
+    def test_valid_non_negative_int(self) -> None:
+        """Test parsing valid non-negative integers."""
+        from snakesee.parser import _parse_non_negative_int
+
+        assert _parse_non_negative_int("0") == 0
+        assert _parse_non_negative_int("1") == 1
+        assert _parse_non_negative_int("42") == 42
+
+    def test_invalid_not_a_number(self) -> None:
+        """Test parsing non-numeric strings."""
+        from snakesee.parser import _parse_non_negative_int
+
+        assert _parse_non_negative_int("not_a_number") is None
+        assert _parse_non_negative_int("abc") is None
+
+    def test_invalid_negative(self) -> None:
+        """Test parsing negative numbers."""
+        from snakesee.parser import _parse_non_negative_int
+
+        assert _parse_non_negative_int("-1") is None
+        assert _parse_non_negative_int("-100") is None
+
+
+class TestSafeMtime:
+    """Tests for _safe_mtime function."""
+
+    def test_existing_file(self, tmp_path: Path) -> None:
+        """Test getting mtime of existing file."""
+        from snakesee.parser import _safe_mtime
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+        mtime = _safe_mtime(test_file)
+        assert mtime > 0
+
+    def test_nonexistent_file(self, tmp_path: Path) -> None:
+        """Test getting mtime of nonexistent file returns 0."""
+        from snakesee.parser import _safe_mtime
+
+        nonexistent = tmp_path / "does_not_exist.txt"
+        assert _safe_mtime(nonexistent) == 0
+
+
+class TestParseJobStatsFromLog:
+    """Tests for parse_job_stats_from_log function."""
+
+    def test_valid_job_stats_table(self, tmp_path: Path) -> None:
+        """Test parsing a valid job stats table."""
+        from snakesee.parser import parse_job_stats_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""Building DAG of jobs...
+Job stats:
+job        count
+-------  -------
+align          5
+sort           5
+index          5
+all            1
+total         16
+""")
+        rules = parse_job_stats_from_log(log_file)
+        # Note: parser skips "total" row as it's a summary, not a rule
+        assert rules == {"align", "sort", "index", "all"}
+
+    def test_no_job_stats_section(self, tmp_path: Path) -> None:
+        """Test log without job stats section returns empty set."""
+        from snakesee.parser import parse_job_stats_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""Some other log content
+rule align:
+    jobid: 1
+""")
+        rules = parse_job_stats_from_log(log_file)
+        assert rules == set()
+
+    def test_nonexistent_file(self, tmp_path: Path) -> None:
+        """Test nonexistent file returns empty set."""
+        from snakesee.parser import parse_job_stats_from_log
+
+        nonexistent = tmp_path / "does_not_exist.log"
+        rules = parse_job_stats_from_log(nonexistent)
+        assert rules == set()
+
+
+class TestParseJobStatsCountsFromLog:
+    """Tests for parse_job_stats_counts_from_log function."""
+
+    def test_valid_counts(self, tmp_path: Path) -> None:
+        """Test parsing valid job counts."""
+        from snakesee.parser import parse_job_stats_counts_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""Job stats:
+job        count
+-------  -------
+align          5
+sort           3
+all            1
+total          9
+""")
+        counts = parse_job_stats_counts_from_log(log_file)
+        assert counts["align"] == 5
+        assert counts["sort"] == 3
+        assert counts["all"] == 1
+        # Note: "total" row is skipped by the parser
+        assert "total" not in counts
+
+    def test_no_job_stats(self, tmp_path: Path) -> None:
+        """Test log without job stats returns empty dict."""
+        from snakesee.parser import parse_job_stats_counts_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text("Some log content without job stats\n")
+        counts = parse_job_stats_counts_from_log(log_file)
+        assert counts == {}
+
+
+class TestParseIncompleteJobs:
+    """Tests for parse_incomplete_jobs function."""
+
+    def test_no_incomplete_dir(self, tmp_path: Path) -> None:
+        """Test when incomplete directory doesn't exist."""
+        from snakesee.parser import parse_incomplete_jobs
+
+        snakemake_dir = tmp_path / ".snakemake"
+        snakemake_dir.mkdir()
+        incomplete_dir = snakemake_dir / "incomplete"
+        # No incomplete directory created
+        result = list(parse_incomplete_jobs(incomplete_dir))
+        assert result == []
+
+    def test_empty_incomplete_dir(self, tmp_path: Path) -> None:
+        """Test when incomplete directory is empty."""
+        from snakesee.parser import parse_incomplete_jobs
+
+        snakemake_dir = tmp_path / ".snakemake"
+        incomplete_dir = snakemake_dir / "incomplete"
+        incomplete_dir.mkdir(parents=True)
+        result = list(parse_incomplete_jobs(incomplete_dir))
+        assert result == []
+
+    def test_invalid_marker_files(self, tmp_path: Path) -> None:
+        """Test that invalid marker files are skipped gracefully."""
+        from snakesee.parser import parse_incomplete_jobs
+
+        snakemake_dir = tmp_path / ".snakemake"
+        incomplete_dir = snakemake_dir / "incomplete"
+        incomplete_dir.mkdir(parents=True)
+
+        # Create a file that's not a valid base64-encoded path
+        (incomplete_dir / "not_base64!!!").touch()
+
+        # Should not crash, just return empty or skip invalid
+        result = list(parse_incomplete_jobs(incomplete_dir))
+        # May return empty or have parsing issues, but shouldn't crash
+        assert isinstance(result, list)
+
+
+class TestIncrementalLogReaderEdgeCases:
+    """Additional edge case tests for IncrementalLogReader."""
+
+    def test_threads_with_invalid_value(self, tmp_path: Path) -> None:
+        """Test handling of invalid thread values."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("""rule align:
+    jobid: 1
+    threads: not_a_number
+""")
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Should still parse the job, just without valid threads
+        assert len(reader.running_jobs) == 1
+        # Threads should be None or default when invalid
+        job = reader.running_jobs[0]
+        assert job.threads is None or job.threads == 1
+
+    def test_log_file_deleted_during_read(self, tmp_path: Path) -> None:
+        """Test handling when log file is deleted after opening."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("initial content\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        # Delete the file
+        log_file.unlink()
+
+        # Should handle gracefully on next read
+        reader.read_new_lines()  # Should not crash
+
+    def test_empty_log_file(self, tmp_path: Path) -> None:
+        """Test handling of empty log file."""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()
+
+        assert reader.progress == (0, 0)
+        assert len(reader.running_jobs) == 0
+        assert len(reader.failed_jobs) == 0
+
+    def test_binary_content_in_log(self, tmp_path: Path) -> None:
+        """Test handling of binary/non-UTF8 content in log."""
+        log_file = tmp_path / "test.log"
+        # Write some valid content with binary garbage
+        content = b"rule align:\n    jobid: 1\n\xff\xfe\x00\x01\nFinished job 1.\n"
+        log_file.write_bytes(content)
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()  # Should not crash
+
+    def test_very_long_lines(self, tmp_path: Path) -> None:
+        """Test handling of very long lines."""
+        log_file = tmp_path / "test.log"
+        long_line = "x" * 100000  # 100KB line
+        log_file.write_text(f"rule align:\n    jobid: 1\n{long_line}\nFinished job 1.\n")
+
+        reader = IncrementalLogReader(log_file)
+        reader.read_new_lines()  # Should not crash or hang
+
+
+class TestParseTimestamp:
+    """Tests for _parse_timestamp function."""
+
+    def test_valid_timestamp(self) -> None:
+        """Test parsing valid timestamp."""
+        from snakesee.parser import _parse_timestamp
+
+        ts = _parse_timestamp("Mon Dec 16 10:00:00 2024")
+        assert ts is not None
+        assert ts > 0
+
+    def test_invalid_timestamp(self) -> None:
+        """Test parsing invalid timestamp returns None."""
+        from snakesee.parser import _parse_timestamp
+
+        assert _parse_timestamp("not a timestamp") is None
+        assert _parse_timestamp("") is None
+        assert _parse_timestamp("2024-12-16") is None  # Wrong format
+
+
+class TestMetadataRecord:
+    """Tests for MetadataRecord dataclass."""
+
+    def test_duration_with_both_times(self) -> None:
+        """Test duration calculation with both start and end times."""
+        from snakesee.parser import MetadataRecord
+
+        record = MetadataRecord(
+            rule="align",
+            start_time=1000.0,
+            end_time=1060.0,
+        )
+        assert record.duration == 60.0
+
+    def test_duration_missing_start_time(self) -> None:
+        """Test duration returns None when start_time is missing."""
+        from snakesee.parser import MetadataRecord
+
+        record = MetadataRecord(
+            rule="align",
+            start_time=None,
+            end_time=1060.0,
+        )
+        assert record.duration is None
+
+    def test_duration_missing_end_time(self) -> None:
+        """Test duration returns None when end_time is missing."""
+        from snakesee.parser import MetadataRecord
+
+        record = MetadataRecord(
+            rule="align",
+            start_time=1000.0,
+            end_time=None,
+        )
+        assert record.duration is None
+
+    def test_to_job_info(self) -> None:
+        """Test conversion to JobInfo."""
+        from snakesee.parser import MetadataRecord
+
+        record = MetadataRecord(
+            rule="align",
+            start_time=1000.0,
+            end_time=1060.0,
+            wildcards={"sample": "A"},
+        )
+        job_info = record.to_job_info()
+        assert job_info.rule == "align"
+        assert job_info.wildcards == {"sample": "A"}
+        assert job_info.duration == 60.0
+
+
+class TestCollectRuleCodeHashes:
+    """Tests for collect_rule_code_hashes function.
+
+    Note: collect_rule_code_hashes returns dict[str, set[str]] where
+    keys are code hashes and values are sets of rule names that have that hash.
+    """
+
+    def test_valid_metadata(self, tmp_path: Path) -> None:
+        """Test collecting code hashes from valid metadata."""
+        from snakesee.parser import collect_rule_code_hashes
+
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+
+        # Create a valid metadata file
+        metadata = {
+            "rule": "align",
+            "code": "def align(): pass",
+        }
+        (metadata_dir / "output.txt").write_text(json.dumps(metadata))
+
+        hashes = collect_rule_code_hashes(metadata_dir)
+        # Returns hash -> set of rules, so check if "align" is in any value set
+        all_rules = set()
+        for rules in hashes.values():
+            all_rules.update(rules)
+        assert "align" in all_rules
+
+    def test_invalid_json(self, tmp_path: Path) -> None:
+        """Test handling of invalid JSON in metadata."""
+        from snakesee.parser import collect_rule_code_hashes
+
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+
+        # Create invalid JSON
+        (metadata_dir / "output.txt").write_text("not valid json {{{")
+
+        # Should not crash
+        hashes = collect_rule_code_hashes(metadata_dir)
+        assert isinstance(hashes, dict)
+
+    def test_missing_rule_key(self, tmp_path: Path) -> None:
+        """Test handling of metadata missing 'rule' key."""
+        from snakesee.parser import collect_rule_code_hashes
+
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+
+        # Create metadata without 'rule' key
+        (metadata_dir / "output.txt").write_text(json.dumps({"code": "some code"}))
+
+        # Should not crash
+        hashes = collect_rule_code_hashes(metadata_dir)
+        assert isinstance(hashes, dict)
