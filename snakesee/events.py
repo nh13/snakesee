@@ -5,13 +5,14 @@ from the snakemake-logger-plugin-snakesee plugin. Events provide more
 accurate and timely job status information than log parsing.
 """
 
-import json
 import logging
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +73,20 @@ class SnakeseeEvent:
     workflow_id: str | None = None
 
     @classmethod
-    def from_json(cls, json_str: str) -> "SnakeseeEvent":
+    def from_json(cls, json_str: str | bytes) -> "SnakeseeEvent":
         """Parse from JSON line.
 
         Args:
-            json_str: JSON string to parse.
+            json_str: JSON string or bytes to parse.
 
         Returns:
             Parsed SnakeseeEvent instance.
 
         Raises:
             ValueError: If the JSON is invalid or has an unknown event type.
-            json.JSONDecodeError: If the JSON cannot be parsed.
+            orjson.JSONDecodeError: If the JSON cannot be parsed.
         """
-        data = json.loads(json_str)
+        data = orjson.loads(json_str)
         data["event_type"] = EventType(data["event_type"])
 
         # Convert dicts to tuples for frozen dataclass compatibility
@@ -156,7 +157,7 @@ class EventReader:
                     if line:
                         try:
                             events.append(SnakeseeEvent.from_json(line))
-                        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                        except (orjson.JSONDecodeError, ValueError, KeyError, TypeError) as e:
                             # Skip malformed lines but log for debugging
                             logger.debug(
                                 "Skipping malformed event line: %s... (%s)",

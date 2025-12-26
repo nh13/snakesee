@@ -1,9 +1,10 @@
 """Historical data loading for time estimation."""
 
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import orjson
 
 from snakesee.constants import MAX_EVENTS_LINE_LENGTH
 from snakesee.parser import parse_metadata_files_full
@@ -107,8 +108,8 @@ class HistoricalDataLoader:
                         continue
 
                     try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
+                        event = orjson.loads(line)
+                    except orjson.JSONDecodeError:
                         continue
 
                     if event.get("event_type") != "job_finished":
