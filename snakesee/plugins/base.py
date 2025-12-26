@@ -5,6 +5,9 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+# Plugin API version - bump when making breaking changes to plugin interface
+PLUGIN_API_VERSION = 1
+
 
 @dataclass
 class ToolProgress:
@@ -52,6 +55,11 @@ class ToolProgressPlugin(ABC):
     Subclasses implement parsing logic for specific bioinformatics tools
     (e.g., BWA, STAR, samtools) to extract progress information from logs.
 
+    Plugin Versioning:
+        Plugins can declare which API version they support via the
+        ``plugin_api_version`` property. If not specified, version 1 is assumed.
+        Plugins requiring a newer API than the current version will be skipped.
+
     Example implementation::
 
         class BWAPlugin(ToolProgressPlugin):
@@ -70,6 +78,16 @@ class ToolProgressPlugin(ABC):
                 # Parse BWA-specific progress patterns
                 ...
     """
+
+    @property
+    def plugin_api_version(self) -> int:
+        """
+        The plugin API version this plugin was written for.
+
+        Override to declare compatibility with a specific API version.
+        If not overridden, version 1 is assumed.
+        """
+        return 1
 
     @property
     @abstractmethod

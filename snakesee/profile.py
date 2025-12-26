@@ -221,37 +221,49 @@ def load_profile(path: Path) -> TimingProfile:
         The loaded profile.
 
     Raises:
-        FileNotFoundError: If the profile doesn't exist.
-        ValueError: If the profile format is invalid.
+        ProfileNotFoundError: If the profile doesn't exist.
+        InvalidProfileError: If the profile format is invalid.
     """
-    data = json.loads(path.read_text())
+    from snakesee.exceptions import InvalidProfileError
+    from snakesee.exceptions import ProfileNotFoundError
+
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError as e:
+        raise ProfileNotFoundError(path) from e
+    except json.JSONDecodeError as e:
+        raise InvalidProfileError(path, "Invalid JSON format", cause=e) from e
 
     version = data.get("version", 1)
     if version > PROFILE_VERSION:
-        raise ValueError(
-            f"Profile version {version} is newer than supported version {PROFILE_VERSION}"
+        raise InvalidProfileError(
+            path,
+            f"Profile version {version} is newer than supported version {PROFILE_VERSION}",
         )
 
-    rules = {}
-    for name, rule_data in data.get("rules", {}).items():
-        rules[name] = RuleProfile(
-            rule=rule_data["rule"],
-            sample_count=rule_data["sample_count"],
-            mean_duration=rule_data["mean_duration"],
-            std_dev=rule_data["std_dev"],
-            min_duration=rule_data["min_duration"],
-            max_duration=rule_data["max_duration"],
-            durations=rule_data.get("durations", []),
-            timestamps=rule_data.get("timestamps", []),
-        )
+    try:
+        rules = {}
+        for name, rule_data in data.get("rules", {}).items():
+            rules[name] = RuleProfile(
+                rule=rule_data["rule"],
+                sample_count=rule_data["sample_count"],
+                mean_duration=rule_data["mean_duration"],
+                std_dev=rule_data["std_dev"],
+                min_duration=rule_data["min_duration"],
+                max_duration=rule_data["max_duration"],
+                durations=rule_data.get("durations", []),
+                timestamps=rule_data.get("timestamps", []),
+            )
 
-    return TimingProfile(
-        version=version,
-        created=data["created"],
-        updated=data["updated"],
-        machine=data.get("machine"),
-        rules=rules,
-    )
+        return TimingProfile(
+            version=version,
+            created=data["created"],
+            updated=data["updated"],
+            machine=data.get("machine"),
+            rules=rules,
+        )
+    except KeyError as e:
+        raise InvalidProfileError(path, f"Missing required field: {e}") from e
 
 
 def find_profile(workflow_dir: Path) -> Path | None:

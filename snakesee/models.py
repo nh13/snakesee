@@ -293,22 +293,6 @@ class RuleTimingStats:
 
         return weighted_sum / weight_total
 
-    def _position_weighted_mean(self) -> float:
-        """
-        Calculate weighted mean using position-based weights (legacy behavior).
-
-        Assumes durations list is ordered oldest-to-newest.
-        Deprecated: Use _index_weighted_mean with configurable half_life_logs instead.
-
-        Returns:
-            Position-weighted mean duration.
-        """
-        # Apply exponential decay weights (most recent = highest weight)
-        weights: list[int] = [2**i for i in range(len(self.durations))]
-        weighted_sum: float = sum(t * w for t, w in zip(self.durations, weights, strict=True))
-        weight_total: int = sum(weights)
-        return weighted_sum / weight_total
-
     @property
     def median_input_size(self) -> int | None:
         """
