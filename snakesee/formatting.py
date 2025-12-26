@@ -166,6 +166,14 @@ def format_duration_range(
 
     Returns:
         Formatted range string (e.g., "2m - 5m").
+
+    Examples:
+        >>> format_duration_range(60, 180)
+        '1m - 3m'
+        >>> format_duration_range(30, 90)
+        '30s - 1m 30s'
+        >>> format_duration_range(3600, 7200)
+        '1h - 2h'
     """
     return f"{format_duration(max(0, lower))}{separator}{format_duration(upper)}"
 
@@ -229,6 +237,14 @@ def format_size_rate(
 
     Returns:
         Formatted rate string (e.g., "1.5 MB/s").
+
+    Examples:
+        >>> format_size_rate(1048576)
+        '1 MB/s'
+        >>> format_size_rate(1536)
+        '1.5 KB/s'
+        >>> format_size_rate(0)
+        '0 B/s'
     """
     if bytes_per_second < 0:
         return "0 B/s"

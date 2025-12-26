@@ -7,6 +7,12 @@ This package provides components for parsing Snakemake log files:
 - LogLineParser: Line-by-line parsing with context
 - JobLifecycleTracker: Job start/finish tracking
 - FailureTracker: Failure deduplication
+
+Related modules:
+    snakesee.estimation: Uses parsed timing data for ETA estimation
+    snakesee.models: JobInfo and WorkflowProgress data classes
+    snakesee.state.paths: WorkflowPaths for finding log files
+    snakesee.validation: Validates parsed state against events
 """
 
 # Re-export new modular components
