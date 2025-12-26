@@ -1042,12 +1042,47 @@ def collect_rule_timing_stats(
     return stats
 
 
-def collect_wildcard_timing_stats(  # noqa: C901
+def _build_wildcard_stats_for_key(
+    rule: str,
+    wc_key: str,
+    wc_values: dict[str, list[tuple[float, float]]],
+) -> WildcardTimingStats:
+    """Build WildcardTimingStats from collected timing pairs.
+
+    Args:
+        rule: Rule name.
+        wc_key: Wildcard key name.
+        wc_values: Dict of wildcard value -> list of (duration, timestamp) pairs.
+
+    Returns:
+        WildcardTimingStats for this wildcard key.
+    """
+    stats_by_value: dict[str, RuleTimingStats] = {}
+
+    for wc_value, timing_pairs in wc_values.items():
+        # Sort by end_time
+        timing_pairs.sort(key=lambda x: x[1])
+        durations = [pair[0] for pair in timing_pairs]
+        timestamps = [pair[1] for pair in timing_pairs]
+
+        stats_by_value[wc_value] = RuleTimingStats(
+            rule=f"{rule}:{wc_key}={wc_value}",
+            durations=durations,
+            timestamps=timestamps,
+        )
+
+    return WildcardTimingStats(
+        rule=rule,
+        wildcard_key=wc_key,
+        stats_by_value=stats_by_value,
+    )
+
+
+def collect_wildcard_timing_stats(
     metadata_dir: Path,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, dict[str, WildcardTimingStats]]:
-    """
-    Collect timing statistics per rule, conditioned on wildcards.
+    """Collect timing statistics per rule, conditioned on wildcards.
 
     Groups execution times by (rule, wildcard_key, wildcard_value) for rules
     that have wildcards in their metadata.
@@ -1066,10 +1101,8 @@ def collect_wildcard_timing_stats(  # noqa: C901
     for job in parse_metadata_files(metadata_dir, progress_callback=progress_callback):
         duration = job.duration
         end_time = job.end_time
-        if duration is None or end_time is None:
+        if duration is None or end_time is None or not job.wildcards:
             continue
-        if not job.wildcards:
-            continue  # Skip jobs without wildcards
 
         if job.rule not in data:
             data[job.rule] = {}
@@ -1084,30 +1117,11 @@ def collect_wildcard_timing_stats(  # noqa: C901
 
     # Build WildcardTimingStats objects
     result: dict[str, dict[str, WildcardTimingStats]] = {}
-
     for rule, wc_keys in data.items():
-        result[rule] = {}
-        for wc_key, wc_values in wc_keys.items():
-            stats_by_value: dict[str, RuleTimingStats] = {}
-
-            for wc_value, timing_pairs in wc_values.items():
-                # Sort by end_time
-                timing_pairs.sort(key=lambda x: x[1])
-
-                durations = [pair[0] for pair in timing_pairs]
-                timestamps = [pair[1] for pair in timing_pairs]
-
-                stats_by_value[wc_value] = RuleTimingStats(
-                    rule=f"{rule}:{wc_key}={wc_value}",
-                    durations=durations,
-                    timestamps=timestamps,
-                )
-
-            result[rule][wc_key] = WildcardTimingStats(
-                rule=rule,
-                wildcard_key=wc_key,
-                stats_by_value=stats_by_value,
-            )
+        result[rule] = {
+            wc_key: _build_wildcard_stats_for_key(rule, wc_key, wc_values)
+            for wc_key, wc_values in wc_keys.items()
+        }
 
     return result
 
