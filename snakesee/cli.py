@@ -8,6 +8,9 @@ import defopt  # type: ignore[import-untyped]
 from rich.console import Console
 
 from snakesee.estimator import TimeEstimator
+from snakesee.exceptions import InvalidProfileError
+from snakesee.exceptions import ProfileNotFoundError
+from snakesee.exceptions import WorkflowNotFoundError
 from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
 from snakesee.parser import parse_workflow_state
@@ -28,16 +31,22 @@ def _validate_workflow_dir(workflow_dir: Path) -> Path:
         The validated path.
 
     Raises:
-        SystemExit: If .snakemake directory doesn't exist.
+        WorkflowNotFoundError: If .snakemake directory doesn't exist.
     """
     snakemake_dir = workflow_dir / ".snakemake"
     if not snakemake_dir.exists():
-        console = Console(stderr=True)
-        console.print(
-            f"[red]Error:[/red] No .snakemake directory found in {workflow_dir}",
+        raise WorkflowNotFoundError(
+            workflow_dir,
+            f"No .snakemake directory found in {workflow_dir}",
         )
-        sys.exit(1)
     return workflow_dir
+
+
+def _handle_workflow_error(e: WorkflowNotFoundError) -> None:
+    """Print a workflow error and exit."""
+    console = Console(stderr=True)
+    console.print(f"[red]Error:[/red] {e.message}")
+    sys.exit(1)
 
 
 def watch(
@@ -76,7 +85,11 @@ def watch(
                        After this many days, a run's weight is halved. Default: 7.0.
                        Only used when weighting_strategy="time".
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
+        return  # Never reached, but helps type checking
 
     # Validate refresh rate
     if refresh < 0.5 or refresh > 60.0:
@@ -129,7 +142,11 @@ def status(
         no_estimate: Disable time estimation from historical data.
         profile: Optional path to a timing profile for bootstrapping estimates.
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
+        return
     console = Console()
 
     # Parse workflow state
@@ -186,7 +203,7 @@ def status(
             try:
                 loaded_profile = load_profile(profile_path)
                 estimator.rule_stats = loaded_profile.to_rule_stats()
-            except (OSError, ValueError):
+            except (ProfileNotFoundError, InvalidProfileError):
                 pass  # Fall back to metadata
 
         # Merge with live metadata (live data takes precedence for recent runs)
@@ -218,7 +235,11 @@ def profile_export(
         output: Output file path. Defaults to .snakesee-profile.json in workflow_dir.
         merge: If output file exists, merge with existing data instead of replacing.
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
+        return
     console = Console()
 
     metadata_dir = workflow_dir / ".snakemake" / "metadata"
@@ -245,7 +266,10 @@ def profile_export(
         if merge and output_path.exists():
             console.print("  [dim](merged with existing profile)[/dim]")
 
-    except (OSError, ValueError, TypeError, KeyError) as e:
+    except InvalidProfileError as e:
+        console.print(f"[red]Error:[/red] {e.message}")
+        sys.exit(1)
+    except OSError as e:
         console.print(f"[red]Error:[/red] Failed to export profile: {e}")
         sys.exit(1)
 
@@ -282,11 +306,11 @@ def profile_show(
                 f"range={format_duration(rp.min_duration)}-{format_duration(rp.max_duration)}"
             )
 
-    except FileNotFoundError:
+    except ProfileNotFoundError:
         console.print(f"[red]Error:[/red] Profile not found: {profile_path}")
         sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] Invalid profile: {e}")
+    except InvalidProfileError as e:
+        console.print(f"[red]Error:[/red] {e.message}")
         sys.exit(1)
 
 

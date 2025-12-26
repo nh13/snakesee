@@ -11,6 +11,7 @@ from snakesee.cli import profile_export
 from snakesee.cli import profile_show
 from snakesee.cli import status
 from snakesee.cli import watch
+from snakesee.exceptions import WorkflowNotFoundError
 
 
 class TestValidateWorkflowDir:
@@ -23,9 +24,9 @@ class TestValidateWorkflowDir:
 
     def test_missing_snakemake_dir(self, tmp_path: Path) -> None:
         """Test with missing .snakemake directory."""
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(WorkflowNotFoundError) as exc_info:
             _validate_workflow_dir(tmp_path)
-        assert exc_info.value.code == 1
+        assert tmp_path == exc_info.value.path
 
 
 class TestWatch:
