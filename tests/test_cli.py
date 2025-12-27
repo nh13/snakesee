@@ -256,7 +256,8 @@ class TestStatusErrorPaths:
 
         status(tmp_path, no_estimate=True)
         captured = capsys.readouterr()
-        assert "Incomplete:" in captured.out or "INCOMPLETE" in captured.out
+        # Check for specific expected format patterns
+        assert "Incomplete: 1" in captured.out or "Status: INCOMPLETE" in captured.out
 
     def test_status_with_profile_path(
         self, snakemake_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]

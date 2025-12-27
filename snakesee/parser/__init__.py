@@ -69,23 +69,25 @@ from snakesee.parser.utils import calculate_input_size
 from snakesee.parser.utils import estimate_input_size_from_output
 
 __all__ = [
-    # New modular components
+    # Classes (alphabetical)
+    "FailureTracker",
     "IncrementalLogReader",
+    "JobLifecycleTracker",
     "LogFilePosition",
     "LogLineParser",
-    "JobLifecycleTracker",
-    "FailureTracker",
+    "MetadataRecord",
     "ParseEvent",
     "ParseEventType",
     "ParsingContext",
     "StartedJobData",
-    # Core parsing functions
+    # Functions (alphabetical)
     "calculate_input_size",
     "collect_rule_code_hashes",
     "collect_rule_timing_stats",
     "collect_wildcard_timing_stats",
     "estimate_input_size_from_output",
     "is_workflow_running",
+    "parse_all_jobs_from_log",
     "parse_completed_jobs_from_log",
     "parse_failed_jobs_from_log",
     "parse_incomplete_jobs",
@@ -96,10 +98,9 @@ __all__ = [
     "parse_progress_from_log",
     "parse_rules_from_log",
     "parse_running_jobs_from_log",
-    "parse_all_jobs_from_log",
     "parse_threads_from_log",
     "parse_workflow_state",
-    # Patterns (for advanced usage)
+    # Patterns (alphabetical, for advanced usage)
     "ERROR_IN_RULE_PATTERN",
     "ERROR_PATTERN",
     "FINISHED_JOB_PATTERN",
@@ -110,9 +111,7 @@ __all__ = [
     "THREADS_PATTERN",
     "TIMESTAMP_PATTERN",
     "WILDCARDS_PATTERN",
-    # Types
-    "MetadataRecord",
-    # Private functions (exported for tests)
+    # Private functions (alphabetical, exported for tests)
     "_augment_completions_with_threads",
     "_parse_non_negative_int",
     "_parse_positive_int",

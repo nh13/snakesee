@@ -91,11 +91,11 @@ class WorkflowMonitorTUI:
         r: Force refresh
         Ctrl+r: Hard refresh (reload historical data)
 
-        Refresh rate (vim-style):
-        h: Decrease by 5s (faster)
-        j: Decrease by 0.5s (faster)
-        k: Increase by 0.5s (slower)
-        l: Increase by 5s (slower)
+        Refresh rate:
+        -: Decrease by 0.5s (faster)
+        +: Increase by 0.5s (slower)
+        <: Decrease by 5s (faster)
+        >: Increase by 5s (slower)
         0: Reset to default (1s)
         G: Set to minimum (0.5s, fastest)
 
@@ -967,26 +967,32 @@ class WorkflowMonitorTUI:
         """Handle refresh rate keys (+/-, </>, 0). Returns True if key was handled."""
         if key == "-":  # Fine decrease (-0.5s)
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 0.5)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         if key == "+" or key == "=":  # Fine increase (+0.5s), = for unshifted +
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 0.5)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         if key == "<" or key == ",":  # Coarse decrease (-5s), , for unshifted <
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 5.0)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         if key == ">" or key == ".":  # Coarse increase (+5s), . for unshifted >
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 5.0)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         if key == "0":  # Reset to default
             self.refresh_rate = DEFAULT_REFRESH_RATE
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         if key == "G":  # Set to minimum (fastest)
             self.refresh_rate = MIN_REFRESH_RATE
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         return False
@@ -1714,6 +1720,15 @@ class WorkflowMonitorTUI:
         ]
         for key in expired:
             del self._tool_progress_cache[key]
+
+    def _update_cache_ttl(self) -> None:
+        """Update tool progress cache TTL based on current refresh rate.
+
+        Called when refresh_rate changes to keep cache behavior in sync.
+        """
+        self._tool_progress_cache_ttl = min(
+            ADAPTIVE_CACHE_TTL_MULTIPLIER * self.refresh_rate, MAX_CACHE_TTL
+        )
 
     def _build_running_job_data(
         self, jobs: list[JobInfo]

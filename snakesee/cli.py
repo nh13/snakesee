@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from typing import Literal
+from typing import NoReturn
 
 import defopt  # type: ignore[import-untyped]
 from rich.console import Console
@@ -42,7 +43,7 @@ def _validate_workflow_dir(workflow_dir: Path) -> Path:
     return workflow_dir
 
 
-def _handle_workflow_error(e: WorkflowNotFoundError) -> None:
+def _handle_workflow_error(e: WorkflowNotFoundError) -> NoReturn:
     """Print a workflow error and exit."""
     console = Console(stderr=True)
     console.print(f"[red]Error:[/red] {e.message}")
@@ -89,7 +90,6 @@ def watch(
         workflow_dir = _validate_workflow_dir(workflow_dir)
     except WorkflowNotFoundError as e:
         _handle_workflow_error(e)
-        return  # Never reached, but helps type checking
 
     # Validate refresh rate
     if refresh < 0.5 or refresh > 60.0:
@@ -146,7 +146,6 @@ def status(
         workflow_dir = _validate_workflow_dir(workflow_dir)
     except WorkflowNotFoundError as e:
         _handle_workflow_error(e)
-        return
     console = Console()
 
     # Parse workflow state
@@ -239,7 +238,6 @@ def profile_export(
         workflow_dir = _validate_workflow_dir(workflow_dir)
     except WorkflowNotFoundError as e:
         _handle_workflow_error(e)
-        return
     console = Console()
 
     metadata_dir = workflow_dir / ".snakemake" / "metadata"

@@ -434,17 +434,26 @@ def _ensure_workflow_started(timestamp: float) -> None:
             _event_file = None
 
         # Truncate event file to clear stale data from previous runs
-        _event_file = open(event_path, "w", encoding="utf-8")
-
-        _write_event(
-            {
-                "event_type": "workflow_started",
-                "timestamp": timestamp,
-            }
-        )
-        _workflow_started_emitted = True
-        _workflow_lock_fd = lock_fd  # Store for later cleanup
-        lock_fd = None  # Prevent closing in finally since we're keeping it
+        try:
+            _event_file = open(event_path, "w", encoding="utf-8")
+            _write_event(
+                {
+                    "event_type": "workflow_started",
+                    "timestamp": timestamp,
+                }
+            )
+            _workflow_started_emitted = True
+            _workflow_lock_fd = lock_fd  # Store for later cleanup
+            lock_fd = None  # Prevent closing in finally since we're keeping it
+        except Exception:
+            # Clean up event file on failure to prevent leak
+            if _event_file is not None:
+                try:
+                    _event_file.close()
+                except OSError:
+                    pass
+                _event_file = None
+            raise
     finally:
         # Release and close lock if we still own it
         if lock_fd is not None:

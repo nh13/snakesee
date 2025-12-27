@@ -38,14 +38,16 @@ def _get_max_jobs_config() -> int:
     """Get max jobs configuration from environment or default.
 
     Returns:
-        Maximum number of jobs to track.
+        Maximum number of jobs to track (minimum of 1).
     """
     import os
 
     env_value = os.environ.get("SNAKESEE_MAX_JOB_TRACKING")
     if env_value is not None:
         try:
-            return int(env_value)
+            parsed = int(env_value)
+            # Clamp to minimum of 1 to prevent odd behavior from 0 or negative values
+            return max(1, parsed)
         except ValueError:
             logger.warning(
                 "Invalid SNAKESEE_MAX_JOB_TRACKING value '%s', using default %d",

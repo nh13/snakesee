@@ -494,19 +494,19 @@ class TestCombinationConditioning:
         estimator = TimeEstimator(rule_registry=registry, use_wildcard_conditioning=True)
 
         # sample1 + threads=4 should get ~10s
-        mean, var = estimator.get_estimate_for_job(
+        mean, _var = estimator.get_estimate_for_job(
             "align", wildcards={"sample": "sample1"}, threads=4
         )
         assert 8 < mean < 12  # Should be around 10s
 
         # sample1 + threads=8 should get ~5s
-        mean2, var2 = estimator.get_estimate_for_job(
+        mean2, _var2 = estimator.get_estimate_for_job(
             "align", wildcards={"sample": "sample1"}, threads=8
         )
         assert 4 < mean2 < 6  # Should be around 5s
 
         # sample2 + threads=4 should get ~100s
-        mean3, var3 = estimator.get_estimate_for_job(
+        mean3, _var3 = estimator.get_estimate_for_job(
             "align", wildcards={"sample": "sample2"}, threads=4
         )
         assert 90 < mean3 < 110  # Should be around 100s
@@ -531,7 +531,7 @@ class TestCombinationConditioning:
 
         # sample1 + threads=16 has no exact combination match
         # Should fall back to wildcard stats for sample1 (mix of thread counts)
-        mean, var = estimator.get_estimate_for_job(
+        mean, _var = estimator.get_estimate_for_job(
             "align", wildcards={"sample": "sample1"}, threads=16
         )
         # Should be around the wildcard average for sample1 (~10-12s range)
@@ -649,8 +649,11 @@ class TestEstimatorHelperMethods:
 
         # Create progress with history: 10 jobs in 100 seconds = 0.1 jobs/sec
         # With global mean of 60s, parallelism = 0.1 * 60 = 6 -> sqrt(6) ≈ 2.45
+        import tempfile
+
+        tmp_dir = Path(tempfile.gettempdir())
         progress = WorkflowProgress(
-            workflow_dir=Path("/tmp"),
+            workflow_dir=tmp_dir,
             status=WorkflowStatus.RUNNING,
             total_jobs=20,
             completed_jobs=10,
@@ -659,7 +662,7 @@ class TestEstimatorHelperMethods:
         )
         # Mock elapsed time
         progress = WorkflowProgress(
-            workflow_dir=Path("/tmp"),
+            workflow_dir=tmp_dir,
             status=WorkflowStatus.RUNNING,
             total_jobs=20,
             completed_jobs=10,
@@ -682,8 +685,10 @@ class TestEstimatorHelperMethods:
             JobInfo(rule="align", job_id="4"),
         ]
 
+        import tempfile
+
         progress = WorkflowProgress(
-            workflow_dir=Path("/tmp"),
+            workflow_dir=Path(tempfile.gettempdir()),
             status=WorkflowStatus.RUNNING,
             total_jobs=10,
             completed_jobs=0,
@@ -740,7 +745,7 @@ class TestEstimatorFuzzyMatching:
         estimator = TimeEstimator(rule_registry=registry)
 
         # Similar rule name should match via fuzzy matching
-        duration, variance = estimator.get_estimate_for_job(
+        duration, _variance = estimator.get_estimate_for_job(
             rule="align_read",  # One character different
             threads=None,
             wildcards=None,
@@ -760,7 +765,7 @@ class TestEstimatorFuzzyMatching:
         estimator = TimeEstimator(rule_registry=registry)
 
         # Very different rule name should fall back to global mean
-        duration, variance = estimator.get_estimate_for_job(
+        duration, _variance = estimator.get_estimate_for_job(
             rule="completely_different_name",
             threads=None,
             wildcards=None,

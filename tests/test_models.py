@@ -632,3 +632,23 @@ class TestThreadTimingStats:
         stats, matched = thread_stats.get_best_match(8)
         assert stats is not None
         assert stats.count == 2
+
+
+class TestConstantsSynchronization:
+    """Tests to verify constants stay synchronized across modules."""
+
+    def test_min_samples_for_conditioning_sync(self) -> None:
+        """Verify MIN_SAMPLES_FOR_CONDITIONING is synchronized between modules.
+
+        This test ensures the constant defined in models.py stays in sync with
+        the authoritative value in constants.py to prevent subtle bugs from
+        value drift.
+        """
+        from snakesee.constants import MIN_SAMPLES_FOR_CONDITIONING
+        from snakesee.models import WildcardTimingStats
+
+        assert WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING == MIN_SAMPLES_FOR_CONDITIONING, (
+            f"MIN_SAMPLES_FOR_CONDITIONING mismatch: "
+            f"models.py has {WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING}, "
+            f"constants.py has {MIN_SAMPLES_FOR_CONDITIONING}"
+        )

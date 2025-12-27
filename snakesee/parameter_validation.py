@@ -53,9 +53,11 @@ def validate_positive(*param_names: str) -> Callable[[Callable[P, R]], Callable[
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        # Cache signature at decoration time for better performance
+        sig = inspect.signature(func)
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
 
@@ -98,9 +100,11 @@ def validate_non_negative(*param_names: str) -> Callable[[Callable[P, R]], Calla
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        # Cache signature at decoration time for better performance
+        sig = inspect.signature(func)
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
 
@@ -143,9 +147,11 @@ def validate_not_empty(*param_names: str) -> Callable[[Callable[P, R]], Callable
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        # Cache signature at decoration time for better performance
+        sig = inspect.signature(func)
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
 
@@ -194,9 +200,11 @@ def validate_in_range(
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        # Cache signature at decoration time for better performance
+        sig = inspect.signature(func)
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            sig = inspect.signature(func)
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
 

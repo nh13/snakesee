@@ -1,4 +1,10 @@
-"""Time estimation for Snakemake workflow progress."""
+"""Time estimation for Snakemake workflow progress.
+
+Note: The variance/confidence calculations in this module could potentially be
+consolidated with snakesee.variance.VarianceCalculator for DRY-ness. Both modules
+handle similar variance heuristics and confidence calculations. A future refactor
+could delegate these calculations to shared helpers in VarianceCalculator.
+"""
 
 import math
 from pathlib import Path

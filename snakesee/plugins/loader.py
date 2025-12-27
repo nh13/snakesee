@@ -191,7 +191,8 @@ def _load_plugins_from_file(plugin_file: Path) -> list[ToolProgressPlugin]:
     # when different directories have files with the same name
     import hashlib
 
-    path_hash = hashlib.md5(str(plugin_file.resolve()).encode()).hexdigest()[:8]
+    # MD5 is used here for uniqueness only (not security), so S324 warning is safe to ignore
+    path_hash = hashlib.md5(str(plugin_file.resolve()).encode()).hexdigest()[:8]  # noqa: S324
     module_name = f"snakesee_user_plugin_{plugin_file.stem}_{path_hash}"
 
     # Load the module

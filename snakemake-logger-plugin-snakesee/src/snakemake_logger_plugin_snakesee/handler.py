@@ -326,9 +326,8 @@ class LogHandler(LogHandlerBase):
         if rule_name is None:
             rule_name = self._job_rules.get(jobid)
 
-        start_time = None
-        if jobid is not None:
-            start_time = self._job_start_times.pop(jobid, None)
+        # jobid is guaranteed non-None here (early return at line 318)
+        start_time = self._job_start_times.pop(jobid, None)
         duration = timestamp - start_time if start_time else None
 
         # Extract error message
@@ -338,10 +337,8 @@ class LogHandler(LogHandlerBase):
         elif hasattr(record, "message"):
             error_msg = str(record.message)
 
-        wildcards = None
-        if jobid is not None:
-            wildcards = self._job_wildcards.pop(jobid, None)
-            self._job_rules.pop(jobid, None)
+        wildcards = self._job_wildcards.pop(jobid, None)
+        self._job_rules.pop(jobid, None)
 
         event = SnakeseeEvent(
             event_type=EventType.JOB_ERROR,
