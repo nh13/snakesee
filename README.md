@@ -7,6 +7,8 @@
 [![License][license-badge]][license-link]
 
 [![Tests][tests-badge]][tests-link]
+[![codecov][codecov-badge]][codecov-link]
+[![Documentation][docs-badge]][docs-link]
 [![PyPI version][pypi-badge]][pypi-link]
 [![PyPI downloads][pypi-downloads-badge]][pypi-link]
 [![Bioconda][bioconda-badge]][bioconda-link]
@@ -399,6 +401,10 @@ This codebase was written with the assistance of AI (Claude). All code has been 
 [license-link]: https://github.com/nh13/snakesee/blob/main/LICENSE
 [tests-badge]: https://github.com/nh13/snakesee/actions/workflows/tests.yml/badge.svg
 [tests-link]: https://github.com/nh13/snakesee/actions/workflows/tests.yml
+[codecov-badge]: https://codecov.io/gh/nh13/snakesee/graph/badge.svg
+[codecov-link]: https://codecov.io/gh/nh13/snakesee
+[docs-badge]: https://readthedocs.org/projects/snakesee/badge/?version=latest
+[docs-link]: https://snakesee.readthedocs.io/en/latest/
 [pypi-badge]: https://img.shields.io/pypi/v/snakesee
 [pypi-link]: https://pypi.org/project/snakesee/
 [pypi-downloads-badge]: https://img.shields.io/pypi/dm/snakesee
