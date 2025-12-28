@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import tempfile
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 
 from snakesee.models import RuleTimingStats
 
@@ -173,12 +174,6 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         profile: The profile to save.
         path: Path to write the profile to.
     """
-
-    def serialize(obj: Any) -> Any:
-        if isinstance(obj, RuleProfile):
-            return asdict(obj)
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
     data = {
         "version": profile.version,
         "created": profile.created,
@@ -187,7 +182,25 @@ def save_profile(profile: TimingProfile, path: Path) -> None:
         "rules": {name: asdict(rp) for name, rp in profile.rules.items()},
     }
 
-    path.write_text(json.dumps(data, indent=2, default=serialize))
+    # Write atomically: write to temp file, then rename
+    # This prevents corruption if the program crashes mid-write
+    content = json.dumps(data, indent=2)
+    fd, temp_path = tempfile.mkstemp(
+        suffix=".tmp",
+        prefix=path.name,
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(temp_path, path)
+    except Exception:
+        # Clean up temp file on any error
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_profile(path: Path) -> TimingProfile:
@@ -201,37 +214,51 @@ def load_profile(path: Path) -> TimingProfile:
         The loaded profile.
 
     Raises:
-        FileNotFoundError: If the profile doesn't exist.
-        ValueError: If the profile format is invalid.
+        ProfileNotFoundError: If the profile doesn't exist.
+        InvalidProfileError: If the profile format is invalid.
     """
-    data = json.loads(path.read_text())
+    from snakesee.exceptions import InvalidProfileError
+    from snakesee.exceptions import ProfileNotFoundError
+
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError as e:
+        raise ProfileNotFoundError(path) from e
+    except json.JSONDecodeError as e:
+        raise InvalidProfileError(path, "Invalid JSON format", cause=e) from e
 
     version = data.get("version", 1)
     if version > PROFILE_VERSION:
-        raise ValueError(
-            f"Profile version {version} is newer than supported version {PROFILE_VERSION}"
+        raise InvalidProfileError(
+            path,
+            f"Profile version {version} is newer than supported version {PROFILE_VERSION}",
         )
 
-    rules = {}
-    for name, rule_data in data.get("rules", {}).items():
-        rules[name] = RuleProfile(
-            rule=rule_data["rule"],
-            sample_count=rule_data["sample_count"],
-            mean_duration=rule_data["mean_duration"],
-            std_dev=rule_data["std_dev"],
-            min_duration=rule_data["min_duration"],
-            max_duration=rule_data["max_duration"],
-            durations=rule_data.get("durations", []),
-            timestamps=rule_data.get("timestamps", []),
-        )
+    try:
+        rules = {}
+        for name, rule_data in data.get("rules", {}).items():
+            rules[name] = RuleProfile(
+                rule=rule_data["rule"],
+                sample_count=rule_data["sample_count"],
+                mean_duration=rule_data["mean_duration"],
+                std_dev=rule_data["std_dev"],
+                min_duration=rule_data["min_duration"],
+                max_duration=rule_data["max_duration"],
+                durations=rule_data.get("durations", []),
+                timestamps=rule_data.get("timestamps", []),
+            )
 
-    return TimingProfile(
-        version=version,
-        created=data["created"],
-        updated=data["updated"],
-        machine=data.get("machine"),
-        rules=rules,
-    )
+        return TimingProfile(
+            version=version,
+            created=data["created"],
+            updated=data["updated"],
+            machine=data.get("machine"),
+            rules=rules,
+        )
+    except KeyError as e:
+        raise InvalidProfileError(path, f"Missing required field: {e}") from e
+    except TypeError as e:
+        raise InvalidProfileError(path, f"Invalid data structure: {e}") from e
 
 
 def find_profile(workflow_dir: Path) -> Path | None:

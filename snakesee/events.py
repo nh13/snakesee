@@ -5,11 +5,16 @@ from the snakemake-logger-plugin-snakesee plugin. Events provide more
 accurate and timely job status information than log parsing.
 """
 
-import json
+import logging
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import orjson
+
+logger = logging.getLogger(__name__)
 
 # Default event file name (matches plugin default)
 EVENT_FILE_NAME = ".snakesee_events.jsonl"
@@ -29,7 +34,7 @@ class EventType(str, Enum):
     PROGRESS = "progress"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnakeseeEvent:
     """A single event from the logger plugin.
 
@@ -68,20 +73,20 @@ class SnakeseeEvent:
     workflow_id: str | None = None
 
     @classmethod
-    def from_json(cls, json_str: str) -> "SnakeseeEvent":
+    def from_json(cls, json_str: str | bytes) -> "SnakeseeEvent":
         """Parse from JSON line.
 
         Args:
-            json_str: JSON string to parse.
+            json_str: JSON string or bytes to parse.
 
         Returns:
             Parsed SnakeseeEvent instance.
 
         Raises:
             ValueError: If the JSON is invalid or has an unknown event type.
-            json.JSONDecodeError: If the JSON cannot be parsed.
+            orjson.JSONDecodeError: If the JSON cannot be parsed.
         """
-        data = json.loads(json_str)
+        data = orjson.loads(json_str)
         data["event_type"] = EventType(data["event_type"])
 
         # Convert dicts to tuples for frozen dataclass compatibility
@@ -126,6 +131,7 @@ class EventReader:
         """
         self.event_file = event_file
         self._offset: int = 0
+        self._lock = threading.RLock()
 
     def read_new_events(self) -> list[SnakeseeEvent]:
         """Read events added since last call.
@@ -136,22 +142,38 @@ class EventReader:
         if not self.event_file.exists():
             return []
 
+        # Get current offset under lock (minimize lock hold time)
+        with self._lock:
+            offset = self._offset
+
+        # Perform file I/O without holding the lock to avoid blocking
         events: list[SnakeseeEvent] = []
+        new_offset = offset
         try:
             with open(self.event_file, "r", encoding="utf-8") as f:
-                f.seek(self._offset)
+                f.seek(offset)
                 for line in f:
                     line = line.strip()
                     if line:
                         try:
                             events.append(SnakeseeEvent.from_json(line))
-                        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
-                            # Skip malformed lines
+                        except (orjson.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                            # Skip malformed lines but log for debugging
+                            logger.debug(
+                                "Skipping malformed event line: %s... (%s)",
+                                line[:50],
+                                e,
+                            )
                             continue
-                self._offset = f.tell()
-        except OSError:
-            # File access error - return empty list
-            pass
+                new_offset = f.tell()
+        except OSError as e:
+            # File access error - log and return empty list
+            logger.warning("Error reading event file %s: %s", self.event_file, e)
+            return events
+
+        # Update offset under lock
+        with self._lock:
+            self._offset = new_offset
 
         return events
 
@@ -160,7 +182,8 @@ class EventReader:
 
         Call this to re-read all events from the beginning.
         """
-        self._offset = 0
+        with self._lock:
+            self._offset = 0
 
     @property
     def has_events(self) -> bool:

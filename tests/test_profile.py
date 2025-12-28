@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from snakesee.exceptions import ProfileNotFoundError
 from snakesee.models import RuleTimingStats
 from snakesee.profile import DEFAULT_PROFILE_NAME
 from snakesee.profile import RuleProfile
@@ -213,7 +214,7 @@ class TestProfileIO:
 
     def test_load_nonexistent(self, tmp_path: Path) -> None:
         """Test loading a nonexistent profile raises error."""
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(ProfileNotFoundError):
             load_profile(tmp_path / "nonexistent.json")
 
 

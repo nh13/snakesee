@@ -77,6 +77,19 @@ class TestJobInfo:
         job_no_threads = JobInfo(rule="test")
         assert job_no_threads.threads is None
 
+    def test_duration_negative_returns_zero(self) -> None:
+        """Test that negative durations (clock skew) return 0.0 instead of negative."""
+        # This can happen with clock skew on distributed systems
+        job = JobInfo(rule="test", start_time=200.0, end_time=100.0)  # end before start
+        assert job.duration == 0.0
+
+    def test_elapsed_negative_returns_zero(self) -> None:
+        """Test that negative elapsed time (clock skew) returns 0.0."""
+        # Set start_time in the future
+        future_start = time.time() + 1000
+        job = JobInfo(rule="test", start_time=future_start)
+        assert job.elapsed == 0.0
+
 
 class TestRuleTimingStats:
     """Tests for the RuleTimingStats dataclass."""
@@ -373,12 +386,13 @@ class TestWildcardTimingStats:
         from snakesee.models import WildcardTimingStats
 
         # sample key: A=100, B=500 (high between-group variance)
+        # Need at least 3 samples per value for MIN_SAMPLES_FOR_CONDITIONING
         sample_wts = WildcardTimingStats(
             rule="align",
             wildcard_key="sample",
             stats_by_value={
-                "A": RuleTimingStats(rule="align:sample=A", durations=[100.0]),
-                "B": RuleTimingStats(rule="align:sample=B", durations=[500.0]),
+                "A": RuleTimingStats(rule="align:sample=A", durations=[100.0, 102.0, 98.0]),
+                "B": RuleTimingStats(rule="align:sample=B", durations=[500.0, 510.0, 490.0]),
             },
         )
 
@@ -387,8 +401,8 @@ class TestWildcardTimingStats:
             rule="align",
             wildcard_key="batch",
             stats_by_value={
-                "1": RuleTimingStats(rule="align:batch=1", durations=[100.0]),
-                "2": RuleTimingStats(rule="align:batch=2", durations=[110.0]),
+                "1": RuleTimingStats(rule="align:batch=1", durations=[100.0, 102.0, 98.0]),
+                "2": RuleTimingStats(rule="align:batch=2", durations=[110.0, 112.0, 108.0]),
             },
         )
 
@@ -618,3 +632,23 @@ class TestThreadTimingStats:
         stats, matched = thread_stats.get_best_match(8)
         assert stats is not None
         assert stats.count == 2
+
+
+class TestConstantsSynchronization:
+    """Tests to verify constants stay synchronized across modules."""
+
+    def test_min_samples_for_conditioning_sync(self) -> None:
+        """Verify MIN_SAMPLES_FOR_CONDITIONING is synchronized between modules.
+
+        This test ensures the constant defined in models.py stays in sync with
+        the authoritative value in constants.py to prevent subtle bugs from
+        value drift.
+        """
+        from snakesee.constants import MIN_SAMPLES_FOR_CONDITIONING
+        from snakesee.models import WildcardTimingStats
+
+        assert WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING == MIN_SAMPLES_FOR_CONDITIONING, (
+            f"MIN_SAMPLES_FOR_CONDITIONING mismatch: "
+            f"models.py has {WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING}, "
+            f"constants.py has {MIN_SAMPLES_FOR_CONDITIONING}"
+        )

@@ -23,7 +23,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 requires-python = ">=3.11.0,<4.0"
-dependencies = ["rich>=13.0.0", "defopt>=6.4.0", "snakemake>=8.0.0"]
+dependencies = [
+    "rich>=13.0.0",
+    "defopt>=6.4.0",
+    "snakemake>=8.0.0",
+    "orjson>=3.9.0",
+]
 
 [project.optional-dependencies]
 logo = ["rich-pixels>=3.0.1", "pillow>=10.0.0"]
@@ -45,6 +50,8 @@ dev = [
     "ruff>=0.6.0",
     "poethepoet~=0.37",
     "pre-commit>=4.5.1",
+    "hypothesis>=6.148.8",
+    "pytest-benchmark>=5.2.3",
 ]
 docs = [
     "mkdocs-autorefs>=0.5.0",
@@ -105,7 +112,7 @@ ignore_missing_imports = true
 
 [tool.coverage.report]
 exclude_lines = ["pragma: not covered", "@overload"]
-fail_under = 65
+fail_under = 80
 
 [tool.pytest.ini_options]
 minversion = "7.4"

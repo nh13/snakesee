@@ -1,6 +1,6 @@
 """Data models for workflow monitoring."""
 
-import time
+import logging
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -10,6 +10,12 @@ from statistics import stdev
 from typing import ClassVar
 from typing import Literal
 
+from snakesee.constants import MIN_SAMPLES_FOR_CONDITIONING
+from snakesee.state.clock import ClockUtils
+from snakesee.state.clock import get_clock
+
+logger = logging.getLogger(__name__)
+
 # Weighting strategy type for timing estimates
 WeightingStrategy = Literal["time", "index"]
 
@@ -17,14 +23,16 @@ WeightingStrategy = Literal["time", "index"]
 class WorkflowStatus(Enum):
     """Current status of a workflow."""
 
+    UNKNOWN = "unknown"
+    NOT_STARTED = "not_started"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     INCOMPLETE = "incomplete"
-    UNKNOWN = "unknown"
+    STALE = "stale"  # No activity for extended period
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JobInfo:
     """
     Information about a single job execution.
@@ -61,8 +69,15 @@ class JobInfo:
         """
         if self.start_time is None:
             return None
-        end = self.end_time or time.time()
-        return end - self.start_time
+        end = self.end_time or get_clock().now()
+        result = ClockUtils.calculate_duration(self.start_time, end, f"job {self.rule}")
+        if not result.is_valid:
+            logger.warning(
+                "Negative elapsed time detected for job %s: %.2fs (clock skew?)",
+                self.rule,
+                result.raw_value,
+            )
+        return result.value
 
     @property
     def duration(self) -> float | None:
@@ -70,10 +85,19 @@ class JobInfo:
         Total duration in seconds (only for completed jobs).
 
         Returns:
-            Duration in seconds, or None if job not completed.
+            Duration in seconds (always >= 0), or None if job not completed.
         """
         if self.start_time is not None and self.end_time is not None:
-            return self.end_time - self.start_time
+            result = ClockUtils.calculate_duration(
+                self.start_time, self.end_time, f"job {self.rule}"
+            )
+            if not result.is_valid:
+                logger.warning(
+                    "Negative duration detected for job %s: %.2fs (clock skew?)",
+                    self.rule,
+                    result.raw_value,
+                )
+            return result.value
         return None
 
 
@@ -217,13 +241,12 @@ class RuleTimingStats:
         Returns:
             Time-weighted mean duration.
         """
-        now = time.time()
         half_life_seconds = half_life_days * 86400  # Convert days to seconds
 
         weights: list[float] = []
         for ts in self.timestamps:
-            age_seconds = max(0, now - ts)  # Ensure non-negative
-            weight = 0.5 ** (age_seconds / half_life_seconds)
+            age = ClockUtils.age_seconds(ts)
+            weight = 0.5 ** (age / half_life_seconds)
             weights.append(weight)
 
         weighted_sum = sum(d * w for d, w in zip(self.durations, weights, strict=True))
@@ -269,22 +292,6 @@ class RuleTimingStats:
         if weight_total <= 0:
             return self.mean_duration  # Fallback to simple mean
 
-        return weighted_sum / weight_total
-
-    def _position_weighted_mean(self) -> float:
-        """
-        Calculate weighted mean using position-based weights (legacy behavior).
-
-        Assumes durations list is ordered oldest-to-newest.
-        Deprecated: Use _index_weighted_mean with configurable half_life_logs instead.
-
-        Returns:
-            Position-weighted mean duration.
-        """
-        # Apply exponential decay weights (most recent = highest weight)
-        weights: list[int] = [2**i for i in range(len(self.durations))]
-        weighted_sum: float = sum(t * w for t, w in zip(self.durations, weights, strict=True))
-        weight_total: int = sum(weights)
         return weighted_sum / weight_total
 
     @property
@@ -400,11 +407,12 @@ class RuleTimingStats:
         if half_life_days is None:
             half_life_days = self.DEFAULT_HALF_LIFE_DAYS
 
-        now = time.time()
         half_life_seconds = half_life_days * 86400
 
         # Calculate average weight of data points
-        weights = [0.5 ** (max(0, now - ts) / half_life_seconds) for ts in self.timestamps]
+        weights = [
+            0.5 ** (ClockUtils.age_seconds(ts) / half_life_seconds) for ts in self.timestamps
+        ]
         avg_weight = sum(weights) / len(weights) if weights else 0.5
 
         return min(1.0, avg_weight)
@@ -423,7 +431,7 @@ class RuleTimingStats:
         if not self.timestamps or not self.durations:
             return 0.5  # Not enough data
 
-        now = time.time()
+        now = get_clock().now()
         cutoff = now - (days * 86400)
 
         # Get recent durations
@@ -463,7 +471,8 @@ class WildcardTimingStats:
     wildcard_key: str
     stats_by_value: dict[str, RuleTimingStats] = field(default_factory=dict)
 
-    MIN_SAMPLES_FOR_CONDITIONING: ClassVar[int] = 3  # Need at least 3 samples per value
+    # Use the authoritative constant from snakesee.constants
+    MIN_SAMPLES_FOR_CONDITIONING: ClassVar[int] = MIN_SAMPLES_FOR_CONDITIONING
 
     def get_stats_for_value(self, value: str) -> RuleTimingStats | None:
         """
@@ -507,7 +516,12 @@ class WildcardTimingStats:
                 continue  # Need at least 2 different values to compare
 
             # Calculate between-group variance (variance of means)
-            means = [s.mean_duration for s in wts.stats_by_value.values() if s.count > 0]
+            # Only include values with enough samples for conditioning
+            means = [
+                s.mean_duration
+                for s in wts.stats_by_value.values()
+                if s.count >= WildcardTimingStats.MIN_SAMPLES_FOR_CONDITIONING
+            ]
             if len(means) < 2:
                 continue
 
@@ -521,8 +535,9 @@ class WildcardTimingStats:
                     best_variance_ratio = variance_ratio
                     best_key = key
 
-        # Only return if variance ratio is meaningful (> 0.1)
-        return best_key if best_variance_ratio > 0.1 else None
+        # Only return if variance ratio is meaningful (> 0.05)
+        # This corresponds to ~22% coefficient of variation between groups
+        return best_key if best_variance_ratio > 0.05 else None
 
 
 @dataclass
@@ -593,7 +608,7 @@ class ThreadTimingStats:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TimeEstimate:
     """
     Time remaining estimate with uncertainty bounds.
@@ -616,34 +631,20 @@ class TimeEstimate:
         """
         Format as human-readable ETA string.
 
+        Delegates to snakesee.formatting.format_eta for centralized formatting.
+
         Returns:
             Formatted ETA with confidence indication.
             Examples: "~5m", "5-10m", "~15m (rough)", "unknown"
         """
-        if self.seconds_remaining == float("inf"):
-            return "unknown"
+        from snakesee.formatting import format_eta as _format_eta
 
-        expected_str = _format_duration(self.seconds_remaining)
-
-        # High confidence, narrow range: just show estimate
-        if (
-            self.confidence > 0.7
-            and self.seconds_remaining > 0
-            and (self.upper_bound - self.lower_bound) / self.seconds_remaining < 0.3
-        ):
-            return f"~{expected_str}"
-
-        # Medium confidence: show range
-        if self.confidence > 0.4:
-            lower_str = _format_duration(max(0, self.lower_bound))
-            upper_str = _format_duration(self.upper_bound)
-            return f"{lower_str} - {upper_str}"
-
-        # Low confidence: show with caveat
-        if self.confidence > 0.1:
-            return f"~{expected_str} (rough)"
-
-        return f"~{expected_str} (very rough)"
+        return _format_eta(
+            seconds_remaining=self.seconds_remaining,
+            lower_bound=self.lower_bound,
+            upper_bound=self.upper_bound,
+            confidence=self.confidence,
+        )
 
 
 @dataclass
@@ -674,6 +675,7 @@ class WorkflowProgress:
     incomplete_jobs_list: list[JobInfo] = field(default_factory=list)
     running_jobs: list[JobInfo] = field(default_factory=list)
     recent_completions: list[JobInfo] = field(default_factory=list)
+    pending_jobs_list: list[JobInfo] = field(default_factory=list)
     start_time: float | None = None
     log_file: Path | None = None
 
@@ -699,7 +701,7 @@ class WorkflowProgress:
         """
         if self.start_time is None:
             return None
-        return time.time() - self.start_time
+        return get_clock().now() - self.start_time
 
     @property
     def pending_jobs(self) -> int:
@@ -714,39 +716,19 @@ class WorkflowProgress:
         )
 
 
-def _format_duration(seconds: float) -> str:
-    """
-    Format seconds as human-readable duration.
-
-    Args:
-        seconds: Duration in seconds.
-
-    Returns:
-        Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
-    """
-    if seconds == float("inf"):
-        return "unknown"
-    if seconds < 0:
-        return "0s"
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes}m {secs}s" if secs > 0 else f"{minutes}m"
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
-
-
 def format_duration(seconds: float) -> str:
     """
     Format seconds as human-readable duration.
 
+    This is a public API function preserved for backward compatibility.
+    New code should use snakesee.formatting.format_duration directly.
+
     Args:
         seconds: Duration in seconds.
 
     Returns:
         Formatted duration string (e.g., "5s", "2m 30s", "1h 15m").
     """
-    return _format_duration(seconds)
+    from snakesee.formatting import format_duration as _fmt_duration
+
+    return _fmt_duration(seconds)

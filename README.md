@@ -304,6 +304,8 @@ If lock files exist but no incomplete markers, snakesee falls back to checking l
 
 ## TUI Keyboard Shortcuts
 
+### General
+
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
@@ -314,18 +316,16 @@ If lock files exist but no incomplete markers, snakesee falls back to checking l
 | `r` | Force refresh |
 | `Ctrl+r` | Hard refresh (reload historical data) |
 
-### Refresh Rate (vim-style)
+### Refresh Rate
 
 | Key | Action |
 |-----|--------|
-| `h` | Decrease by 5s (faster) |
-| `j` | Decrease by 0.5s (faster) |
-| `k` | Increase by 0.5s (slower) |
-| `l` | Increase by 5s (slower) |
+| `+` / `-` | Fine adjust (±0.5s) |
+| `<` / `>` | Coarse adjust (±5s) |
 | `0` | Reset to default (1s) |
 | `G` | Set to minimum (0.5s, fastest) |
 
-### Layout & Navigation
+### Layout & Filtering
 
 | Key | Action |
 |-----|--------|
@@ -333,10 +333,47 @@ If lock files exist but no incomplete markers, snakesee falls back to checking l
 | `/` | Filter rules by name |
 | `n` / `N` | Next/previous filter match |
 | `Esc` | Clear filter, return to latest log |
+
+### Log History Navigation
+
+| Key | Action |
+|-----|--------|
 | `[` / `]` | View older/newer log (1 step) |
 | `{` / `}` | View older/newer log (5 steps) |
-| `s` | Cycle sort table |
-| `1-4` | Sort by column |
+
+### Table Sorting
+
+| Key | Action |
+|-----|--------|
+| `s` / `S` | Cycle sort table forward/backward |
+| `1-4` | Sort by column (press again to reverse) |
+
+### Modal Navigation (vim-style)
+
+snakesee uses a two-mode navigation system for exploring jobs and logs:
+
+**Enter Table Mode:** Press `Enter` from the main view
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move down/up one row |
+| `g` / `G` | Jump to first/last row |
+| `Ctrl+d` / `Ctrl+u` | Half-page down/up |
+| `Ctrl+f` / `Ctrl+b` | Full-page down/up |
+| `h` / `l` | Switch to running/completions table |
+| `Tab` | Cycle between tables |
+| `Enter` | View selected job's log |
+| `Esc` | Exit table mode |
+
+**Log Viewing Mode:** Press `Enter` on a selected job
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Scroll down/up one line |
+| `g` / `G` | Jump to start/end of log |
+| `Ctrl+d` / `Ctrl+u` | Half-page down/up |
+| `Ctrl+f` / `Ctrl+b` | Full-page down/up |
+| `Esc` | Return to table mode |
 
 ## Development
 

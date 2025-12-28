@@ -1,13 +1,18 @@
 """Command-line interface for Snakemake workflow monitoring."""
 
+import logging
 import sys
 from pathlib import Path
 from typing import Literal
+from typing import NoReturn
 
 import defopt  # type: ignore[import-untyped]
 from rich.console import Console
 
 from snakesee.estimator import TimeEstimator
+from snakesee.exceptions import InvalidProfileError
+from snakesee.exceptions import ProfileNotFoundError
+from snakesee.exceptions import WorkflowNotFoundError
 from snakesee.models import WorkflowStatus
 from snakesee.models import format_duration
 from snakesee.parser import parse_workflow_state
@@ -15,6 +20,8 @@ from snakesee.profile import DEFAULT_PROFILE_NAME
 from snakesee.profile import export_profile_from_metadata
 from snakesee.profile import find_profile
 from snakesee.profile import load_profile
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_workflow_dir(workflow_dir: Path) -> Path:
@@ -28,16 +35,22 @@ def _validate_workflow_dir(workflow_dir: Path) -> Path:
         The validated path.
 
     Raises:
-        SystemExit: If .snakemake directory doesn't exist.
+        WorkflowNotFoundError: If .snakemake directory doesn't exist.
     """
     snakemake_dir = workflow_dir / ".snakemake"
     if not snakemake_dir.exists():
-        console = Console(stderr=True)
-        console.print(
-            f"[red]Error:[/red] No .snakemake directory found in {workflow_dir}",
+        raise WorkflowNotFoundError(
+            workflow_dir,
+            f"No .snakemake directory found in {workflow_dir}",
         )
-        sys.exit(1)
     return workflow_dir
+
+
+def _handle_workflow_error(e: WorkflowNotFoundError) -> NoReturn:
+    """Print a workflow error and exit."""
+    console = Console(stderr=True)
+    console.print(f"[red]Error:[/red] {e.message}")
+    sys.exit(1)
 
 
 def watch(
@@ -46,7 +59,7 @@ def watch(
     refresh: float = 2.0,
     no_estimate: bool = False,
     profile: Path | None = None,
-    wildcard_timing: bool = False,
+    wildcard_timing: bool = True,
     weighting_strategy: Literal["index", "time"] = "index",
     half_life_logs: int = 10,
     half_life_days: float = 7.0,
@@ -63,8 +76,8 @@ def watch(
         no_estimate: Disable time estimation from historical data.
         profile: Optional path to a timing profile (.snakesee-profile.json)
                  for bootstrapping estimates. If not specified, will auto-discover.
-        wildcard_timing: Enable wildcard conditioning for estimates (estimate per
-                         sample/batch). Can also be toggled with 'w' key in TUI.
+        wildcard_timing: Use wildcard conditioning for estimates (estimate per
+                         sample/batch). Enabled by default. Toggle with 'w' key in TUI.
         weighting_strategy: Strategy for weighting historical timing data.
                            "index" (default) - weight by run index, ideal for active
                            development where each run may fix issues.
@@ -76,7 +89,10 @@ def watch(
                        After this many days, a run's weight is halved. Default: 7.0.
                        Only used when weighting_strategy="time".
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
 
     # Validate refresh rate
     if refresh < 0.5 or refresh > 60.0:
@@ -129,7 +145,10 @@ def status(
         no_estimate: Disable time estimation from historical data.
         profile: Optional path to a timing profile for bootstrapping estimates.
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
     console = Console()
 
     # Parse workflow state
@@ -186,8 +205,9 @@ def status(
             try:
                 loaded_profile = load_profile(profile_path)
                 estimator.rule_stats = loaded_profile.to_rule_stats()
-            except (OSError, ValueError):
-                pass  # Fall back to metadata
+            except (ProfileNotFoundError, InvalidProfileError) as e:
+                # Log the error for debugging, but fall back to metadata silently
+                logger.debug("Failed to load profile %s: %s", profile_path, e)
 
         # Merge with live metadata (live data takes precedence for recent runs)
         if metadata_dir.exists():
@@ -218,7 +238,10 @@ def profile_export(
         output: Output file path. Defaults to .snakesee-profile.json in workflow_dir.
         merge: If output file exists, merge with existing data instead of replacing.
     """
-    workflow_dir = _validate_workflow_dir(workflow_dir)
+    try:
+        workflow_dir = _validate_workflow_dir(workflow_dir)
+    except WorkflowNotFoundError as e:
+        _handle_workflow_error(e)
     console = Console()
 
     metadata_dir = workflow_dir / ".snakemake" / "metadata"
@@ -245,7 +268,10 @@ def profile_export(
         if merge and output_path.exists():
             console.print("  [dim](merged with existing profile)[/dim]")
 
-    except Exception as e:
+    except InvalidProfileError as e:
+        console.print(f"[red]Error:[/red] {e.message}")
+        sys.exit(1)
+    except OSError as e:
         console.print(f"[red]Error:[/red] Failed to export profile: {e}")
         sys.exit(1)
 
@@ -282,11 +308,11 @@ def profile_show(
                 f"range={format_duration(rp.min_duration)}-{format_duration(rp.max_duration)}"
             )
 
-    except FileNotFoundError:
+    except ProfileNotFoundError:
         console.print(f"[red]Error:[/red] Profile not found: {profile_path}")
         sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] Invalid profile: {e}")
+    except InvalidProfileError as e:
+        console.print(f"[red]Error:[/red] {e.message}")
         sys.exit(1)
 
 

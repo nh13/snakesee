@@ -233,35 +233,64 @@ class WorkflowRunner:
 
         return [d.to_dict() for d in discrepancies]
 
-    def validate_events(self) -> "EventValidationResult":
+    def validate_events(
+        self, wait_for_total_jobs: bool = True, timeout: float = 3.0
+    ) -> "EventValidationResult":
         """Validate that events were generated correctly.
 
         This validates the event stream itself, not comparison with parser.
         Returns information about the events captured.
-        """
-        # Delay to ensure all events are flushed to disk
-        # after the workflow process exits. CI environments may need
-        # more time for filesystem sync.
-        time.sleep(0.5)
 
+        Args:
+            wait_for_total_jobs: If True, retry reading events until total_jobs > 0
+                or timeout is reached. This helps with CI timing issues where
+                progress events may not be flushed immediately.
+            timeout: Maximum time to wait for total_jobs (default 3 seconds).
+        """
         event_file = get_event_file_path(self.work_dir)
 
-        if not event_file.exists():
-            raise RuntimeError(
-                f"Event file not found at {event_file}. "
-                "Was the workflow run with --logger snakesee?"
-            )
-
-        # Read all events
-        reader = EventReader(event_file)
-        events = reader.read_new_events()
-
-        if not events:
-            raise RuntimeError("No events found in event file")
-
-        # Accumulate events
+        # Retry loop to wait for events to be fully flushed
+        # CI environments may need extra time for filesystem sync
+        start_time = time.time()
+        events: list[SnakeseeEvent] = []
         accumulator = EventAccumulator()
-        accumulator.process_events(events)
+
+        while True:
+            elapsed = time.time() - start_time
+
+            if not event_file.exists():
+                if elapsed >= timeout:
+                    raise RuntimeError(
+                        f"Event file not found at {event_file}. "
+                        "Was the workflow run with --logger snakesee?"
+                    )
+                time.sleep(0.2)
+                continue
+
+            # Read all events
+            reader = EventReader(event_file)
+            events = reader.read_new_events()
+
+            if not events:
+                if elapsed >= timeout:
+                    raise RuntimeError("No events found in event file")
+                time.sleep(0.2)
+                continue
+
+            # Accumulate events
+            accumulator = EventAccumulator()
+            accumulator.process_events(events)
+
+            # If we don't need to wait for total_jobs, or we have it, we're done
+            if not wait_for_total_jobs or accumulator.total_jobs > 0:
+                break
+
+            # Otherwise, wait a bit and retry (progress events may still be flushing)
+            if elapsed >= timeout:
+                # Timeout reached, return what we have
+                break
+
+            time.sleep(0.2)
 
         return EventValidationResult(
             events=events,
