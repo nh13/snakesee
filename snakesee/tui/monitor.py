@@ -1,11 +1,17 @@
 """Rich TUI for Snakemake workflow monitoring."""
 
+import logging
+import math
 import sys
 import time
-from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+from typing import Any
+
+if TYPE_CHECKING:
+    from snakesee.types import ProgressCallback
 
 from rich.console import Console
 from rich.console import Group
@@ -20,6 +26,11 @@ from rich.progress import TextColumn
 from rich.table import Table
 from rich.text import Text
 
+from snakesee.constants import ADAPTIVE_CACHE_TTL_MULTIPLIER
+from snakesee.constants import DEFAULT_REFRESH_RATE
+from snakesee.constants import MAX_CACHE_TTL
+from snakesee.constants import MAX_REFRESH_RATE
+from snakesee.constants import MIN_REFRESH_RATE
 from snakesee.estimator import TimeEstimator
 from snakesee.events import EventReader
 from snakesee.events import EventType
@@ -27,7 +38,6 @@ from snakesee.events import SnakeseeEvent
 from snakesee.events import get_event_file_path
 from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
-from snakesee.models import ThreadTimingStats
 from snakesee.models import TimeEstimate
 from snakesee.models import WeightingStrategy
 from snakesee.models import WorkflowProgress
@@ -37,21 +47,21 @@ from snakesee.parser import IncrementalLogReader
 from snakesee.parser import parse_workflow_state
 from snakesee.plugins import parse_tool_progress
 from snakesee.plugins.base import ToolProgress
+from snakesee.state.clock import get_clock
+from snakesee.state.paths import WorkflowPaths
+from snakesee.state.workflow_state import WorkflowState
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
 
-# Refresh rate bounds
-MIN_REFRESH_RATE = 0.5
-MAX_REFRESH_RATE = 60.0
-DEFAULT_REFRESH_RATE = 1.0
+logger = logging.getLogger(__name__)
 
 # Fulcrum Genomics brand colors
 FG_BLUE = "#26a8e0"
 FG_GREEN = "#38b44a"
 
 # Fulcrum Genomics logo path (easter egg)
-FG_LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
+FG_LOGO_PATH = Path(__file__).parent.parent / "assets" / "logo.png"
 
 
 class LayoutMode(Enum):
@@ -81,11 +91,11 @@ class WorkflowMonitorTUI:
         r: Force refresh
         Ctrl+r: Hard refresh (reload historical data)
 
-        Refresh rate (vim-style):
-        h: Decrease by 5s (faster)
-        j: Decrease by 0.5s (faster)
-        k: Increase by 0.5s (slower)
-        l: Increase by 5s (slower)
+        Refresh rate:
+        -: Decrease by 0.5s (faster)
+        +: Increase by 0.5s (slower)
+        <: Decrease by 5s (faster)
+        >: Increase by 5s (slower)
         0: Reset to default (1s)
         G: Set to minimum (0.5s, fastest)
 
@@ -121,7 +131,7 @@ class WorkflowMonitorTUI:
         refresh_rate: float = DEFAULT_REFRESH_RATE,
         use_estimation: bool = True,
         profile_path: Path | None = None,
-        use_wildcard_conditioning: bool = False,
+        use_wildcard_conditioning: bool = True,
         weighting_strategy: WeightingStrategy = "index",
         half_life_logs: int = 10,
         half_life_days: float = 7.0,
@@ -182,22 +192,39 @@ class WorkflowMonitorTUI:
         # Cutoff time for historical view (updated in _poll_state)
         self._cutoff_time: float | None = None
 
-        # Job log viewer state
-        self._job_selection_mode: bool = False  # True when a job is selected
+        # Job log viewer state (two nested modes)
+        # Normal → [Enter] → Table Mode → [Enter] → Log Mode
+        #                        ↑                      |
+        #                        └──────── [Esc] ───────┘
+        #                    [Esc] → Normal
+        self._job_selection_mode: bool = False  # True when in table navigation mode
+        self._log_viewing_mode: bool = False  # True when viewing a job's log (nested)
         self._log_source: str | None = None  # "running" or "completions"
         self._selected_job_index: int = 0  # Index into running_jobs list
         self._selected_completion_index: int = 0  # Index into completions list
         self._running_scroll_offset: int = 0  # Scroll offset for running jobs table
         self._completions_scroll_offset: int = 0  # Scroll offset for completions table
         self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
+        self._log_scroll_page_size: int = 10  # Lines to scroll with Ctrl+u/d
         self._cached_log_path: Path | None = None
         self._cached_log_lines: list[str] = []
         self._cached_log_mtime: float = 0
+
+        # Tool progress cache (to avoid parsing job logs on every refresh)
+        # Cache stores: (cached_time, file_mtime, progress) - invalidates if file changes
+        self._tool_progress_cache: dict[str, tuple[float, float, ToolProgress | None]] = {}
+        # Adaptive TTL: scales with refresh rate to avoid cache outliving refresh cycles
+        self._tool_progress_cache_ttl: float = min(
+            ADAPTIVE_CACHE_TTL_MULTIPLIER * refresh_rate, MAX_CACHE_TTL
+        )
 
         # Event reader for real-time events from logger plugin
         self._event_reader: EventReader | None = None
         self._events_enabled: bool = True
         self._init_event_reader()
+
+        # All scheduled jobs from log (for pending job estimation without logger plugin)
+        self._all_scheduled_jobs: dict[str, JobInfo] = {}
 
         # Incremental log reader for efficient polling
         self._log_reader: IncrementalLogReader | None = None
@@ -208,14 +235,10 @@ class WorkflowMonitorTUI:
         self._validation_logger: ValidationLogger | None = None
         self._init_validation()
 
-        # Track job_ids already added to rule_stats (to avoid duplicates)
-        self._rule_stats_job_ids: set[str] = set()
-
-        # Track threads by job_id (populated from JOB_SUBMITTED events)
-        self._job_threads: dict[str, int] = {}
-
-        # Thread-grouped timing stats: rule -> ThreadTimingStats
-        self._thread_stats: dict[str, ThreadTimingStats] = {}
+        # Centralized workflow state
+        self._workflow_state: WorkflowState = WorkflowState.create(
+            workflow_dir=workflow_dir,
+        )
 
         self._init_estimator()
 
@@ -254,9 +277,8 @@ class WorkflowMonitorTUI:
 
     def _init_estimator(self) -> None:
         """Initialize or reinitialize the time estimator with progress display."""
-        self._rule_stats_job_ids.clear()
-        self._job_threads.clear()
-        self._thread_stats.clear()
+        self._workflow_state.rules.clear()
+        self._workflow_state.jobs.clear()
 
         if not self.use_estimation:
             self._estimator = None
@@ -267,6 +289,7 @@ class WorkflowMonitorTUI:
             weighting_strategy=self.weighting_strategy,
             half_life_logs=self.half_life_logs,
             half_life_days=self.half_life_days,
+            rule_registry=self._workflow_state.rules,
         )
 
         metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
@@ -274,10 +297,8 @@ class WorkflowMonitorTUI:
         has_profile = self.profile_path is not None and self.profile_path.exists()
 
         # Check if there's anything to load (worth showing progress)
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        from snakesee.parser import find_all_logs
-
-        log_paths = find_all_logs(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_paths = paths.find_all_logs()
 
         # Skip progress display if nothing to load
         if not has_metadata and not has_profile and not log_paths:
@@ -299,8 +320,9 @@ class WorkflowMonitorTUI:
 
                     profile = load_profile(self.profile_path)
                     self._estimator.rule_stats = profile.to_rule_stats()
-                except (OSError, ValueError):
-                    pass  # Fall back to metadata only
+                except (OSError, ValueError) as e:
+                    # Log failure and fall back to metadata only
+                    logger.debug("Failed to load profile %s: %s", self.profile_path, e)
                 progress.update(task, completed=1)
 
             # Load metadata (single-pass for efficiency)
@@ -317,6 +339,13 @@ class WorkflowMonitorTUI:
 
                     self._estimator.load_from_metadata(metadata_dir, progress_callback=metadata_cb)
 
+            # Load historical timing from events file (complements metadata)
+            events_file = get_event_file_path(self.workflow_dir)
+            if events_file.exists():
+                task = progress.add_task("Loading events...", total=1)
+                self._estimator.load_from_events(events_file)
+                progress.update(task, completed=1)
+
             # Initialize thread stats from log parsing
             if log_paths:
                 task = progress.add_task("Analyzing thread usage...", total=len(log_paths))
@@ -330,26 +359,25 @@ class WorkflowMonitorTUI:
             # Parse current rules (fast, no progress needed)
             self._init_current_rules_from_log()
 
-        # Share thread stats with estimator for thread-aware ETA
-        self._estimator.thread_stats = self._thread_stats
-
     def _init_thread_stats_from_log(
         self,
         log_paths: list[Path] | None = None,
-        progress_callback: Callable[[int, int], None] | None = None,
+        progress_callback: "ProgressCallback | None" = None,
     ) -> None:
         """Initialize thread stats from all log files (metadata doesn't have threads).
+
+        Populates the centralized RuleRegistry with thread-specific timing data.
 
         Args:
             log_paths: Optional list of log paths to process (avoids re-discovering).
             progress_callback: Optional callback(current, total) for progress reporting.
         """
-        from snakesee.parser import find_all_logs
         from snakesee.parser import parse_completed_jobs_from_log
+        from snakesee.state.paths import WorkflowPaths
 
         if log_paths is None:
-            snakemake_dir = self.workflow_dir / ".snakemake"
-            log_paths = find_all_logs(snakemake_dir)
+            paths = WorkflowPaths(self.workflow_dir)
+            log_paths = paths.find_all_logs()
 
         if not log_paths:
             return
@@ -362,34 +390,44 @@ class WorkflowMonitorTUI:
             for job in parse_completed_jobs_from_log(log_path):
                 if job.threads is None or job.duration is None:
                     continue
-                if job.rule not in self._thread_stats:
-                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
-                thread_stats = self._thread_stats[job.rule]
-                if job.threads not in thread_stats.stats_by_threads:
-                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
-                ts = thread_stats.stats_by_threads[job.threads]
-                ts.durations.append(job.duration)
-                if job.end_time is not None:
-                    ts.timestamps.append(job.end_time)
-                if job.input_size is not None:
-                    ts.input_sizes.append(job.input_size)
+                # Record to centralized RuleRegistry (includes thread info)
+                self._workflow_state.rules.record_completion(
+                    rule=job.rule,
+                    duration=job.duration,
+                    timestamp=job.end_time or 0.0,
+                    threads=job.threads,
+                    wildcards=dict(job.wildcards) if job.wildcards else None,
+                    input_size=job.input_size,
+                )
 
     def _init_current_rules_from_log(self) -> None:
-        """Parse current rules from the latest log to filter deleted rules."""
-        from snakesee.parser import find_latest_log
+        """Parse current rules, job counts, and all scheduled jobs from the latest log."""
+        from snakesee.parser import parse_all_jobs_from_log
+        from snakesee.parser import parse_job_stats_counts_from_log
         from snakesee.parser import parse_job_stats_from_log
 
         if self._estimator is None:
             return
 
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        log_path = find_latest_log(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_path = paths.find_latest_log()
         if log_path is None:
             return
 
+        # Parse rule names for filtering
         current_rules = parse_job_stats_from_log(log_path)
         if current_rules:
             self._estimator.current_rules = current_rules
+
+        # Parse job counts for accurate pending job inference
+        job_counts = parse_job_stats_counts_from_log(log_path)
+        if job_counts:
+            self._estimator.expected_job_counts = job_counts
+
+        # Parse all scheduled jobs with wildcards for pending job estimation
+        all_jobs = parse_all_jobs_from_log(log_path)
+        if all_jobs:
+            self._all_scheduled_jobs = {job.job_id: job for job in all_jobs if job.job_id}
 
     def _init_event_reader(self) -> None:
         """Initialize the event reader if event file exists."""
@@ -408,17 +446,13 @@ class WorkflowMonitorTUI:
         Creates a reader for the current log file, enabling efficient
         incremental parsing instead of re-reading the entire file on each poll.
         """
-        from snakesee.parser import find_latest_log
-
-        snakemake_dir = self.workflow_dir / ".snakemake"
-        log_path = find_latest_log(snakemake_dir)
+        paths = WorkflowPaths(self.workflow_dir)
+        log_path = paths.find_latest_log()
         if log_path is not None:
             self._log_reader = IncrementalLogReader(log_path)
         else:
             # Create with a placeholder path; will be updated when log appears
-            self._log_reader = IncrementalLogReader(
-                snakemake_dir / "log" / "placeholder.snakemake.log"
-            )
+            self._log_reader = IncrementalLogReader(paths.log_dir / "placeholder.snakemake.log")
 
     def _init_validation(self) -> None:
         """Initialize validation if event file exists.
@@ -427,6 +461,11 @@ class WorkflowMonitorTUI:
         file is detected, allowing comparison between event-based and
         parsed state to find bugs in either approach.
         """
+        # Close existing validation logger to prevent file handle leaks
+        if self._validation_logger is not None:
+            self._validation_logger.close()
+            self._validation_logger = None
+
         event_file = get_event_file_path(self.workflow_dir)
         if event_file.exists():
             self._event_accumulator = EventAccumulator()
@@ -486,13 +525,41 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         running_jobs: list[JobInfo],
     ) -> None:
-        """Handle JOB_SUBMITTED event - capture threads info."""
+        """Handle JOB_SUBMITTED event - track pending job with wildcards."""
+        from snakesee.state.job_registry import Job
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
+
+        # Create or update job in registry with SUBMITTED status
+        existing_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        if existing_job is None:
+            # Create new job with SUBMITTED status
+            new_job = Job(
+                key=job_id_str,
+                rule=event.rule_name or "unknown",
+                status=JobStatus.SUBMITTED,
+                job_id=job_id_str,
+                wildcards=dict(event.wildcards) if event.wildcards else {},
+                threads=event.threads,
+            )
+            self._workflow_state.jobs.add(new_job)
+        else:
+            # Update existing job with submitted info
+            if event.wildcards:
+                existing_job.wildcards = dict(event.wildcards)
+            if event.threads is not None:
+                existing_job.threads = event.threads
+
+        # Also store threads for backward compatibility
         if event.threads is not None:
-            self._job_threads[job_id_str] = event.threads
-        threads = event.threads or self._job_threads.get(job_id_str)
+            self._workflow_state.jobs.store_threads(job_id_str, event.threads)
+
+        # Update running_jobs list if this job is already running
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
             if job.job_id == job_id_str:
                 running_jobs[i] = JobInfo(
@@ -512,11 +579,20 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         running_jobs: list[JobInfo],
     ) -> None:
-        """Handle JOB_STARTED event - update start time and threads."""
+        """Handle JOB_STARTED event - transition from SUBMITTED to RUNNING."""
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None:
             return
         job_id_str = str(event.job_id)
-        threads = event.threads or self._job_threads.get(job_id_str)
+
+        # Transition job from SUBMITTED to RUNNING
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+        if registry_job is not None:
+            registry_job.start_time = event.timestamp
+            self._workflow_state.jobs.set_status(registry_job, JobStatus.RUNNING)
+
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(running_jobs):
             if job.job_id == job_id_str:
                 running_jobs[i] = JobInfo(
@@ -525,7 +601,7 @@ class WorkflowMonitorTUI:
                     start_time=event.timestamp,
                     end_time=job.end_time,
                     output_file=job.output_file,
-                    wildcards=job.wildcards,
+                    wildcards=event.wildcards_dict or job.wildcards,
                     input_size=job.input_size,
                     threads=threads or job.threads,
                 )
@@ -536,11 +612,20 @@ class WorkflowMonitorTUI:
         event: SnakeseeEvent,
         completions: list[JobInfo],
     ) -> None:
-        """Handle JOB_FINISHED event - update completion with accurate duration."""
+        """Handle JOB_FINISHED event - transition to COMPLETED."""
+        from snakesee.state.job_registry import JobStatus
+
         if event.job_id is None or event.duration is None:
             return
         job_id_str = str(event.job_id)
-        threads = event.threads or self._job_threads.get(job_id_str)
+        registry_job = self._workflow_state.jobs.get_by_job_id(job_id_str)
+
+        # Transition job to COMPLETED
+        if registry_job is not None:
+            registry_job.end_time = event.timestamp
+            self._workflow_state.jobs.set_status(registry_job, JobStatus.COMPLETED)
+
+        threads = event.threads or (registry_job.threads if registry_job else None)
         for i, job in enumerate(completions):
             if job.job_id == job_id_str:
                 completions[i] = JobInfo(
@@ -556,6 +641,37 @@ class WorkflowMonitorTUI:
                     threads=threads or job.threads,
                 )
                 break
+
+    def _record_job_stats_from_event(self, event: SnakeseeEvent) -> None:
+        """Record job stats to RuleRegistry from a JOB_FINISHED event.
+
+        Uses JobRegistry to track which jobs have had stats recorded
+        to avoid duplicates across poll cycles.
+        """
+        if event.job_id is None or event.duration is None or event.rule_name is None:
+            return
+
+        # Check if we've already recorded stats for this job
+        job_key = str(event.job_id)
+        job = self._workflow_state.jobs.get(job_key)
+        if job is not None and job.stats_recorded:
+            return
+
+        # Get threads from event or JobRegistry
+        threads = event.threads or (job.threads if job else None)
+
+        # Record to RuleRegistry
+        self._workflow_state.rules.record_completion(
+            rule=event.rule_name,
+            duration=event.duration,
+            timestamp=event.timestamp,
+            threads=threads,
+            wildcards=event.wildcards_dict,
+        )
+
+        # Mark as recorded
+        if job is not None:
+            job.stats_recorded = True
 
     def _handle_job_error_event(
         self,
@@ -579,6 +695,36 @@ class WorkflowMonitorTUI:
             )
         return len(failed_list)
 
+    def _compute_pending_jobs_from_scheduled(
+        self,
+        running_jobs: list[JobInfo],
+        completions: list[JobInfo],
+        failed_jobs: list[JobInfo] | None = None,
+    ) -> list[JobInfo]:
+        """Compute pending jobs by subtracting running/completed/failed from all scheduled.
+
+        When the snakesee logger plugin isn't available, we fall back to parsing
+        all scheduled jobs from the snakemake log. This method computes which of
+        those scheduled jobs are still pending (not yet running, completed, or failed).
+
+        Args:
+            running_jobs: Currently running jobs.
+            completions: Completed jobs.
+            failed_jobs: Failed jobs (to exclude from pending).
+
+        Returns:
+            List of pending jobs with their wildcards and threads.
+        """
+        if not self._all_scheduled_jobs:
+            return []
+        running_ids = {job.job_id for job in running_jobs if job.job_id}
+        completed_ids = {job.job_id for job in completions if job.job_id}
+        failed_ids = {job.job_id for job in (failed_jobs or []) if job.job_id}
+        excluded_ids = running_ids | completed_ids | failed_ids
+        return [
+            job for job_id, job in self._all_scheduled_jobs.items() if job_id not in excluded_ids
+        ]
+
     def _apply_events_to_progress(
         self, progress: WorkflowProgress, events: list[SnakeseeEvent]
     ) -> WorkflowProgress:
@@ -594,22 +740,21 @@ class WorkflowMonitorTUI:
         Returns:
             Updated WorkflowProgress with event data applied.
         """
-        if not events:
-            return progress
-
         # Track updates from events
         new_total = progress.total_jobs
         new_completed = progress.completed_jobs
         new_running_jobs = list(progress.running_jobs)
         new_completions = list(progress.recent_completions)
-        new_failed = progress.failed_jobs
-        new_failed_list = list(progress.failed_jobs_list)
 
-        # Process events to update state
+        # Process events FIRST to update registry state
         for event in events:
+            # Route event through centralized JobRegistry (Phase 10)
+            self._workflow_state.jobs.apply_event(event)
+
             if event.event_type == EventType.PROGRESS:
                 if event.total_jobs is not None:
                     new_total = event.total_jobs
+                    self._workflow_state.total_jobs = event.total_jobs
                 if event.completed_jobs is not None:
                     new_completed = event.completed_jobs
             elif event.event_type == EventType.JOB_SUBMITTED:
@@ -618,8 +763,48 @@ class WorkflowMonitorTUI:
                 self._handle_job_started_event(event, new_running_jobs)
             elif event.event_type == EventType.JOB_FINISHED:
                 self._handle_job_finished_event(event, new_completions)
-            elif event.event_type == EventType.JOB_ERROR:
-                new_failed = self._handle_job_error_event(event, new_failed_list)
+                # Record stats to RuleRegistry for newly completed jobs
+                self._record_job_stats_from_event(event)
+            # JOB_ERROR is handled by apply_event above (updates registry)
+
+        # AFTER events are processed, merge failed jobs from registry with log-parsed
+        # Registry is source of truth (events), log parsing may miss some failures
+        registry_failed = self._workflow_state.jobs.failed_job_infos()
+        registry_failed_ids = {job.job_id for job in registry_failed if job.job_id}
+        # Start with registry failed (authoritative), add any log-parsed that registry missed
+        new_failed_list = list(registry_failed)
+        for job in progress.failed_jobs_list:
+            if job.job_id and job.job_id not in registry_failed_ids:
+                new_failed_list.append(job)
+        new_failed = len(new_failed_list)
+
+        # Apply stored threads/wildcards to running jobs that may have lost them
+        # (log-parsed jobs may not have threads if the line order varies)
+        for i, job in enumerate(new_running_jobs):
+            if job.job_id and (job.threads is None or job.wildcards is None):
+                registry_job = self._workflow_state.jobs.get_by_job_id(job.job_id)
+                stored_threads = registry_job.threads if registry_job else None
+                if job.threads is None and stored_threads is not None:
+                    new_running_jobs[i] = JobInfo(
+                        rule=job.rule,
+                        job_id=job.job_id,
+                        start_time=job.start_time,
+                        end_time=job.end_time,
+                        output_file=job.output_file,
+                        wildcards=job.wildcards,
+                        input_size=job.input_size,
+                        threads=stored_threads,
+                        log_file=job.log_file,
+                    )
+
+        # Get pending jobs from the registry (jobs submitted but not yet started)
+        pending_jobs_list = self._workflow_state.jobs.submitted_job_infos()
+
+        # Fallback: if no pending jobs from events, compute from log-based scheduled jobs
+        if not pending_jobs_list:
+            pending_jobs_list = self._compute_pending_jobs_from_scheduled(
+                new_running_jobs, new_completions, new_failed_list
+            )
 
         # Return updated progress
         return WorkflowProgress(
@@ -631,6 +816,7 @@ class WorkflowMonitorTUI:
             failed_jobs_list=new_failed_list,
             running_jobs=new_running_jobs,
             recent_completions=new_completions,
+            pending_jobs_list=pending_jobs_list,
             start_time=progress.start_time,
             log_file=progress.log_file,
         )
@@ -638,58 +824,41 @@ class WorkflowMonitorTUI:
     def _update_rule_stats_from_completions(self, progress: WorkflowProgress) -> None:
         """Update rule_stats with newly completed jobs from recent_completions.
 
-        This ensures the Rule Statistics panel shows data from jobs that completed
-        during this monitoring session, not just historical data from startup.
+        This handles log-parsed completions that don't go through the event path.
+        Event-based completions are handled by _record_job_stats_from_event().
         """
         if self._estimator is None:
             return
 
         for job in progress.recent_completions:
-            # Create a unique key for deduplication
-            # Use job_id if available, otherwise use (rule, end_time) tuple
+            # Get or create job in registry for deduplication tracking
+            registry_job = None
             if job.job_id is not None:
-                dedup_key = f"id:{job.job_id}"
-            elif job.end_time is not None:
-                dedup_key = f"time:{job.rule}:{int(job.end_time)}"
-            else:
-                # Can't deduplicate without job_id or end_time, skip
-                continue
-
-            if dedup_key in self._rule_stats_job_ids:
-                continue
+                registry_job = self._workflow_state.jobs.get(job.job_id)
+                if registry_job is None:
+                    # Create job in registry from JobInfo
+                    registry_job = self._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+                if registry_job.stats_recorded:
+                    continue
 
             # Skip if we don't have a valid duration
             duration = job.duration
             if duration is None:
                 continue
 
-            # Add to rule_stats
-            if job.rule not in self._estimator.rule_stats:
-                self._estimator.rule_stats[job.rule] = RuleTimingStats(rule=job.rule)
+            # Record stats to RuleRegistry
+            self._workflow_state.rules.record_completion(
+                rule=job.rule,
+                duration=duration,
+                timestamp=job.end_time or 0.0,
+                threads=job.threads,
+                wildcards=dict(job.wildcards) if job.wildcards else None,
+                input_size=job.input_size,
+            )
 
-            stats = self._estimator.rule_stats[job.rule]
-            stats.durations.append(duration)
-            if job.end_time is not None:
-                stats.timestamps.append(job.end_time)
-            if job.input_size is not None:
-                stats.input_sizes.append(job.input_size)
-
-            # Also update thread stats if thread info is available
-            if job.threads is not None:
-                if job.rule not in self._thread_stats:
-                    self._thread_stats[job.rule] = ThreadTimingStats(rule=job.rule)
-                thread_stats = self._thread_stats[job.rule]
-                if job.threads not in thread_stats.stats_by_threads:
-                    thread_stats.stats_by_threads[job.threads] = RuleTimingStats(rule=job.rule)
-                ts = thread_stats.stats_by_threads[job.threads]
-                ts.durations.append(duration)
-                if job.end_time is not None:
-                    ts.timestamps.append(job.end_time)
-                if job.input_size is not None:
-                    ts.input_sizes.append(job.input_size)
-
-            # Mark this job as processed
-            self._rule_stats_job_ids.add(dedup_key)
+            # Mark as recorded for deduplication
+            if registry_job is not None:
+                registry_job.stats_recorded = True
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""
@@ -722,10 +891,20 @@ class WorkflowMonitorTUI:
         Returns:
             True if should quit, False otherwise.
         """
-        # Handle job selection mode (before filter mode)
+        # Handle help overlay first - any key closes it regardless of mode
+        if self._show_help:
+            self._show_help = False
+            self._force_refresh = True
+            return False
+
+        # Handle log viewing mode (nested inside job selection mode)
+        if self._log_viewing_mode:
+            return self._handle_log_viewing_key(key)
+
+        # Handle table navigation mode
         if self._job_selection_mode:
             # Use large number; actual bounds checked in _make_job_log_panel
-            return self._handle_job_selection_key(key, 1000)
+            return self._handle_table_navigation_key(key, 1000)
 
         # Handle filter input mode
         if self._filter_mode:
@@ -735,13 +914,6 @@ class WorkflowMonitorTUI:
         easter_result = self._handle_easter_egg_key(key)
         if easter_result is not None:
             return easter_result
-
-        # Handle help overlay
-        if self._show_help:
-            # Any key closes help
-            self._show_help = False
-            self._force_refresh = True
-            return False
 
         # Normal mode keybindings
         if key.lower() == "q":
@@ -792,50 +964,45 @@ class WorkflowMonitorTUI:
         return False
 
     def _handle_refresh_rate_key(self, key: str) -> bool:
-        """Handle refresh rate keys (h/j/k/l, 0, G). Returns True if key was handled."""
-        if key == "j":
+        """Handle refresh rate keys (+/-, </>, 0). Returns True if key was handled."""
+        if key == "-":  # Fine decrease (-0.5s)
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 0.5)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
-        if key == "k":
+        if key == "+" or key == "=":  # Fine increase (+0.5s), = for unshifted +
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 0.5)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
-        if key == "h":
+        if key == "<" or key == ",":  # Coarse decrease (-5s), , for unshifted <
             self.refresh_rate = max(MIN_REFRESH_RATE, self.refresh_rate - 5.0)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
-        if key == "l":
+        if key == ">" or key == ".":  # Coarse increase (+5s), . for unshifted >
             self.refresh_rate = min(MAX_REFRESH_RATE, self.refresh_rate + 5.0)
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
-        if key == "0":
+        if key == "0":  # Reset to default
             self.refresh_rate = DEFAULT_REFRESH_RATE
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
-        if key == "G":
+        if key == "G":  # Set to minimum (fastest)
             self.refresh_rate = MIN_REFRESH_RATE
+            self._update_cache_ttl()
             self._force_refresh = True
             return True
         return False
 
     def _handle_navigation_key(self, key: str) -> bool:
         """Handle navigation keys (Tab, /, n, N, Esc, Enter). Returns True if handled."""
-        if key == "\r" or key == "\n":  # Enter - toggle job selection mode
-            self._job_selection_mode = not self._job_selection_mode
-            if self._job_selection_mode:
-                # Entering selection mode - default to running jobs
-                self._log_source = "running"
-            else:
-                # Exiting selection mode - reset state
-                self._log_source = None
-                self._selected_job_index = 0
-                self._selected_completion_index = 0
-                self._running_scroll_offset = 0
-                self._completions_scroll_offset = 0
-                self._log_scroll_offset = 0
-                self._cached_log_path = None
-                self._cached_log_lines = []
+        if key == "\r" or key == "\n":  # Enter - enter table navigation mode
+            self._job_selection_mode = True
+            self._log_viewing_mode = False
+            self._log_source = "running"  # Default to running jobs table
             self._force_refresh = True
             return True
         if key == "\t":  # Tab - cycle layout
@@ -955,9 +1122,31 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
         return False
 
-    def _handle_job_selection_key(self, key: str, num_jobs: int) -> bool:
-        """Handle keypress in job selection mode. Returns True if should quit."""
-        if key == "\x1b":  # Escape - exit selection mode
+    def _handle_table_navigation_key(self, key: str, num_jobs: int) -> bool:  # noqa: C901
+        """Handle keypress in table navigation mode. Returns True if should quit.
+
+        Table mode: Navigate between jobs in running/completions tables.
+        Press Enter to view a job's log, Esc to exit to normal mode.
+        """
+        # Help key works in table mode
+        if key == "?":
+            self._show_help = True
+            self._force_refresh = True
+            return False
+
+        # Sort keys work in table mode
+        if self._handle_sort_key(key):
+            return False
+
+        # Enter - view log for selected job (enter log viewing mode)
+        if key == "\r" or key == "\n":
+            self._log_viewing_mode = True
+            self._log_scroll_offset = 0  # Start at end of log
+            self._force_refresh = True
+            return False
+
+        # Escape - exit table navigation mode
+        if key == "\x1b":
             self._job_selection_mode = False
             self._log_source = None
             self._selected_job_index = 0
@@ -970,56 +1159,180 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
             return False
 
-        # Tab - cycle between running and completions log sources
+        # Tab - cycle forward between running and completions tables
         if key == "\t":
             if self._log_source == "running":
                 self._log_source = "completions"
             else:
                 self._log_source = "running"
-            self._log_scroll_offset = 0  # Reset scroll on source change
             self._force_refresh = True
             return False
 
-        # Job navigation: Ctrl+p (up) or Ctrl+n (down)
-        # Use appropriate index based on log source
-        if key == "\x10":  # Ctrl+p - previous job
+        # Shift-Tab (backtab) - cycle backward between tables
+        if key == "\x1b[Z":
+            if self._log_source == "completions":
+                self._log_source = "running"
+            else:
+                self._log_source = "completions"
+            self._force_refresh = True
+            return False
+
+        # h/l for table switching (vim-style left/right)
+        if key == "h":  # h - switch to running (left table)
+            if self._log_source != "running":
+                self._log_source = "running"
+                self._force_refresh = True
+            return False
+
+        if key == "l":  # l - switch to completions (right table)
+            if self._log_source != "completions":
+                self._log_source = "completions"
+                self._force_refresh = True
+            return False
+
+        # Row navigation: k (up) or j (down) - vim-style
+        if key == "k":  # k - previous row (up)
             if self._log_source == "completions":
                 self._selected_completion_index = max(0, self._selected_completion_index - 1)
             else:
                 self._selected_job_index = max(0, self._selected_job_index - 1)
-            self._log_scroll_offset = 0  # Reset scroll on job change
             self._force_refresh = True
             return False
 
-        if key == "\x0e":  # Ctrl+n - next job
+        if key == "j":  # j - next row (down)
             if self._log_source == "completions":
                 self._selected_completion_index = min(
                     num_jobs - 1, self._selected_completion_index + 1
                 )
             else:
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
+            self._force_refresh = True
+            return False
+
+        # Half-page navigation: Ctrl+d (down) / Ctrl+u (up)
+        half_page = 5
+        if key == "\x04":  # Ctrl+d - half page down
+            if self._log_source == "completions":
+                self._selected_completion_index = min(
+                    num_jobs - 1, self._selected_completion_index + half_page
+                )
+            else:
+                self._selected_job_index = min(num_jobs - 1, self._selected_job_index + half_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x15":  # Ctrl+u - half page up
+            if self._log_source == "completions":
+                idx = max(0, self._selected_completion_index - half_page)
+                self._selected_completion_index = idx
+            else:
+                self._selected_job_index = max(0, self._selected_job_index - half_page)
+            self._force_refresh = True
+            return False
+
+        # Full-page navigation: Ctrl+f (forward/down) / Ctrl+b (back/up)
+        full_page = 10
+        if key == "\x06":  # Ctrl+f - full page down
+            if self._log_source == "completions":
+                self._selected_completion_index = min(
+                    num_jobs - 1, self._selected_completion_index + full_page
+                )
+            else:
+                self._selected_job_index = min(num_jobs - 1, self._selected_job_index + full_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x02":  # Ctrl+b - full page up
+            if self._log_source == "completions":
+                self._selected_completion_index = max(
+                    0, self._selected_completion_index - full_page
+                )
+            else:
+                self._selected_job_index = max(0, self._selected_job_index - full_page)
+            self._force_refresh = True
+            return False
+
+        # Jump to first/last row: g / G
+        if key == "g":  # g - first row
+            if self._log_source == "completions":
+                self._selected_completion_index = 0
+            else:
+                self._selected_job_index = 0
+            self._force_refresh = True
+            return False
+
+        if key == "G":  # G - last row
+            if self._log_source == "completions":
+                self._selected_completion_index = max(0, num_jobs - 1)
+            else:
+                self._selected_job_index = max(0, num_jobs - 1)
+            self._force_refresh = True
+            return False
+
+        return False
+
+    def _handle_log_viewing_key(self, key: str) -> bool:
+        """Handle keypress in log viewing mode. Returns True if should quit.
+
+        Log mode: Scroll through the selected job's log file.
+        Press Esc to return to table navigation mode.
+        """
+        # Help key works in log mode
+        if key == "?":
+            self._show_help = True
+            self._force_refresh = True
+            return False
+
+        # Escape - exit log viewing mode, return to table navigation
+        if key == "\x1b":
+            self._log_viewing_mode = False
             self._log_scroll_offset = 0
             self._force_refresh = True
             return False
 
-        # Log scrolling: Ctrl+u (up) or Ctrl+d (down)
-        if key == "\x15":  # Ctrl+u - scroll log up (show older)
-            self._log_scroll_offset += 10
+        # Line-by-line scrolling: j (down/newer) / k (up/older)
+        if key == "j":  # j - scroll down (show newer lines)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - 1)
             self._force_refresh = True
             return False
 
-        if key == "\x04":  # Ctrl+d - scroll log down (show newer)
-            self._log_scroll_offset = max(0, self._log_scroll_offset - 10)
+        if key == "k":  # k - scroll up (show older lines)
+            self._log_scroll_offset += 1
             self._force_refresh = True
             return False
 
-        # Jump to top/bottom of log
-        if key == "g":  # Jump to top of log
-            self._log_scroll_offset = max(0, len(self._cached_log_lines) - 10)
+        # Half-page scrolling: Ctrl+d (down) / Ctrl+u (up)
+        half_page = max(1, self._log_scroll_page_size // 2)
+        if key == "\x04":  # Ctrl+d - half page down (newer)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - half_page)
             self._force_refresh = True
             return False
 
-        if key == "G":  # Jump to bottom (latest)
+        if key == "\x15":  # Ctrl+u - half page up (older)
+            self._log_scroll_offset += half_page
+            self._force_refresh = True
+            return False
+
+        # Full-page scrolling: Ctrl+f (forward/down) / Ctrl+b (back/up)
+        full_page = self._log_scroll_page_size
+        if key == "\x06":  # Ctrl+f - full page down (newer)
+            self._log_scroll_offset = max(0, self._log_scroll_offset - full_page)
+            self._force_refresh = True
+            return False
+
+        if key == "\x02":  # Ctrl+b - full page up (older)
+            self._log_scroll_offset += full_page
+            self._force_refresh = True
+            return False
+
+        # Jump to start/end: g (start/oldest) / G (end/newest)
+        if key == "g":  # g - go to start of log (oldest, max offset)
+            # Set to a large number; will be clamped by display logic
+            self._log_scroll_offset = 999999
+            self._force_refresh = True
+            return False
+
+        if key == "G":  # G - go to end of log (newest, offset 0)
             self._log_scroll_offset = 0
             self._force_refresh = True
             return False
@@ -1081,7 +1394,7 @@ class WorkflowMonitorTUI:
                 )
             except ImportError:
                 pass  # Fall through to text fallback
-            except Exception:
+            except (OSError, ValueError, TypeError):
                 pass  # Fall through to text fallback
 
         # Fallback: simple text logo
@@ -1112,11 +1425,9 @@ class WorkflowMonitorTUI:
         help_text.add_row("r", "Force refresh")
         help_text.add_row("Ctrl+r", "Hard refresh (reload historical data)")
         help_text.add_row("", "")
-        help_text.add_row("", "[bold]Refresh Rate (vim-style)[/bold]")
-        help_text.add_row("h", "Decrease by 5s (faster)")
-        help_text.add_row("j", "Decrease by 0.5s (faster)")
-        help_text.add_row("k", "Increase by 0.5s (slower)")
-        help_text.add_row("l", "Increase by 5s (slower)")
+        help_text.add_row("", "[bold]Refresh Rate[/bold]")
+        help_text.add_row("- / +", "Decrease/increase by 0.5s")
+        help_text.add_row("< / >", "Decrease/increase by 5s")
         help_text.add_row("0", f"Reset to default ({DEFAULT_REFRESH_RATE}s)")
         help_text.add_row("G", f"Set to minimum ({MIN_REFRESH_RATE}s, fastest)")
         help_text.add_row("", "")
@@ -1134,11 +1445,21 @@ class WorkflowMonitorTUI:
         help_text.add_row("s / S", "Cycle sort table (forward/backward)")
         help_text.add_row("1-4", "Sort by column (press again to reverse)")
         help_text.add_row("", "")
-        help_text.add_row("", "[bold]Job Log Viewer[/bold]")
-        help_text.add_row("Enter", "Toggle job log view")
-        help_text.add_row("Ctrl+p / Ctrl+n", "Select prev/next job")
-        help_text.add_row("Ctrl+u / Ctrl+d", "Scroll log up/down")
-        help_text.add_row("g / G", "Jump to top/bottom of log")
+        help_text.add_row("", "[bold]Table Navigation (Enter to start)[/bold]")
+        help_text.add_row("j / k", "Move down/up one row")
+        help_text.add_row("g / G", "Jump to first/last row")
+        help_text.add_row("Ctrl+d/u", "Move down/up half page")
+        help_text.add_row("Ctrl+f/b", "Move down/up full page")
+        help_text.add_row("h / l", "Switch to running/completions table")
+        help_text.add_row("Enter", "View selected job's log")
+        help_text.add_row("Esc", "Exit table navigation")
+        help_text.add_row("", "")
+        help_text.add_row("", "[bold]Log Viewing (Enter on job)[/bold]")
+        help_text.add_row("j / k", "Scroll down/up one line")
+        help_text.add_row("g / G", "Jump to start/end of log")
+        help_text.add_row("Ctrl+d/u", "Scroll down/up half page")
+        help_text.add_row("Ctrl+f/b", "Scroll down/up full page")
+        help_text.add_row("Esc", "Return to table navigation")
 
         return Panel(
             help_text,
@@ -1315,9 +1636,37 @@ class WorkflowMonitorTUI:
             return ""
         return " ▲" if self._sort_ascending else " ▼"
 
+    def _get_job_id_column_width(self, jobs: list[JobInfo]) -> int:
+        """Calculate column width needed for job IDs.
+
+        Args:
+            jobs: List of jobs to check for max job ID.
+
+        Returns:
+            Minimum column width needed to display all job IDs (minimum 2).
+        """
+        if not jobs:
+            return 2
+        max_id = 0
+        for job in jobs:
+            if job.job_id:
+                try:
+                    job_id_int = int(job.job_id)
+                    max_id = max(max_id, job_id_int)
+                except ValueError:
+                    # Non-integer job ID, use string length
+                    max_id = max(max_id, 10 ** (len(job.job_id) - 1))
+        # Use row index as fallback if no job IDs
+        if max_id == 0:
+            max_id = len(jobs)
+        return max(2, len(str(max_id)))
+
     def _get_tool_progress(self, job: JobInfo) -> ToolProgress | None:
         """
         Get tool-specific progress for a running job.
+
+        Results are cached for the TTL duration to avoid parsing job logs
+        on every refresh cycle.
 
         Args:
             job: The running job to check.
@@ -1328,12 +1677,66 @@ class WorkflowMonitorTUI:
         # Use job.log_file (parsed from snakemake log, keyed by job_id)
         if job.log_file is None:
             return None
+
+        # Use job_id as cache key (unique per job run)
+        cache_key = job.job_id if job.job_id else str(job.log_file)
+        now = time.time()
+
         log_path = self.workflow_dir / job.log_file
         if not log_path.exists():
+            self._tool_progress_cache[cache_key] = (now, 0.0, None)
             return None
 
-        # Try to parse progress from the log
-        return parse_tool_progress(job.rule, log_path)
+        # Get current file mtime for cache invalidation
+        try:
+            current_mtime = log_path.stat().st_mtime
+        except OSError:
+            return None
+
+        # Check cache validity - must be within TTL AND file unchanged
+        if cache_key in self._tool_progress_cache:
+            cached_time, cached_mtime, cached_progress = self._tool_progress_cache[cache_key]
+            if now - cached_time < self._tool_progress_cache_ttl and cached_mtime >= current_mtime:
+                return cached_progress
+
+        # Parse and cache the result with current mtime
+        # Wrap in try/except to protect TUI from plugin errors
+        try:
+            progress = parse_tool_progress(job.rule, log_path)
+        except Exception:
+            # Plugin errors shouldn't crash the TUI - log for debugging
+            logger.debug(
+                "Failed to parse tool progress for %s: %s", job.rule, log_path, exc_info=True
+            )
+            progress = None
+        self._tool_progress_cache[cache_key] = (now, current_mtime, progress)
+        return progress
+
+    def _cleanup_tool_progress_cache(self) -> None:
+        """Remove expired entries from tool progress cache.
+
+        Should be called periodically to prevent unbounded memory growth
+        in long-running workflows.
+        """
+        now = time.time()
+        # Remove entries that have been stale for 10x the TTL
+        max_age = self._tool_progress_cache_ttl * 10
+        expired = [
+            key
+            for key, (cached_time, _, _) in self._tool_progress_cache.items()
+            if now - cached_time > max_age
+        ]
+        for key in expired:
+            del self._tool_progress_cache[key]
+
+    def _update_cache_ttl(self) -> None:
+        """Update tool progress cache TTL based on current refresh rate.
+
+        Called when refresh_rate changes to keep cache behavior in sync.
+        """
+        self._tool_progress_cache_ttl = min(
+            ADAPTIVE_CACHE_TTL_MULTIPLIER * self.refresh_rate, MAX_CACHE_TTL
+        )
 
     def _build_running_job_data(
         self, jobs: list[JobInfo]
@@ -1347,13 +1750,29 @@ class WorkflowMonitorTUI:
             remaining: float | None = None
             tool_progress: ToolProgress | None = None
 
-            if self._estimator is not None and elapsed is not None:
-                # Use thread-aware ETA when thread info is available
-                expected, _ = self._estimator.get_estimate_for_job(
+            if self._estimator is not None:
+                # Use wildcard+thread-aware ETA when available
+                expected, variance = self._estimator.get_estimate_for_job(
                     rule=job.rule,
+                    wildcards=job.wildcards,
                     threads=job.threads,
                 )
-                remaining = max(0, expected - elapsed)
+                if elapsed is None:
+                    # No start time yet - use expected duration as remaining estimate
+                    remaining = expected
+                elif elapsed <= expected:
+                    remaining = expected - elapsed
+                else:
+                    # Job running longer than expected - use variance to estimate
+                    std_dev = math.sqrt(variance) if variance > 0 else expected * 0.5
+                    if elapsed <= expected + 2 * std_dev:
+                        # Within reasonable variance - assume nearly done
+                        remaining = 0.0
+                    else:
+                        # Far outside expected range - estimate based on elapsed time
+                        # Assume job is ~60% done (heuristic for long-running jobs)
+                        # This gives a rough estimate rather than "unknown"
+                        remaining = elapsed * 0.67  # ~40% more time expected
 
             # Try to get tool-specific progress
             tool_progress = self._get_tool_progress(job)
@@ -1394,16 +1813,17 @@ class WorkflowMonitorTUI:
         is_sorting = self._sort_table == "running"
         header_style = "bold magenta on dark_blue" if is_sorting else "bold magenta"
 
+        jobs = self._filter_jobs(progress.running_jobs)
+        id_col_width = self._get_job_id_column_width(jobs)
+
         table = Table(expand=True, show_header=True, header_style=header_style)
-        table.add_column("#", justify="right", style="dim", width=5)
+        table.add_column("#", justify="right", style="dim", width=id_col_width)
         table.add_column(f"Rule{self._sort_indicator('running', 0)}", style="cyan", no_wrap=True)
         table.add_column("Thr", justify="right", style="dim")
         table.add_column(f"Started{self._sort_indicator('running', 1)}", justify="right")
         table.add_column(f"Elapsed{self._sort_indicator('running', 2)}", justify="right")
         table.add_column("Progress", justify="right")
         table.add_column(f"Est. Remaining{self._sort_indicator('running', 3)}", justify="right")
-
-        jobs = self._filter_jobs(progress.running_jobs)
         job_data = self._build_running_job_data(jobs)
 
         if is_sorting:
@@ -1500,14 +1920,6 @@ class WorkflowMonitorTUI:
         is_sorting = self._sort_table == "completions"
         header_style = "bold green on dark_blue" if is_sorting else "bold green"
 
-        table = Table(expand=True, show_header=True, header_style=header_style)
-        ind = self._sort_indicator
-        table.add_column("#", justify="right", style="dim", width=5)
-        table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
-        table.add_column(f"Thr{ind('completions', 1)}", justify="right")
-        table.add_column(f"Duration{ind('completions', 2)}", justify="right")
-        table.add_column(f"Completed{ind('completions', 3)}", justify="right")
-
         # Merge successful completions and failed jobs for a unified view
         failed_job_ids = {id(job) for job in progress.failed_jobs_list}
         all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
@@ -1516,6 +1928,15 @@ class WorkflowMonitorTUI:
         all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
 
         jobs = self._filter_jobs(all_jobs)
+        id_col_width = self._get_job_id_column_width(jobs)
+
+        table = Table(expand=True, show_header=True, header_style=header_style)
+        ind = self._sort_indicator
+        table.add_column("#", justify="right", style="dim", width=id_col_width)
+        table.add_column(f"Rule{ind('completions', 0)}", no_wrap=True)
+        table.add_column(f"Thr{ind('completions', 1)}", justify="right")
+        table.add_column(f"Duration{ind('completions', 2)}", justify="right")
+        table.add_column(f"Completed{ind('completions', 3)}", justify="right")
 
         # Sort if this table is active
         if is_sorting and jobs:
@@ -1637,7 +2058,11 @@ class WorkflowMonitorTUI:
 
     def _get_inferred_pending_rules(self, progress: WorkflowProgress) -> dict[str, int] | None:
         """Get inferred pending rules from completions and historical data."""
-        if not self._estimator or not progress.recent_completions:
+        if not self._estimator:
+            return None
+
+        # If we have expected job counts, we can infer pending even without completions
+        if not progress.recent_completions and not self._estimator.expected_job_counts:
             return None
 
         # Count completed jobs by rule
@@ -1645,19 +2070,26 @@ class WorkflowMonitorTUI:
         for job in progress.recent_completions:
             completed_by_rule[job.rule] = completed_by_rule.get(job.rule, 0) + 1
 
-        # Also include rule stats from historical data
-        if self._estimator.rule_stats:
+        # Count running jobs by rule
+        running_by_rule: dict[str, int] = {}
+        for job in progress.running_jobs:
+            running_by_rule[job.rule] = running_by_rule.get(job.rule, 0) + 1
+
+        # Only augment with historical counts if we don't have expected_job_counts
+        if not self._estimator.expected_job_counts and self._estimator.rule_stats:
             for rule, stats in self._estimator.rule_stats.items():
                 if rule not in completed_by_rule:
                     completed_by_rule[rule] = stats.count
 
         return self._estimator._infer_pending_rules(
-            completed_by_rule, progress.pending_jobs, self._estimator.current_rules
+            completed_by_rule, progress.pending_jobs, self._estimator.current_rules, running_by_rule
         )
 
     def _read_log_tail(self, log_path: Path, max_lines: int = 500) -> list[str]:
         """
         Read the last N lines of a log file efficiently.
+
+        For large files, seeks near the end instead of reading the entire file.
 
         Args:
             log_path: Path to the log file.
@@ -1666,9 +2098,14 @@ class WorkflowMonitorTUI:
         Returns:
             List of lines (most recent at end).
         """
+        # Average bytes per line estimate for seeking
+        BYTES_PER_LINE_ESTIMATE = 120
+
         try:
             # Check if cache is still valid
-            mtime = log_path.stat().st_mtime
+            stat = log_path.stat()
+            mtime = stat.st_mtime
+            file_size = stat.st_size
             if (
                 self._cached_log_path == log_path
                 and self._cached_log_mtime == mtime
@@ -1676,9 +2113,23 @@ class WorkflowMonitorTUI:
             ):
                 return self._cached_log_lines
 
-            # Read file and take last N lines
-            content = log_path.read_text(errors="ignore")
-            lines = content.splitlines()
+            # For small files, just read the whole thing
+            if file_size < BYTES_PER_LINE_ESTIMATE * max_lines * 2:
+                content = log_path.read_text(errors="ignore")
+                lines = content.splitlines()
+            else:
+                # For large files, seek near the end to avoid reading everything
+                # Read extra bytes to ensure we get enough lines
+                seek_bytes = BYTES_PER_LINE_ESTIMATE * max_lines * 2
+                with open(log_path, "rb") as f:
+                    # Seek to near the end
+                    f.seek(max(0, file_size - seek_bytes))
+                    # Read to end
+                    content = f.read().decode("utf-8", errors="ignore")
+                    lines = content.splitlines()
+                    # Skip first line (likely partial from seek)
+                    if lines and file_size > seek_bytes:
+                        lines = lines[1:]
 
             # Take last max_lines
             result = lines[-max_lines:] if len(lines) > max_lines else lines
@@ -1758,19 +2209,25 @@ class WorkflowMonitorTUI:
 
         if self._log_source == "running":
             if running_jobs:
-                self._selected_job_index = min(
-                    self._selected_job_index,
-                    len(running_jobs) - 1,
+                # Clamp index to valid bounds (consistent with _make_running_table)
+                self._selected_job_index = max(
+                    0, min(self._selected_job_index, len(running_jobs) - 1)
                 )
                 selected_job = running_jobs[self._selected_job_index]
         elif self._log_source == "completions":
             if completions:
-                self._selected_completion_index = min(
-                    self._selected_completion_index,
-                    len(completions) - 1,
+                # Clamp index to valid bounds (consistent with _make_completions_table)
+                self._selected_completion_index = max(
+                    0, min(self._selected_completion_index, len(completions) - 1)
                 )
                 selected_job = completions[self._selected_completion_index]
                 job_status = "failed" if id(selected_job) in failed_ids else "completed"
+
+        # Determine subtitle based on mode
+        if self._log_viewing_mode:
+            mode_subtitle = "[dim]LOG: j/k scroll | g/G start/end | Ctrl-d/u page | Esc back[/dim]"
+        else:
+            mode_subtitle = "[dim]TABLE: j/k nav | h/l switch | Enter view log | Esc exit[/dim]"
 
         # Handle no jobs available
         if selected_job is None:
@@ -1778,7 +2235,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 f"[dim]No {source_name}[/dim]",
                 title="Job Log",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -1788,7 +2245,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 f"[dim]No log file for {selected_job.rule} (job {selected_job.job_id})[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
         log_path = self.workflow_dir / selected_job.log_file
@@ -1798,7 +2255,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 f"[dim]No log file found for {selected_job.rule}[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -1810,7 +2267,7 @@ class WorkflowMonitorTUI:
             return Panel(
                 "[dim]Log file is empty[/dim]",
                 title=f"Job Log: {selected_job.rule}{status_suffix}",
-                subtitle="[dim]Tab switch source | Esc exit[/dim]",
+                subtitle=mode_subtitle,
                 border_style=FG_BLUE,
             )
 
@@ -1849,13 +2306,12 @@ class WorkflowMonitorTUI:
 
         status_suffix = f" [{job_status}]" if job_status else ""
         title = f"Job Log: {selected_job.rule}{status_suffix}{scroll_indicator}"
-        subtitle = "[dim]Ctrl+u/d scroll | g/G top/bottom | Tab switch | Esc exit[/dim]"
 
         return Panel(
             content,
             title=title,
-            subtitle=subtitle,
-            border_style="cyan",
+            subtitle=mode_subtitle,
+            border_style="cyan" if self._log_viewing_mode else FG_BLUE,
         )
 
     def _make_pending_jobs_panel(self, progress: WorkflowProgress) -> Panel:
@@ -2070,18 +2526,19 @@ class WorkflowMonitorTUI:
         # Limit total rows to 8 (not rules) to handle thread expansion
         max_rows = 8
         rows: list[tuple[str, str, RuleTimingStats]] = []
+        thread_stats_dict = self._workflow_state.rules.to_thread_stats_dict()
         for stats in stats_list:
             if len(rows) >= max_rows:
                 break
             rule = stats.rule
-            if rule in self._thread_stats and self._thread_stats[rule].stats_by_threads:
+            if rule in thread_stats_dict and thread_stats_dict[rule].stats_by_threads:
                 # Has thread-specific data - show each thread count
-                thread_stats = self._thread_stats[rule]
-                sorted_threads = sorted(thread_stats.stats_by_threads.keys())
+                rule_thread_stats = thread_stats_dict[rule]
+                sorted_threads = sorted(rule_thread_stats.stats_by_threads.keys())
                 for i, threads in enumerate(sorted_threads):
                     if len(rows) >= max_rows:
                         break
-                    ts = thread_stats.stats_by_threads[threads]
+                    ts = rule_thread_stats.stats_by_threads[threads]
                     # First row shows rule name, subsequent rows show blank
                     rule_display = rule if i == 0 else ""
                     rows.append((rule_display, str(threads), ts))
@@ -2325,6 +2782,35 @@ class WorkflowMonitorTUI:
         if events:
             progress = self._apply_events_to_progress(progress, events)
             self._force_refresh = True
+        else:
+            # Even without new events, merge registry-tracked failed jobs into progress
+            # This ensures failed jobs discovered via earlier events are not lost
+            # when log re-parsing misses them
+            registry_failed = self._workflow_state.jobs.failed_job_infos()
+            if registry_failed:
+                from dataclasses import replace
+
+                registry_failed_ids = {job.job_id for job in registry_failed if job.job_id}
+                merged_failed = list(registry_failed)
+                for job in progress.failed_jobs_list:
+                    if job.job_id and job.job_id not in registry_failed_ids:
+                        merged_failed.append(job)
+                progress = replace(
+                    progress,
+                    failed_jobs=len(merged_failed),
+                    failed_jobs_list=merged_failed,
+                )
+
+        # Always populate pending_jobs_list from log-based scheduled jobs
+        # (even when no new events, we need this for wildcard-conditioned ETA)
+        if not progress.pending_jobs_list:
+            from dataclasses import replace
+
+            pending_jobs_list = self._compute_pending_jobs_from_scheduled(
+                progress.running_jobs, progress.recent_completions, progress.failed_jobs_list
+            )
+            if pending_jobs_list:
+                progress = replace(progress, pending_jobs_list=pending_jobs_list)
 
         # Update rule_stats with newly completed jobs (for Rule Statistics panel)
         self._update_rule_stats_from_completions(progress)
@@ -2332,6 +2818,9 @@ class WorkflowMonitorTUI:
         estimate = None
         if self._estimator is not None:
             estimate = self._estimator.estimate_remaining(progress)
+
+        # Periodically clean up stale cache entries
+        self._cleanup_tool_progress_cache()
 
         return progress, estimate
 
@@ -2366,10 +2855,13 @@ class WorkflowMonitorTUI:
             progress, estimate = self._poll_state()
 
         # Save terminal settings and switch to raw mode for single-key input
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
+        # Initialize before try block so finally can safely check
+        fd: int | None = None
+        old_settings: list[Any] | None = None
 
         try:
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
             # Set terminal to raw mode (cbreak would also work)
             tty.setcbreak(fd)
 
@@ -2379,7 +2871,7 @@ class WorkflowMonitorTUI:
                 refresh_per_second=1,
                 screen=True,
             ) as live:
-                last_update = time.time()
+                last_update = get_clock().now()
 
                 while self._running:
                     # Check for keyboard input (non-blocking)
@@ -2401,13 +2893,16 @@ class WorkflowMonitorTUI:
 
                         # Parse the input - handle escape sequences
                         key = chars[0]
-                        if key == "\x1b" and len(chars) >= 3:
+                        if chars.startswith("\x1b[Z"):
+                            # Shift-Tab (backtab) - pass through as full sequence
+                            key = "\x1b[Z"
+                        elif key == "\x1b" and len(chars) >= 3:
                             seq = chars[1:3]
-                            # Map known sequences to control characters
+                            # Map known sequences to vim-style keys
                             if seq in ("[A", "OA"):  # Up arrow
-                                key = "\x10"  # Map to Ctrl+p
+                                key = "k"  # Map to k (vim up)
                             elif seq in ("[B", "OB"):  # Down arrow
-                                key = "\x0e"  # Map to Ctrl+n
+                                key = "j"  # Map to j (vim down)
                             elif seq.startswith("[") or seq.startswith("O"):
                                 # Unknown escape sequence - discard
                                 continue
@@ -2417,7 +2912,7 @@ class WorkflowMonitorTUI:
                             break
 
                     # Refresh at the specified rate or if forced (unless paused)
-                    now = time.time()
+                    now = get_clock().now()
                     should_refresh = self._force_refresh or (
                         not self._paused and now - last_update >= self.refresh_rate
                     )
@@ -2441,8 +2936,9 @@ class WorkflowMonitorTUI:
         except KeyboardInterrupt:
             pass  # Clean exit on Ctrl+C
         finally:
-            # Restore terminal settings
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            # Restore terminal settings if they were saved
+            if old_settings is not None and fd is not None:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     def _run_simple(self) -> None:
         """

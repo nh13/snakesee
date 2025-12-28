@@ -63,7 +63,7 @@ class TestWorkflowMonitorTUI:
         self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
     ) -> WorkflowMonitorTUI:
         """Create a TUI instance for testing."""
-        with patch("snakesee.tui.Console", return_value=mock_console):
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
             return WorkflowMonitorTUI(
                 workflow_dir=tmp_path,
                 refresh_rate=2.0,
@@ -108,9 +108,9 @@ class TestWorkflowMonitorTUI:
 
     def test_handle_key_toggle_wildcard_conditioning(self, tui: WorkflowMonitorTUI) -> None:
         """Test wildcard conditioning toggle key handler."""
-        assert tui._use_wildcard_conditioning is False
+        assert tui._use_wildcard_conditioning is True  # Now enabled by default
         tui._handle_key("w")
-        assert tui._use_wildcard_conditioning is True
+        assert tui._use_wildcard_conditioning is False
 
     def test_handle_key_toggle_help(self, tui: WorkflowMonitorTUI) -> None:
         """Test help toggle key handler."""
@@ -119,15 +119,15 @@ class TestWorkflowMonitorTUI:
         assert tui._show_help is True
 
     def test_handle_key_refresh_rate_decrease(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate decrease keys."""
+        """Test refresh rate decrease keys (- for fine, < for coarse)."""
         initial = tui.refresh_rate
-        tui._handle_key("j")
+        tui._handle_key("-")
         assert tui.refresh_rate == max(MIN_REFRESH_RATE, initial - 0.5)
 
     def test_handle_key_refresh_rate_increase(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate increase keys."""
+        """Test refresh rate increase keys (+ for fine, > for coarse)."""
         initial = tui.refresh_rate
-        tui._handle_key("k")
+        tui._handle_key("+")
         assert tui.refresh_rate == min(MAX_REFRESH_RATE, initial + 0.5)
 
     def test_handle_key_refresh_rate_reset(self, tui: WorkflowMonitorTUI) -> None:
@@ -136,10 +136,13 @@ class TestWorkflowMonitorTUI:
         tui._handle_key("0")
         assert tui.refresh_rate == DEFAULT_REFRESH_RATE
 
-    def test_handle_key_refresh_rate_minimum(self, tui: WorkflowMonitorTUI) -> None:
-        """Test refresh rate minimum key."""
-        tui._handle_key("G")
-        assert tui.refresh_rate == MIN_REFRESH_RATE
+    def test_handle_key_refresh_rate_coarse(self, tui: WorkflowMonitorTUI) -> None:
+        """Test coarse refresh rate adjustment with < and >."""
+        tui.refresh_rate = 10.0
+        tui._handle_key("<")
+        assert tui.refresh_rate == 5.0  # -5s
+        tui._handle_key(">")
+        assert tui.refresh_rate == 10.0  # +5s
 
     def test_handle_key_layout_cycle(self, tui: WorkflowMonitorTUI) -> None:
         """Test layout cycle key."""
@@ -396,15 +399,19 @@ class TestEventHandling:
         assert len(result.failed_jobs_list) == 1
 
     def test_handle_job_submitted_tracks_threads(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
-        """Test that submitted events track thread info in _job_threads."""
+        """Test that submitted events track thread info in JobRegistry."""
         event = make_snakesee_event(
             EventType.JOB_SUBMITTED, rule_name="align", job_id=123, threads=8
         )
+        # In production, apply_event is called first to create the job
+        tui_with_mocks._workflow_state.jobs.apply_event(event)
         # Pass empty running_jobs list as required by the method
         running_jobs: list[JobInfo] = []
         tui_with_mocks._handle_job_submitted_event(event, running_jobs)
-        assert "123" in tui_with_mocks._job_threads
-        assert tui_with_mocks._job_threads["123"] == 8
+        # Threads should be stored in JobRegistry
+        job = tui_with_mocks._workflow_state.jobs.get_by_job_id("123")
+        assert job is not None
+        assert job.threads == 8
 
 
 class TestPanelCreation:
@@ -658,7 +665,6 @@ class TestRuleStatsUpdate:
     ) -> None:
         """Test stats update with job_id deduplication."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         progress = make_workflow_progress(
             recent_completions=[
@@ -667,16 +673,16 @@ class TestRuleStatsUpdate:
         )
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should have added stats for align rule
-        assert "align" in tui_with_mocks._estimator.rule_stats
-        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+        # Should have added stats to RuleRegistry
+        rule_stats = tui_with_mocks._workflow_state.rules.get("align")
+        assert rule_stats is not None
+        assert rule_stats.aggregate.count == 1
 
     def test_update_stats_deduplication(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that duplicate jobs are not counted twice."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
         progress = make_workflow_progress(recent_completions=[job])
@@ -685,15 +691,16 @@ class TestRuleStatsUpdate:
         tui_with_mocks._update_rule_stats_from_completions(progress)
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should only count once
-        assert tui_with_mocks._estimator.rule_stats["align"].count == 1
+        # Should only count once (deduplication via _rule_stats_job_ids)
+        rule_stats = tui_with_mocks._workflow_state.rules.get("align")
+        assert rule_stats is not None
+        assert rule_stats.aggregate.count == 1
 
     def test_update_stats_with_threads(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that thread stats are updated when job has threads."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         progress = make_workflow_progress(
             recent_completions=[
@@ -704,16 +711,16 @@ class TestRuleStatsUpdate:
         )
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should have thread stats
-        assert "align" in tui_with_mocks._thread_stats
-        assert 4 in tui_with_mocks._thread_stats["align"].stats_by_threads
+        # Should have thread stats in RuleRegistry
+        thread_stats_dict = tui_with_mocks._workflow_state.rules.to_thread_stats_dict()
+        assert "align" in thread_stats_dict
+        assert 4 in thread_stats_dict["align"].stats_by_threads
 
     def test_update_stats_skips_no_duration(
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test that jobs without duration are skipped."""
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {}
 
         # Job with no end_time means no duration
         progress = make_workflow_progress(
@@ -724,7 +731,7 @@ class TestRuleStatsUpdate:
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
         # Should not have added stats
-        assert "align" not in tui_with_mocks._estimator.rule_stats
+        assert tui_with_mocks._workflow_state.rules.get("align") is None
 
 
 class TestStatsPanel:
@@ -763,18 +770,15 @@ class TestStatsPanel:
         self, tui_with_mocks: WorkflowMonitorTUI, mock_estimator: MagicMock
     ) -> None:
         """Test stats panel displays thread-specific statistics."""
-        from snakesee.models import RuleTimingStats
-        from snakesee.models import ThreadTimingStats
-
         tui_with_mocks._estimator = mock_estimator
-        tui_with_mocks._estimator.rule_stats = {
-            "align": RuleTimingStats(rule="align", durations=[100.0]),
-        }
-        # Add thread stats
-        thread_stats = ThreadTimingStats(rule="align")
-        thread_stats.stats_by_threads[4] = RuleTimingStats(rule="align", durations=[100.0])
-        thread_stats.stats_by_threads[8] = RuleTimingStats(rule="align", durations=[60.0])
-        tui_with_mocks._thread_stats["align"] = thread_stats
+
+        # Populate RuleRegistry with thread-specific data
+        tui_with_mocks._workflow_state.rules.record_completion(
+            rule="align", duration=100.0, timestamp=1000.0, threads=4
+        )
+        tui_with_mocks._workflow_state.rules.record_completion(
+            rule="align", duration=60.0, timestamp=2000.0, threads=8
+        )
 
         panel = tui_with_mocks._make_stats_panel()
         assert panel is not None
@@ -859,3 +863,846 @@ class TestInitMethods:
         tui_with_mocks._init_validation()
         # Should not create validator without event file
         assert tui_with_mocks._event_accumulator is None
+
+
+class TestTerminalHandling:
+    """Tests for TUI terminal handling and run loop."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_run_non_terminal_prints_warning(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that run() prints warning when not in terminal."""
+        mock_console.is_terminal = False
+
+        tui.run()
+
+        # Should have printed warning
+        mock_console.print.assert_called()
+        call_args = str(mock_console.print.call_args)
+        assert "Warning" in call_args
+        assert "interactive terminal" in call_args
+
+    def test_run_non_terminal_returns_early(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that run() returns early when not in terminal."""
+        mock_console.is_terminal = False
+
+        # Should not raise any errors and return quickly
+        tui.run()
+
+        # Live should not have been created (no screen=True call)
+        # Just verify it completed without errors
+
+    def test_run_simple_is_fallback(self, tui: WorkflowMonitorTUI, mock_console: MagicMock) -> None:
+        """Test that _run_simple exists as a fallback mode."""
+        # Verify _run_simple can be called directly (fallback path)
+        tui._running = False  # Exit immediately
+        tui._run_simple()
+        # Should have printed the simple mode message
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("simple mode" in c.lower() for c in calls)
+
+    def test_run_simple_prints_mode_message(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple prints the simple mode message."""
+        # Make workflow appear complete immediately to exit loop
+        tui._running = False
+
+        tui._run_simple()
+
+        # Check that simple mode message was printed
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("simple mode" in c.lower() for c in calls)
+
+    def test_run_simple_keyboard_interrupt(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple handles KeyboardInterrupt gracefully."""
+        with patch.object(tui, "_poll_state", side_effect=KeyboardInterrupt):
+            # Should not raise
+            tui._run_simple()
+
+    def test_run_simple_exits_on_completed(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple exits when workflow completes."""
+        progress = make_workflow_progress(status=WorkflowStatus.COMPLETED)
+
+        call_count = 0
+
+        def mock_poll() -> tuple[WorkflowProgress, TimeEstimate | None]:
+            nonlocal call_count
+            call_count += 1
+            return progress, None
+
+        with patch.object(tui, "_poll_state", side_effect=mock_poll):
+            with patch("time.sleep"):  # Don't actually sleep
+                tui._run_simple()
+
+        # Should have polled once and exited
+        assert call_count == 1
+
+    def test_run_simple_exits_on_failed(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that _run_simple exits when workflow fails."""
+        progress = make_workflow_progress(status=WorkflowStatus.FAILED)
+
+        with patch.object(tui, "_poll_state", return_value=(progress, None)):
+            with patch("time.sleep"):
+                tui._run_simple()
+
+        # Verify it printed the finished message
+        calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("finished" in c.lower() for c in calls)
+
+
+class TestKeyboardInput:
+    """Tests for keyboard input handling in the TUI."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_handle_key_quit_lowercase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'q' quits."""
+        assert tui._handle_key("q") is True
+
+    def test_handle_key_quit_uppercase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'Q' quits."""
+        assert tui._handle_key("Q") is True
+
+    def test_handle_key_pause_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test pause toggle with 'p'."""
+        assert tui._paused is False
+        result = tui._handle_key("p")
+        assert result is False
+        assert tui._paused is True
+
+    def test_handle_key_pause_toggle_back(self, tui: WorkflowMonitorTUI) -> None:
+        """Test pause toggle back with 'p'."""
+        tui._paused = True
+        tui._handle_key("p")
+        assert tui._paused is False
+
+    def test_handle_key_estimation_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test estimation toggle with 'e'."""
+        original = tui.use_estimation
+        tui._handle_key("e")
+        assert tui.use_estimation is not original
+
+    def test_handle_key_refresh_rate_increase(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate increase with '+' (slower refresh)."""
+        original_rate = tui.refresh_rate
+        tui._handle_key("+")
+        assert tui.refresh_rate > original_rate
+
+    def test_handle_key_refresh_rate_decrease(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate decrease with '-' (faster refresh)."""
+        tui.refresh_rate = 5.0  # Set to middle value
+        original_rate = tui.refresh_rate
+        tui._handle_key("-")
+        assert tui.refresh_rate < original_rate
+
+    def test_handle_key_help_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test help overlay toggle with '?'."""
+        assert tui._show_help is False
+        tui._handle_key("?")
+        assert tui._show_help is True
+
+    def test_handle_key_help_close(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that any key closes help overlay."""
+        tui._show_help = True
+        tui._handle_key("x")
+        assert tui._show_help is False
+
+    def test_handle_key_force_refresh(self, tui: WorkflowMonitorTUI) -> None:
+        """Test force refresh with 'r'."""
+        tui._force_refresh = False
+        tui._handle_key("r")
+        assert tui._force_refresh is True
+
+    def test_handle_key_ctrl_r_hard_refresh(self, tui: WorkflowMonitorTUI) -> None:
+        """Test hard refresh with Ctrl+r."""
+        tui._force_refresh = False
+        tui._handle_key("\x12")  # Ctrl+r
+        assert tui._force_refresh is True
+
+    def test_handle_key_wildcard_conditioning_toggle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test wildcard conditioning toggle with 'w'."""
+        original = tui._use_wildcard_conditioning
+        tui._handle_key("w")
+        assert tui._use_wildcard_conditioning is not original
+
+    def test_handle_key_unknown_returns_false(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that unknown keys return False."""
+        assert tui._handle_key("z") is False
+        assert tui._handle_key("@") is False
+
+    def test_handle_key_navigation_up(self, tui: WorkflowMonitorTUI) -> None:
+        """Test navigation up with k (vim-style)."""
+        # k is mapped from up arrow - just verify no error
+        result = tui._handle_key("k")
+        assert result is False  # Navigation doesn't quit
+
+    def test_handle_key_navigation_down(self, tui: WorkflowMonitorTUI) -> None:
+        """Test navigation down with j (vim-style)."""
+        # j is mapped from down arrow
+        tui._handle_key("j")
+        # Just verify no error
+
+    def test_handle_key_layout_cycle(self, tui: WorkflowMonitorTUI) -> None:
+        """Test layout mode cycling with Tab."""
+        original_mode = tui._layout_mode
+        tui._handle_key("\t")  # Tab cycles layout
+        # Should cycle to next mode
+        assert tui._layout_mode != original_mode
+
+
+class TestTerminalSettingsRestore:
+    """Tests for terminal settings save/restore behavior."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console for terminal tests."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=0.1,  # Fast for testing
+            )
+
+    def test_terminal_settings_restored_on_normal_exit(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test that terminal settings are restored on normal exit."""
+        mock_termios = MagicMock()
+        mock_tty = MagicMock()
+        mock_old_settings = ["mock", "settings"]
+        mock_termios.tcgetattr.return_value = mock_old_settings
+
+        # Make stdin look like a valid file descriptor
+        mock_stdin = MagicMock()
+        mock_stdin.fileno.return_value = 0
+
+        def quit_immediately(*args: object) -> tuple[list[MagicMock], list[object], list[object]]:
+            # First call returns stdin ready, second returns empty
+            return ([mock_stdin], [], [])
+
+        call_count = 0
+
+        def mock_select(*args: object) -> tuple[list[object], list[object], list[object]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return ([mock_stdin], [], [])
+            return ([], [], [])
+
+        with patch.dict(
+            "sys.modules",
+            {"termios": mock_termios, "tty": mock_tty},
+        ):
+            with patch("sys.stdin", mock_stdin):
+                with patch("select.select", side_effect=mock_select):
+                    with patch("os.read", return_value=b"q"):  # Quit key
+                        with patch("fcntl.fcntl"):
+                            with patch("snakesee.tui.monitor.Live"):
+                                tui.run()
+
+        # Verify tcsetattr was called to restore settings
+        mock_termios.tcsetattr.assert_called()
+
+    def test_terminal_settings_restored_on_keyboard_interrupt(
+        self, tui: WorkflowMonitorTUI, mock_console: MagicMock
+    ) -> None:
+        """Test terminal settings are restored after KeyboardInterrupt."""
+        mock_termios = MagicMock()
+        mock_tty = MagicMock()
+        mock_old_settings = ["mock", "settings"]
+        mock_termios.tcgetattr.return_value = mock_old_settings
+
+        mock_stdin = MagicMock()
+        mock_stdin.fileno.return_value = 0
+
+        with patch.dict(
+            "sys.modules",
+            {"termios": mock_termios, "tty": mock_tty},
+        ):
+            with patch("sys.stdin", mock_stdin):
+                with patch("select.select", side_effect=KeyboardInterrupt):
+                    with patch("snakesee.tui.monitor.Live"):
+                        tui.run()
+
+        # Verify settings were restored even after interrupt
+        mock_termios.tcsetattr.assert_called()
+
+
+class TestEscapeSequenceParsing:
+    """Tests for escape sequence parsing in keyboard input."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_up_arrow_mapped_to_k(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that up arrow escape sequence is recognized."""
+        # The run loop parses \x1b[A or \x1bOA as up arrow
+        # and maps to 'k' (vim up) before calling _handle_key
+        # We test the _handle_key with the mapped value
+        result = tui._handle_key("k")  # k (mapped from up arrow)
+        assert result is False  # Navigation doesn't quit
+
+    def test_down_arrow_mapped_to_j(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that down arrow escape sequence is recognized."""
+        result = tui._handle_key("j")  # j (mapped from down arrow)
+        assert result is False
+
+    def test_escape_alone_does_not_quit(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that pressing Escape alone doesn't quit."""
+        result = tui._handle_key("\x1b")  # Escape
+        assert result is False
+
+
+class TestKeyboardEdgeCases:
+    """Tests for keyboard input edge cases."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_rapid_key_presses(self, tui: WorkflowMonitorTUI) -> None:
+        """Test handling of rapid key presses."""
+        initial_rate = tui.refresh_rate
+        # Simulate rapid + key presses
+        for _ in range(10):
+            tui._handle_key("+")
+        # Rate should increase but be capped at max
+        assert tui.refresh_rate <= MAX_REFRESH_RATE
+        assert tui.refresh_rate >= initial_rate
+
+    def test_refresh_rate_bounds(self, tui: WorkflowMonitorTUI) -> None:
+        """Test refresh rate stays within bounds."""
+        # Decrease to minimum
+        for _ in range(100):
+            tui._handle_key("-")
+        assert tui.refresh_rate >= MIN_REFRESH_RATE
+
+        # Increase to maximum
+        for _ in range(100):
+            tui._handle_key("+")
+        assert tui.refresh_rate <= MAX_REFRESH_RATE
+
+    def test_filter_special_characters(self, tui: WorkflowMonitorTUI) -> None:
+        """Test filter mode handles special characters."""
+        tui._handle_key("/")  # Enter filter mode
+        assert tui._filter_mode is True
+
+        # Type special characters (stored in _filter_input during filter mode)
+        tui._handle_key("*")
+        tui._handle_key(".")
+        tui._handle_key("?")
+        assert "*" in tui._filter_input
+        assert "." in tui._filter_input
+        assert "?" in tui._filter_input
+
+    def test_filter_unicode_characters(self, tui: WorkflowMonitorTUI) -> None:
+        """Test filter mode handles unicode characters."""
+        tui._handle_key("/")
+        # Unicode characters should be accepted (stored in _filter_input)
+        tui._handle_key("α")
+        tui._handle_key("β")
+        assert "α" in tui._filter_input
+        assert "β" in tui._filter_input
+
+    def test_filter_backspace_empty(self, tui: WorkflowMonitorTUI) -> None:
+        """Test backspace on empty filter is safe."""
+        tui._handle_key("/")
+        assert tui._filter_input == ""
+        # Backspace on empty filter should be safe
+        tui._handle_key("\x7f")
+        assert tui._filter_input == ""
+
+    def test_filter_clear_on_escape(self, tui: WorkflowMonitorTUI) -> None:
+        """Test escape clears filter and exits filter mode."""
+        tui._handle_key("/")
+        tui._handle_key("t")
+        tui._handle_key("e")
+        tui._handle_key("s")
+        tui._handle_key("t")
+        assert tui._filter_input == "test"
+
+        tui._handle_key("\x1b")  # Escape
+        assert tui._filter_mode is False
+        assert tui._filter_input == ""
+
+    def test_job_selection_boundaries(self, tui: WorkflowMonitorTUI) -> None:
+        """Test job selection stays within bounds."""
+        # Navigate up at top should be safe (index stays >= 0)
+        for _ in range(10):
+            tui._handle_key("k")  # k (up)
+        assert tui._selected_job_index >= 0
+        assert tui._selected_completion_index >= 0
+
+        # Navigate down should work
+        tui._handle_key("j")  # j (down)
+        assert tui._selected_job_index >= 0
+        assert tui._selected_completion_index >= 0
+
+    def test_layout_cycle_wraps(self, tui: WorkflowMonitorTUI) -> None:
+        """Test layout cycling wraps around correctly."""
+        initial_layout = tui._layout_mode
+        layouts_seen = [initial_layout]
+
+        # Cycle through all layouts (Tab key cycles layouts)
+        for _ in range(10):
+            tui._handle_key("\t")
+            layouts_seen.append(tui._layout_mode)
+
+        # Should have seen all layout modes
+        assert LayoutMode.FULL in layouts_seen
+        assert LayoutMode.COMPACT in layouts_seen
+        assert LayoutMode.MINIMAL in layouts_seen
+
+    def test_sort_cycle_wraps(self, tui: WorkflowMonitorTUI) -> None:
+        """Test sort table cycling wraps around."""
+        # s and S cycle through sort tables (running, completions, pending, stats)
+        tables_seen = [tui._sort_table]
+
+        # Cycle through sort options multiple times
+        for _ in range(10):
+            tui._handle_key("s")
+            tables_seen.append(tui._sort_table)
+
+        # Should have seen all sort tables
+        assert "running" in tables_seen
+        assert "completions" in tables_seen
+        assert "pending" in tables_seen
+        assert "stats" in tables_seen
+
+    def test_toggle_states_are_boolean(self, tui: WorkflowMonitorTUI) -> None:
+        """Test toggle states toggle properly."""
+        # Test pause toggle (p key)
+        initial_paused = tui._paused
+        tui._handle_key("p")
+        assert tui._paused != initial_paused
+        tui._handle_key("p")
+        assert tui._paused == initial_paused
+
+        # Test help toggle
+        initial_help = tui._show_help
+        tui._handle_key("?")
+        assert tui._show_help != initial_help
+        tui._handle_key("?")
+        assert tui._show_help == initial_help
+
+    def test_null_character_ignored(self, tui: WorkflowMonitorTUI) -> None:
+        """Test null character is ignored."""
+        result = tui._handle_key("\x00")
+        assert result is False
+
+    def test_unknown_control_char_ignored(self, tui: WorkflowMonitorTUI) -> None:
+        """Test unknown control characters are ignored."""
+        # Ctrl+C (ETX) is handled by KeyboardInterrupt, not _handle_key
+        # Test other control chars are safely ignored
+        result = tui._handle_key("\x01")  # Ctrl+A
+        assert result is False
+
+    def test_log_navigation_bounds(self, tui: WorkflowMonitorTUI) -> None:
+        """Test log navigation stays within bounds."""
+        # Navigate to older logs (should be safe even with no logs)
+        for _ in range(10):
+            tui._handle_key("[")
+
+        # Navigate to newer logs
+        for _ in range(10):
+            tui._handle_key("]")
+
+        # Should not crash and offset should be valid
+        assert tui._log_scroll_offset >= 0
+
+
+class TestJobSelectionModeKeyHandling:
+    """Tests for key handling in job selection mode."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_help_key_works_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '?' shows help in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._show_help is False
+
+        result = tui._handle_key("?")
+
+        assert result is False  # Should not quit
+        assert tui._show_help is True
+
+    def test_sort_cycle_forward_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 's' cycles sort table in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._sort_table is None
+
+        tui._handle_key("s")
+        assert tui._sort_table == "running"
+
+        tui._handle_key("s")
+        assert tui._sort_table == "completions"
+
+    def test_sort_cycle_backward_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'S' cycles sort table backward in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        assert tui._sort_table is None
+
+        tui._handle_key("S")
+        assert tui._sort_table == "stats"
+
+        tui._handle_key("S")
+        assert tui._sort_table == "pending"
+
+    def test_column_sort_keys_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 1-4 keys work for column sorting in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"  # Must select a table first
+        tui._sort_column = 0
+        tui._sort_ascending = True
+
+        # Press '2' to sort by column 2
+        tui._handle_key("2")
+        assert tui._sort_column == 1  # 0-indexed
+
+        # Press '2' again to reverse sort
+        tui._handle_key("2")
+        assert tui._sort_column == 1
+        assert tui._sort_ascending is False
+
+    def test_column_sort_key_3_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '3' key works in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"
+
+        tui._handle_key("3")
+        assert tui._sort_column == 2
+
+    def test_column_sort_key_4_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that '4' key works for running/stats tables in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._sort_table = "running"
+
+        tui._handle_key("4")
+        assert tui._sort_column == 3
+
+    def test_job_selection_mode_still_handles_navigation(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that job navigation still works after sort keys added."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 5
+
+        # k should navigate up
+        tui._handle_key("k")
+        assert tui._selected_job_index == 4
+
+    def test_job_selection_mode_escape_still_exits(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that Escape still exits job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+
+        tui._handle_key("\x1b")
+
+        assert tui._job_selection_mode is False
+        assert tui._log_source is None
+
+    def test_help_closes_with_any_key_in_job_selection_mode(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that help overlay closes with any key while in job selection mode."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._show_help = True
+
+        # Any key should close help, even in job selection mode
+        tui._handle_key("x")
+
+        assert tui._show_help is False
+        # Should still be in job selection mode
+        assert tui._job_selection_mode is True
+
+    def test_help_closes_before_job_selection_handles_key(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that help closes before job selection mode processes the key."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._show_help = True
+        tui._selected_job_index = 5
+
+        # k would normally navigate, but should just close help
+        tui._handle_key("k")
+
+        assert tui._show_help is False
+        # Job index should NOT have changed (key was consumed by help close)
+        assert tui._selected_job_index == 5
+
+    def test_g_jumps_to_first_job_in_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first job in running table."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_job_index == 0
+
+    def test_g_jumps_to_first_job_in_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first job in completions table."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+        tui._selected_completion_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_completion_index == 0
+
+    def test_G_jumps_to_last_job_in_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last job in running table."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+        tui._selected_job_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_job_index == 9  # num_jobs - 1
+
+    def test_G_jumps_to_last_job_in_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last job in completions table."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+        tui._selected_completion_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_completion_index == 9
+
+    def test_shift_tab_switches_from_running_to_completions(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that shift-tab switches from running to completions."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+
+        result = tui._handle_table_navigation_key("\x1b[Z", num_jobs=10)
+
+        assert result is False
+        assert tui._log_source == "completions"
+
+    def test_shift_tab_switches_from_completions_to_running(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that shift-tab switches from completions to running."""
+        tui._job_selection_mode = True
+        tui._log_source = "completions"
+
+        result = tui._handle_table_navigation_key("\x1b[Z", num_jobs=10)
+
+        assert result is False
+        assert tui._log_source == "running"
+
+
+class TestJobIdColumnWidth:
+    """Tests for dynamic job ID column width calculation."""
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock console."""
+        console = MagicMock()
+        console.width = 120
+        console.height = 40
+        console.is_terminal = True
+        return console
+
+    @pytest.fixture
+    def tui(
+        self, snakemake_dir: Path, tmp_path: Path, mock_console: MagicMock
+    ) -> WorkflowMonitorTUI:
+        """Create a TUI instance for testing."""
+        with patch("snakesee.tui.monitor.Console", return_value=mock_console):
+            return WorkflowMonitorTUI(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+            )
+
+    def test_empty_jobs_returns_minimum_width(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that empty job list returns minimum width of 2."""
+        width = tui._get_job_id_column_width([])
+        assert width == 2
+
+    def test_single_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for single-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="1"),
+            JobInfo(rule="test", job_id="5"),
+            JobInfo(rule="test", job_id="9"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2  # Minimum is 2
+
+    def test_double_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for double-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="10"),
+            JobInfo(rule="test", job_id="50"),
+            JobInfo(rule="test", job_id="99"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2
+
+    def test_triple_digit_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for triple-digit job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="100"),
+            JobInfo(rule="test", job_id="500"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 3
+
+    def test_large_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width for large job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="12345"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 5
+
+    def test_mixed_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width uses maximum job ID."""
+        jobs = [
+            JobInfo(rule="test", job_id="5"),
+            JobInfo(rule="test", job_id="1000"),
+            JobInfo(rule="test", job_id="50"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 4  # 1000 requires 4 digits
+
+    def test_jobs_without_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width based on job count when no job IDs."""
+        jobs = [
+            JobInfo(rule="test"),
+            JobInfo(rule="test"),
+            JobInfo(rule="test"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 2  # 3 jobs, single digit, minimum 2
+
+    def test_many_jobs_without_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test width scales with job count when no job IDs."""
+        jobs = [JobInfo(rule="test") for _ in range(150)]
+        width = tui._get_job_id_column_width(jobs)
+        assert width == 3  # 150 requires 3 digits
+
+    def test_non_numeric_job_ids(self, tui: WorkflowMonitorTUI) -> None:
+        """Test handling of non-numeric job IDs."""
+        jobs = [
+            JobInfo(rule="test", job_id="abc"),
+            JobInfo(rule="test", job_id="xyz123"),
+        ]
+        width = tui._get_job_id_column_width(jobs)
+        # Should handle gracefully (uses string length heuristic)
+        assert width >= 2
