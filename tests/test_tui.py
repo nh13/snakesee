@@ -1586,18 +1586,18 @@ class TestJobSelectionModeKeyHandling:
         assert result is False
         assert tui._selected_completion_index == 9
 
-    def test_shift_tab_switches_from_running_to_completions(self, tui: WorkflowMonitorTUI) -> None:
-        """Test that shift-tab switches from running to completions."""
+    def test_shift_tab_switches_from_running_to_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that shift-tab cycles backward from running to stats."""
         tui._job_selection_mode = True
         tui._log_source = "running"
 
         result = tui._handle_table_navigation_key("\x1b[Z", num_jobs=10)
 
         assert result is False
-        assert tui._log_source == "completions"
+        assert tui._log_source == "stats"
 
     def test_shift_tab_switches_from_completions_to_running(self, tui: WorkflowMonitorTUI) -> None:
-        """Test that shift-tab switches from completions to running."""
+        """Test that shift-tab cycles backward from completions to running."""
         tui._job_selection_mode = True
         tui._log_source = "completions"
 
@@ -1605,6 +1605,261 @@ class TestJobSelectionModeKeyHandling:
 
         assert result is False
         assert tui._log_source == "running"
+
+    def test_tab_cycles_through_all_tables(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that tab cycles forward through all 4 tables."""
+        tui._job_selection_mode = True
+        tui._log_source = "running"
+
+        # running -> completions
+        tui._handle_table_navigation_key("\t", num_jobs=10)
+        assert tui._log_source == "completions"
+
+        # completions -> pending
+        tui._handle_table_navigation_key("\t", num_jobs=10)
+        assert tui._log_source == "pending"
+
+        # pending -> stats
+        tui._handle_table_navigation_key("\t", num_jobs=10)
+        assert tui._log_source == "stats"
+
+        # stats -> running (wrap around)
+        tui._handle_table_navigation_key("\t", num_jobs=10)
+        assert tui._log_source == "running"
+
+    def test_h_switches_to_left_column(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that h switches to the left column table."""
+        tui._job_selection_mode = True
+
+        # completions -> running
+        tui._log_source = "completions"
+        tui._handle_table_navigation_key("h", num_jobs=10)
+        assert tui._log_source == "running"
+
+        # stats -> pending
+        tui._log_source = "stats"
+        tui._handle_table_navigation_key("h", num_jobs=10)
+        assert tui._log_source == "pending"
+
+    def test_l_switches_to_right_column(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that l switches to the right column table."""
+        tui._job_selection_mode = True
+
+        # running -> completions
+        tui._log_source = "running"
+        tui._handle_table_navigation_key("l", num_jobs=10)
+        assert tui._log_source == "completions"
+
+        # pending -> stats
+        tui._log_source = "pending"
+        tui._handle_table_navigation_key("l", num_jobs=10)
+        assert tui._log_source == "stats"
+
+    def test_enter_no_op_for_pending_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that enter does not activate log mode for pending/stats tables."""
+        tui._job_selection_mode = True
+
+        # pending - enter should not activate log viewing
+        tui._log_source = "pending"
+        tui._log_viewing_mode = False
+        tui._handle_table_navigation_key("\r", num_jobs=10)
+        assert tui._log_viewing_mode is False
+
+        # stats - enter should not activate log viewing
+        tui._log_source = "stats"
+        tui._log_viewing_mode = False
+        tui._handle_table_navigation_key("\r", num_jobs=10)
+        assert tui._log_viewing_mode is False
+
+    def test_j_k_navigation_for_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test j/k navigation works for pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 0
+
+        # j - move down
+        tui._handle_table_navigation_key("j", num_jobs=10)
+        assert tui._selected_pending_index == 1
+
+        # k - move up
+        tui._handle_table_navigation_key("k", num_jobs=10)
+        assert tui._selected_pending_index == 0
+
+    def test_j_k_navigation_for_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test j/k navigation works for stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 0
+
+        # j - move down
+        tui._handle_table_navigation_key("j", num_jobs=10)
+        assert tui._selected_stats_index == 1
+
+        # k - move up
+        tui._handle_table_navigation_key("k", num_jobs=10)
+        assert tui._selected_stats_index == 0
+
+    def test_g_jumps_to_first_in_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first item in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_pending_index == 0
+
+    def test_g_jumps_to_first_in_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'g' jumps to first item in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 5
+
+        result = tui._handle_table_navigation_key("g", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_stats_index == 0
+
+    def test_G_jumps_to_last_in_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last item in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_pending_index == 9
+
+    def test_G_jumps_to_last_in_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that 'G' jumps to last item in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 0
+
+        result = tui._handle_table_navigation_key("G", num_jobs=10)
+
+        assert result is False
+        assert tui._selected_stats_index == 9
+
+    def test_ctrl_d_half_page_down_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+d moves half page down in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 0
+
+        result = tui._handle_table_navigation_key("\x04", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_pending_index == 5  # half_page = 5
+
+    def test_ctrl_d_half_page_down_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+d moves half page down in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 0
+
+        result = tui._handle_table_navigation_key("\x04", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_stats_index == 5
+
+    def test_ctrl_u_half_page_up_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+u moves half page up in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 10
+
+        result = tui._handle_table_navigation_key("\x15", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_pending_index == 5
+
+    def test_ctrl_u_half_page_up_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+u moves half page up in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 10
+
+        result = tui._handle_table_navigation_key("\x15", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_stats_index == 5
+
+    def test_ctrl_f_full_page_down_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+f moves full page down in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 0
+
+        result = tui._handle_table_navigation_key("\x06", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_pending_index == 10  # full_page = 10
+
+    def test_ctrl_f_full_page_down_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+f moves full page down in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 0
+
+        result = tui._handle_table_navigation_key("\x06", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_stats_index == 10
+
+    def test_ctrl_b_full_page_up_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+b moves full page up in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+        tui._selected_pending_index = 15
+
+        result = tui._handle_table_navigation_key("\x02", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_pending_index == 5
+
+    def test_ctrl_b_full_page_up_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test Ctrl+b moves full page up in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+        tui._selected_stats_index = 15
+
+        result = tui._handle_table_navigation_key("\x02", num_jobs=20)
+
+        assert result is False
+        assert tui._selected_stats_index == 5
+
+    def test_page_navigation_clamps_to_bounds_pending(self, tui: WorkflowMonitorTUI) -> None:
+        """Test page navigation clamps to valid bounds in pending table."""
+        tui._job_selection_mode = True
+        tui._log_source = "pending"
+
+        # Ctrl+d at end should stay at last item
+        tui._selected_pending_index = 8
+        tui._handle_table_navigation_key("\x04", num_jobs=10)
+        assert tui._selected_pending_index == 9
+
+        # Ctrl+u at start should stay at first item
+        tui._selected_pending_index = 2
+        tui._handle_table_navigation_key("\x15", num_jobs=10)
+        assert tui._selected_pending_index == 0
+
+    def test_page_navigation_clamps_to_bounds_stats(self, tui: WorkflowMonitorTUI) -> None:
+        """Test page navigation clamps to valid bounds in stats table."""
+        tui._job_selection_mode = True
+        tui._log_source = "stats"
+
+        # Ctrl+f at end should stay at last item
+        tui._selected_stats_index = 8
+        tui._handle_table_navigation_key("\x06", num_jobs=10)
+        assert tui._selected_stats_index == 9
+
+        # Ctrl+b at start should stay at first item
+        tui._selected_stats_index = 5
+        tui._handle_table_navigation_key("\x02", num_jobs=10)
+        assert tui._selected_stats_index == 0
 
 
 class TestJobIdColumnWidth:
