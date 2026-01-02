@@ -487,6 +487,16 @@ class TestWorkflowProgress:
         )
         assert progress.percent_complete == 0.0
 
+    def test_percent_complete_capped_at_100(self) -> None:
+        """Test percent complete is capped at 100 when completed exceeds total."""
+        progress = WorkflowProgress(
+            workflow_dir=Path("."),
+            status=WorkflowStatus.RUNNING,
+            total_jobs=1718,
+            completed_jobs=1864,  # More completed than total (can happen with parsing issues)
+        )
+        assert progress.percent_complete == 100.0
+
     def test_pending_jobs(self) -> None:
         """Test pending jobs calculation."""
         progress = WorkflowProgress(

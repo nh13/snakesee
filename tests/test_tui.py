@@ -18,6 +18,7 @@ from snakesee.tui import MAX_REFRESH_RATE
 from snakesee.tui import MIN_REFRESH_RATE
 from snakesee.tui import LayoutMode
 from snakesee.tui import WorkflowMonitorTUI
+from snakesee.tui.monitor import _is_event_file_current
 from tests.conftest import make_job_info
 from tests.conftest import make_snakesee_event
 from tests.conftest import make_time_estimate
@@ -1706,3 +1707,105 @@ class TestJobIdColumnWidth:
         width = tui._get_job_id_column_width(jobs)
         # Should handle gracefully (uses string length heuristic)
         assert width >= 2
+
+
+class TestEventFileCurrentValidation:
+    """Tests for _is_event_file_current function (stale event file detection)."""
+
+    def test_current_events_file(self, tmp_path: Path) -> None:
+        """Test that a current events file is accepted."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        log_start_time = 1000.0
+
+        # Write a workflow_started event at the same time as log start
+        event_file.write_text(
+            json.dumps({"event_type": "workflow_started", "timestamp": 1000.0}) + "\n"
+        )
+
+        assert _is_event_file_current(event_file, log_start_time) is True
+
+    def test_stale_events_file(self, tmp_path: Path) -> None:
+        """Test that a stale events file from a previous run is rejected."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        log_start_time = 2000.0  # Current log started at 2000
+
+        # Write a workflow_started event from an older run
+        event_file.write_text(
+            json.dumps({"event_type": "workflow_started", "timestamp": 1000.0}) + "\n"
+        )
+
+        # Events file is 1000 seconds older than log - should be rejected
+        assert _is_event_file_current(event_file, log_start_time) is False
+
+    def test_events_file_within_tolerance(self, tmp_path: Path) -> None:
+        """Test that events file within 60s tolerance is accepted."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        log_start_time = 1050.0
+
+        # Write a workflow_started event 50 seconds before log start
+        event_file.write_text(
+            json.dumps({"event_type": "workflow_started", "timestamp": 1000.0}) + "\n"
+        )
+
+        # Events file is 50 seconds older, within 60s tolerance
+        assert _is_event_file_current(event_file, log_start_time) is True
+
+    def test_events_file_no_log_start_time(self, tmp_path: Path) -> None:
+        """Test that events file is accepted when log start time is unknown."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        event_file.write_text(
+            json.dumps({"event_type": "workflow_started", "timestamp": 1000.0}) + "\n"
+        )
+
+        # No log start time - assume events are current
+        assert _is_event_file_current(event_file, None) is True
+
+    def test_events_file_missing_workflow_started(self, tmp_path: Path) -> None:
+        """Test that events file without workflow_started is rejected."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        log_start_time = 1000.0
+
+        # Write a different event type as first line
+        event_file.write_text(json.dumps({"event_type": "progress", "timestamp": 1000.0}) + "\n")
+
+        # First event isn't workflow_started - should be rejected
+        assert _is_event_file_current(event_file, log_start_time) is False
+
+    def test_events_file_empty(self, tmp_path: Path) -> None:
+        """Test that empty events file is rejected."""
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        event_file.write_text("")
+
+        assert _is_event_file_current(event_file, 1000.0) is False
+
+    def test_events_file_nonexistent(self, tmp_path: Path) -> None:
+        """Test that nonexistent events file is rejected."""
+        event_file = tmp_path / ".snakesee_events.jsonl"
+
+        # Should return False (not raise exception)
+        assert _is_event_file_current(event_file, 1000.0) is False
+
+    def test_events_file_newer_than_log(self, tmp_path: Path) -> None:
+        """Test that events file newer than log is accepted."""
+        import json
+
+        event_file = tmp_path / ".snakesee_events.jsonl"
+        log_start_time = 1000.0
+
+        # Write a workflow_started event 100 seconds after log start
+        # (shouldn't happen in practice but should be accepted)
+        event_file.write_text(
+            json.dumps({"event_type": "workflow_started", "timestamp": 1100.0}) + "\n"
+        )
+
+        assert _is_event_file_current(event_file, log_start_time) is True
