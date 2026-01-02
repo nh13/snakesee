@@ -258,6 +258,10 @@ class WorkflowMonitorTUI:
         self._selected_completion_index: int = 0  # Index into completions list
         self._running_scroll_offset: int = 0  # Scroll offset for running jobs table
         self._completions_scroll_offset: int = 0  # Scroll offset for completions table
+        self._selected_pending_index: int = 0  # Index into pending rules list
+        self._selected_stats_index: int = 0  # Index into stats rows list
+        self._pending_scroll_offset: int = 0  # Scroll offset for pending table
+        self._stats_scroll_offset: int = 0  # Scroll offset for stats table
         self._log_scroll_offset: int = 0  # Lines to skip from end (0 = show latest)
         self._log_scroll_page_size: int = 10  # Lines to scroll with Ctrl+u/d
         self._cached_log_path: Path | None = None
@@ -1215,10 +1219,13 @@ class WorkflowMonitorTUI:
             return False
 
         # Enter - view log for selected job (enter log viewing mode)
+        # Only running and completions tables have logs to view
         if key == "\r" or key == "\n":
-            self._log_viewing_mode = True
-            self._log_scroll_offset = 0  # Start at end of log
-            self._force_refresh = True
+            if self._log_source in ("running", "completions"):
+                self._log_viewing_mode = True
+                self._log_scroll_offset = 0  # Start at end of log
+                self._force_refresh = True
+            # For pending/stats, do nothing (no logs available)
             return False
 
         # Escape - exit table navigation mode
@@ -1227,42 +1234,50 @@ class WorkflowMonitorTUI:
             self._log_source = None
             self._selected_job_index = 0
             self._selected_completion_index = 0
+            self._selected_pending_index = 0
+            self._selected_stats_index = 0
             self._running_scroll_offset = 0
             self._completions_scroll_offset = 0
+            self._pending_scroll_offset = 0
+            self._stats_scroll_offset = 0
             self._log_scroll_offset = 0
             self._cached_log_path = None
             self._cached_log_lines = []
             self._force_refresh = True
             return False
 
-        # Tab - cycle forward between running and completions tables
+        # Tab - cycle forward: running -> completions -> pending -> stats -> running
         if key == "\t":
-            if self._log_source == "running":
-                self._log_source = "completions"
-            else:
-                self._log_source = "running"
+            cycle = ["running", "completions", "pending", "stats"]
+            current_idx = cycle.index(self._log_source) if self._log_source in cycle else 0
+            self._log_source = cycle[(current_idx + 1) % len(cycle)]
             self._force_refresh = True
             return False
 
-        # Shift-Tab (backtab) - cycle backward between tables
+        # Shift-Tab (backtab) - cycle backward through tables
         if key == "\x1b[Z":
+            cycle = ["running", "completions", "pending", "stats"]
+            current_idx = cycle.index(self._log_source) if self._log_source in cycle else 0
+            self._log_source = cycle[(current_idx - 1) % len(cycle)]
+            self._force_refresh = True
+            return False
+
+        # h/l for table switching (vim-style left/right column)
+        if key == "h":  # h - switch to left column table
             if self._log_source == "completions":
                 self._log_source = "running"
-            else:
-                self._log_source = "completions"
-            self._force_refresh = True
-            return False
-
-        # h/l for table switching (vim-style left/right)
-        if key == "h":  # h - switch to running (left table)
-            if self._log_source != "running":
-                self._log_source = "running"
+                self._force_refresh = True
+            elif self._log_source == "stats":
+                self._log_source = "pending"
                 self._force_refresh = True
             return False
 
-        if key == "l":  # l - switch to completions (right table)
-            if self._log_source != "completions":
+        if key == "l":  # l - switch to right column table
+            if self._log_source == "running":
                 self._log_source = "completions"
+                self._force_refresh = True
+            elif self._log_source == "pending":
+                self._log_source = "stats"
                 self._force_refresh = True
             return False
 
@@ -1270,7 +1285,11 @@ class WorkflowMonitorTUI:
         if key == "k":  # k - previous row (up)
             if self._log_source == "completions":
                 self._selected_completion_index = max(0, self._selected_completion_index - 1)
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = max(0, self._selected_pending_index - 1)
+            elif self._log_source == "stats":
+                self._selected_stats_index = max(0, self._selected_stats_index - 1)
+            else:  # running
                 self._selected_job_index = max(0, self._selected_job_index - 1)
             self._force_refresh = True
             return False
@@ -1280,7 +1299,11 @@ class WorkflowMonitorTUI:
                 self._selected_completion_index = min(
                     num_jobs - 1, self._selected_completion_index + 1
                 )
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = min(num_jobs - 1, self._selected_pending_index + 1)
+            elif self._log_source == "stats":
+                self._selected_stats_index = min(num_jobs - 1, self._selected_stats_index + 1)
+            else:  # running
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + 1)
             self._force_refresh = True
             return False
@@ -1292,16 +1315,29 @@ class WorkflowMonitorTUI:
                 self._selected_completion_index = min(
                     num_jobs - 1, self._selected_completion_index + half_page
                 )
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = min(
+                    num_jobs - 1, self._selected_pending_index + half_page
+                )
+            elif self._log_source == "stats":
+                self._selected_stats_index = min(
+                    num_jobs - 1, self._selected_stats_index + half_page
+                )
+            else:  # running
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + half_page)
             self._force_refresh = True
             return False
 
         if key == "\x15":  # Ctrl+u - half page up
             if self._log_source == "completions":
-                idx = max(0, self._selected_completion_index - half_page)
-                self._selected_completion_index = idx
-            else:
+                self._selected_completion_index = max(
+                    0, self._selected_completion_index - half_page
+                )
+            elif self._log_source == "pending":
+                self._selected_pending_index = max(0, self._selected_pending_index - half_page)
+            elif self._log_source == "stats":
+                self._selected_stats_index = max(0, self._selected_stats_index - half_page)
+            else:  # running
                 self._selected_job_index = max(0, self._selected_job_index - half_page)
             self._force_refresh = True
             return False
@@ -1313,7 +1349,15 @@ class WorkflowMonitorTUI:
                 self._selected_completion_index = min(
                     num_jobs - 1, self._selected_completion_index + full_page
                 )
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = min(
+                    num_jobs - 1, self._selected_pending_index + full_page
+                )
+            elif self._log_source == "stats":
+                self._selected_stats_index = min(
+                    num_jobs - 1, self._selected_stats_index + full_page
+                )
+            else:  # running
                 self._selected_job_index = min(num_jobs - 1, self._selected_job_index + full_page)
             self._force_refresh = True
             return False
@@ -1323,7 +1367,11 @@ class WorkflowMonitorTUI:
                 self._selected_completion_index = max(
                     0, self._selected_completion_index - full_page
                 )
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = max(0, self._selected_pending_index - full_page)
+            elif self._log_source == "stats":
+                self._selected_stats_index = max(0, self._selected_stats_index - full_page)
+            else:  # running
                 self._selected_job_index = max(0, self._selected_job_index - full_page)
             self._force_refresh = True
             return False
@@ -1332,7 +1380,11 @@ class WorkflowMonitorTUI:
         if key == "g":  # g - first row
             if self._log_source == "completions":
                 self._selected_completion_index = 0
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = 0
+            elif self._log_source == "stats":
+                self._selected_stats_index = 0
+            else:  # running
                 self._selected_job_index = 0
             self._force_refresh = True
             return False
@@ -1340,7 +1392,11 @@ class WorkflowMonitorTUI:
         if key == "G":  # G - last row
             if self._log_source == "completions":
                 self._selected_completion_index = max(0, num_jobs - 1)
-            else:
+            elif self._log_source == "pending":
+                self._selected_pending_index = max(0, num_jobs - 1)
+            elif self._log_source == "stats":
+                self._selected_stats_index = max(0, num_jobs - 1)
+            else:  # running
                 self._selected_job_index = max(0, num_jobs - 1)
             self._force_refresh = True
             return False
@@ -1526,8 +1582,9 @@ class WorkflowMonitorTUI:
         help_text.add_row("g / G", "Jump to first/last row")
         help_text.add_row("Ctrl+d/u", "Move down/up half page")
         help_text.add_row("Ctrl+f/b", "Move down/up full page")
-        help_text.add_row("h / l", "Switch to running/completions table")
-        help_text.add_row("Enter", "View selected job's log")
+        help_text.add_row("Tab / S-Tab", "Cycle all tables")
+        help_text.add_row("h / l", "Switch to left/right column table")
+        help_text.add_row("Enter", "View job log (running/completions only)")
         help_text.add_row("Esc", "Exit table navigation")
         help_text.add_row("", "")
         help_text.add_row("", "[bold]Log Viewing (Enter on job)[/bold]")
@@ -2394,8 +2451,15 @@ class WorkflowMonitorTUI:
         """Create the pending jobs panel showing estimated pending jobs by rule."""
         pending_count = progress.pending_jobs
         is_sorting = self._sort_table == "pending"
-        title_suffix = " [bold cyan]◀ sorting[/bold cyan]" if is_sorting else ""
-        border = f"bold {FG_BLUE}" if is_sorting else FG_BLUE
+        is_selecting = self._job_selection_mode and self._log_source == "pending"
+
+        title_suffix = ""
+        if is_selecting:
+            title_suffix = " [bold cyan]◀ select[/bold cyan]"
+        elif is_sorting:
+            title_suffix = " [bold cyan]◀ sorting[/bold cyan]"
+
+        border = "cyan" if is_selecting else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
 
         if pending_count <= 0:
             return Panel(
@@ -2424,15 +2488,58 @@ class WorkflowMonitorTUI:
         else:
             rules_list.sort(key=lambda x: x[1], reverse=True)
 
-        for rule, count in rules_list[:10]:
-            table.add_row(rule, str(count))
+        # Virtual scrolling
+        max_visible = 10
+        total_rules = len(rules_list)
 
-        if len(rules_list) > 10:
-            table.add_row(f"[dim]... and {len(rules_list) - 10} more rules[/dim]", "")
+        if is_selecting and rules_list:
+            # Clamp selected index to valid bounds
+            self._selected_pending_index = max(
+                0, min(self._selected_pending_index, total_rules - 1)
+            )
+
+            # Adjust scroll offset to keep selection visible
+            if self._selected_pending_index < self._pending_scroll_offset:
+                self._pending_scroll_offset = self._selected_pending_index
+            elif self._selected_pending_index >= self._pending_scroll_offset + max_visible:
+                self._pending_scroll_offset = self._selected_pending_index - max_visible + 1
+
+            # Clamp scroll offset
+            max_scroll = max(0, total_rules - max_visible)
+            self._pending_scroll_offset = max(0, min(self._pending_scroll_offset, max_scroll))
+        else:
+            self._pending_scroll_offset = 0
+
+        # Get visible slice
+        visible_rules = rules_list[
+            self._pending_scroll_offset : self._pending_scroll_offset + max_visible
+        ]
+
+        for visible_idx, (rule, count) in enumerate(visible_rules):
+            actual_idx = self._pending_scroll_offset + visible_idx
+            rule_style = "yellow"
+
+            # Highlight selected row
+            if is_selecting and actual_idx == self._selected_pending_index:
+                rule_style = "bold yellow on dark_blue"
+
+            table.add_row(Text(rule, style=rule_style), str(count))
+
+        if total_rules > max_visible and not is_selecting:
+            table.add_row(f"[dim]... and {total_rules - max_visible} more rules[/dim]", "")
+
+        # Build title with scroll indicator
+        if is_selecting and total_rules > max_visible:
+            start = self._pending_scroll_offset + 1
+            end = min(self._pending_scroll_offset + max_visible, total_rules)
+            title = f"Pending Jobs (~{pending_count}, rules {start}-{end} of {total_rules})"
+        else:
+            title = f"Pending Jobs (~{pending_count})"
+        title += title_suffix
 
         return Panel(
             table,
-            title=f"Pending Jobs (~{pending_count})" + title_suffix,
+            title=title,
             border_style=border,
             padding=0,
         )
@@ -2554,13 +2661,22 @@ class WorkflowMonitorTUI:
     def _make_stats_panel(self) -> Panel:
         """Create the rule statistics panel."""
         is_sorting = self._sort_table == "stats"
+        is_selecting = self._job_selection_mode and self._log_source == "stats"
+
+        title_suffix = ""
+        if is_selecting:
+            title_suffix = " [bold cyan]◀ select[/bold cyan]"
+        elif is_sorting:
+            title_suffix = " [bold cyan]◀ sorting[/bold cyan]"
+
+        border = "cyan" if is_selecting else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
 
         # Check if estimation is disabled
         if not self.use_estimation:
             return Panel(
                 "[dim]Estimation disabled[/dim]",
-                title="Rule Statistics (Historical)",
-                border_style=FG_BLUE,
+                title="Rule Statistics (Historical)" + title_suffix,
+                border_style=border,
             )
 
         stats_list = self._get_filtered_stats()
@@ -2568,8 +2684,8 @@ class WorkflowMonitorTUI:
         if not stats_list:
             return Panel(
                 "[dim]No historical data available[/dim]",
-                title="Rule Statistics (Historical)",
-                border_style=FG_BLUE,
+                title="Rule Statistics (Historical)" + title_suffix,
+                border_style=border,
             )
 
         header_style = "bold yellow on dark_blue" if is_sorting else "bold yellow"
@@ -2597,44 +2713,72 @@ class WorkflowMonitorTUI:
         else:
             stats_list.sort(key=lambda s: s.count, reverse=True)
 
-        # Build hierarchical display: rule is primary, threads is secondary
+        # Build flattened rows list first (for virtual scrolling)
         # Each row is (rule_display, threads_display, stats)
-        # Limit total rows to 8 (not rules) to handle thread expansion
-        max_rows = 8
-        rows: list[tuple[str, str, RuleTimingStats]] = []
+        all_rows: list[tuple[str, str, RuleTimingStats]] = []
         thread_stats_dict = self._workflow_state.rules.to_thread_stats_dict()
         for stats in stats_list:
-            if len(rows) >= max_rows:
-                break
             rule = stats.rule
             if rule in thread_stats_dict and thread_stats_dict[rule].stats_by_threads:
                 # Has thread-specific data - show each thread count
                 rule_thread_stats = thread_stats_dict[rule]
                 sorted_threads = sorted(rule_thread_stats.stats_by_threads.keys())
                 for i, threads in enumerate(sorted_threads):
-                    if len(rows) >= max_rows:
-                        break
                     ts = rule_thread_stats.stats_by_threads[threads]
                     # First row shows rule name, subsequent rows show blank
                     rule_display = rule if i == 0 else ""
-                    rows.append((rule_display, str(threads), ts))
+                    all_rows.append((rule_display, str(threads), ts))
             else:
                 # No thread data - show with "-" for threads
-                rows.append((rule, "-", stats))
+                all_rows.append((rule, "-", stats))
 
-        for rule_display, threads_display, stats in rows:
+        # Virtual scrolling
+        max_visible = 8
+        total_rows = len(all_rows)
+
+        if is_selecting and all_rows:
+            # Clamp selected index to valid bounds
+            self._selected_stats_index = max(0, min(self._selected_stats_index, total_rows - 1))
+
+            # Adjust scroll offset to keep selection visible
+            if self._selected_stats_index < self._stats_scroll_offset:
+                self._stats_scroll_offset = self._selected_stats_index
+            elif self._selected_stats_index >= self._stats_scroll_offset + max_visible:
+                self._stats_scroll_offset = self._selected_stats_index - max_visible + 1
+
+            # Clamp scroll offset
+            max_scroll = max(0, total_rows - max_visible)
+            self._stats_scroll_offset = max(0, min(self._stats_scroll_offset, max_scroll))
+        else:
+            self._stats_scroll_offset = 0
+
+        # Get visible slice
+        visible_rows = all_rows[self._stats_scroll_offset : self._stats_scroll_offset + max_visible]
+
+        for visible_idx, (rule_display, threads_display, stats) in enumerate(visible_rows):
+            actual_idx = self._stats_scroll_offset + visible_idx
+            rule_style = "cyan"
+
+            # Highlight selected row
+            if is_selecting and actual_idx == self._selected_stats_index:
+                rule_style = "bold cyan on dark_blue"
+
             table.add_row(
-                rule_display,
+                Text(rule_display, style=rule_style) if rule_display else Text(""),
                 threads_display,
                 str(stats.count),
                 format_duration(stats.mean_duration),
                 format_duration(stats.std_dev) if stats.std_dev > 0 else "-",
             )
 
+        # Build title with scroll indicator
         title = "Rule Statistics (Historical)"
-        if is_sorting:
-            title += " [bold cyan]◀ sorting[/bold cyan]"
-        border = f"bold {FG_BLUE}" if is_sorting else FG_BLUE
+        if is_selecting and total_rows > max_visible:
+            start = self._stats_scroll_offset + 1
+            end = min(self._stats_scroll_offset + max_visible, total_rows)
+            title = f"Rule Statistics ({start}-{end} of {total_rows})"
+        title += title_suffix
+
         return Panel(table, title=title, border_style=border, padding=0)
 
     def _make_footer(self) -> Panel:
@@ -2800,8 +2944,9 @@ class WorkflowMonitorTUI:
             if has_incomplete:
                 layout["incomplete"].update(self._make_incomplete_jobs_panel(progress))
 
-            # Show log panel when in job selection mode, otherwise show pending jobs
-            if self._job_selection_mode:
+            # Show log panel only when viewing a job's log (not just navigating tables)
+            # Log viewing is only available for running/completions tables
+            if self._log_viewing_mode and self._log_source in ("running", "completions"):
                 layout["pending"].update(self._make_job_log_panel(progress))
             else:
                 layout["pending"].update(self._make_pending_jobs_panel(progress))
