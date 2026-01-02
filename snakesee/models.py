@@ -689,7 +689,7 @@ class WorkflowProgress:
         """
         if self.total_jobs == 0:
             return 0.0
-        return (self.completed_jobs / self.total_jobs) * 100
+        return min(100.0, (self.completed_jobs / self.total_jobs) * 100)
 
     @property
     def elapsed_seconds(self) -> float | None:

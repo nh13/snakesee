@@ -64,6 +64,60 @@ FG_GREEN = "#38b44a"
 FG_LOGO_PATH = Path(__file__).parent.parent / "assets" / "logo.png"
 
 
+def _is_event_file_current(event_file: Path, log_start_time: float | None) -> bool:
+    """Check if the event file belongs to the current workflow run.
+
+    The events file should contain a workflow_started event with a timestamp
+    that matches the current log file's timeframe. If the events file is
+    stale (from a previous run), it should be ignored.
+
+    Args:
+        event_file: Path to the events file.
+        log_start_time: Start time of the current log file (first timestamp or ctime).
+
+    Returns:
+        True if the events file appears to be from the current workflow.
+    """
+    import orjson
+
+    if log_start_time is None:
+        # No log start time - can't validate, assume events are current
+        return True
+
+    try:
+        with open(event_file, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            if not first_line:
+                return False
+
+            data = orjson.loads(first_line)
+            if data.get("event_type") != "workflow_started":
+                # First event isn't workflow_started - stale file
+                logger.debug("Events file missing workflow_started as first event")
+                return False
+
+            event_timestamp = data.get("timestamp", 0)
+
+            # Events file is considered current if its workflow_started timestamp
+            # is within 60 seconds of the log start time (allowing for clock drift)
+            # or if it's newer than the log
+            time_diff = event_timestamp - log_start_time
+            if time_diff >= -60:  # Event is at or after log start (with 60s tolerance)
+                return True
+
+            logger.debug(
+                "Events file is stale: workflow_started at %.1f, log starts at %.1f (diff: %.1fs)",
+                event_timestamp,
+                log_start_time,
+                time_diff,
+            )
+            return False
+
+    except (OSError, orjson.JSONDecodeError, KeyError) as e:
+        logger.debug("Could not validate events file %s: %s", event_file, e)
+        return False
+
+
 class LayoutMode(Enum):
     """Available TUI layout modes."""
 
@@ -430,15 +484,39 @@ class WorkflowMonitorTUI:
             self._all_scheduled_jobs = {job.job_id: job for job in all_jobs if job.job_id}
 
     def _init_event_reader(self) -> None:
-        """Initialize the event reader if event file exists."""
+        """Initialize the event reader if event file exists and is current.
+
+        The events file is validated against the current log file's start time
+        to ensure we don't use stale events from a previous workflow run.
+        """
         if not self._events_enabled:
             return
 
         event_file = get_event_file_path(self.workflow_dir)
-        if event_file.exists():
+        if not event_file.exists():
+            self._event_reader = None
+            return
+
+        # Get the current log file's start time for validation
+        paths = WorkflowPaths(self.workflow_dir)
+        log_path = paths.find_latest_log()
+        log_start_time: float | None = None
+        if log_path is not None:
+            try:
+                log_start_time = log_path.stat().st_ctime
+            except OSError:
+                pass
+
+        # Validate the events file is for the current workflow run
+        if _is_event_file_current(event_file, log_start_time):
             self._event_reader = EventReader(event_file)
+            logger.debug("Events file is current, using for monitoring")
         else:
             self._event_reader = None
+            logger.info(
+                "Ignoring stale events file %s (from a previous workflow run)",
+                event_file,
+            )
 
     def _init_log_reader(self) -> None:
         """Initialize the incremental log reader.
@@ -509,11 +587,9 @@ class WorkflowMonitorTUI:
             List of new events, or empty list if no events or event reading disabled.
         """
         if not self._events_enabled or self._event_reader is None:
-            # Try to initialize if event file now exists
+            # Try to initialize if event file now exists (with validation)
             if self._events_enabled and self._event_reader is None:
-                event_file = get_event_file_path(self.workflow_dir)
-                if event_file.exists():
-                    self._event_reader = EventReader(event_file)
+                self._init_event_reader()
 
             if self._event_reader is None:
                 return []
