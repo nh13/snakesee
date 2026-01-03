@@ -882,8 +882,10 @@ class WorkflowMonitorTUI:
 
         # Fallback: if no pending jobs from events, compute from log-based scheduled jobs
         if not pending_jobs_list:
+            # Registry is the single source of truth (populated from events or log parsing)
+            all_completed = self._workflow_state.jobs.completed_job_infos()
             pending_jobs_list = self._compute_pending_jobs_from_scheduled(
-                new_running_jobs, new_completions, new_failed_list
+                new_running_jobs, all_completed, new_failed_list
             )
 
         # Return updated progress
@@ -902,43 +904,39 @@ class WorkflowMonitorTUI:
         )
 
     def _update_rule_stats_from_completions(self, progress: WorkflowProgress) -> None:
-        """Update rule_stats with newly completed jobs from recent_completions.
+        """Update rule_stats with newly completed jobs from registry.
 
         This handles log-parsed completions that don't go through the event path.
         Event-based completions are handled by _record_job_stats_from_event().
+        Uses registry (not recent_completions) to ensure all completed jobs get stats recorded.
         """
         if self._estimator is None:
             return
 
-        for job in progress.recent_completions:
-            # Get or create job in registry for deduplication tracking
-            registry_job = None
-            if job.job_id is not None:
-                registry_job = self._workflow_state.jobs.get(job.job_id)
-                if registry_job is None:
-                    # Create job in registry from JobInfo
-                    registry_job = self._workflow_state.jobs.apply_job_info(job, key=job.job_id)
-                if registry_job.stats_recorded:
-                    continue
+        # Use registry completed jobs (single source of truth) instead of recent_completions
+        # to ensure we don't miss any jobs
+        for registry_job in self._workflow_state.jobs.completed():
+            # Skip if already recorded (deduplication)
+            if registry_job.stats_recorded:
+                continue
 
             # Skip if we don't have a valid duration
-            duration = job.duration
+            duration = registry_job.duration
             if duration is None:
                 continue
 
             # Record stats to RuleRegistry
             self._workflow_state.rules.record_completion(
-                rule=job.rule,
+                rule=registry_job.rule,
                 duration=duration,
-                timestamp=job.end_time or 0.0,
-                threads=job.threads,
-                wildcards=dict(job.wildcards) if job.wildcards else None,
-                input_size=job.input_size,
+                timestamp=registry_job.end_time or 0.0,
+                threads=registry_job.threads,
+                wildcards=dict(registry_job.wildcards) if registry_job.wildcards else None,
+                input_size=registry_job.input_size,
             )
 
             # Mark as recorded for deduplication
-            if registry_job is not None:
-                registry_job.stats_recorded = True
+            registry_job.stats_recorded = True
 
     def _handle_easter_egg_key(self, key: str) -> bool | None:
         """Handle easter egg keys. Returns True/False if handled, None to continue."""
@@ -2194,13 +2192,16 @@ class WorkflowMonitorTUI:
         if not self._estimator:
             return None
 
+        # Registry is the single source of truth (populated from events or log parsing)
+        all_completed = self._workflow_state.jobs.completed_job_infos()
+
         # If we have expected job counts, we can infer pending even without completions
-        if not progress.recent_completions and not self._estimator.expected_job_counts:
+        if not all_completed and not self._estimator.expected_job_counts:
             return None
 
-        # Count completed jobs by rule
+        # Count completed jobs by rule (using ALL completed, not just recent)
         completed_by_rule: dict[str, int] = {}
-        for job in progress.recent_completions:
+        for job in all_completed:
             completed_by_rule[job.rule] = completed_by_rule.get(job.rule, 0) + 1
 
         # Count running jobs by rule
@@ -2994,6 +2995,14 @@ class WorkflowMonitorTUI:
             log_reader=reader,
         )
 
+        # Sync log reader's completed jobs to registry when events aren't available
+        # This ensures the registry is the single source of truth regardless of
+        # whether the snakesee logger plugin is being used
+        if not events and self._log_reader:
+            for job in self._log_reader.completed_jobs:
+                if job.job_id:
+                    self._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+
         # Validate: compare event-based state with parsed state (before applying)
         # This logs discrepancies to help find bugs in either approach
         if events:
@@ -3027,8 +3036,10 @@ class WorkflowMonitorTUI:
         if not progress.pending_jobs_list:
             from dataclasses import replace
 
+            # Registry is the single source of truth (populated from events or log parsing)
+            all_completed = self._workflow_state.jobs.completed_job_infos()
             pending_jobs_list = self._compute_pending_jobs_from_scheduled(
-                progress.running_jobs, progress.recent_completions, progress.failed_jobs_list
+                progress.running_jobs, all_completed, progress.failed_jobs_list
             )
             if pending_jobs_list:
                 progress = replace(progress, pending_jobs_list=pending_jobs_list)

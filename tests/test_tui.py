@@ -653,11 +653,10 @@ class TestRuleStatsUpdate:
     def test_update_stats_no_estimator(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
         """Test that no update happens without estimator."""
         tui_with_mocks._estimator = None
-        progress = make_workflow_progress(
-            recent_completions=[
-                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0),
-            ]
-        )
+        job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
+        # Add job to registry (function now reads from registry, not recent_completions)
+        tui_with_mocks._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+        progress = make_workflow_progress()
         # Should not raise
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
@@ -667,11 +666,10 @@ class TestRuleStatsUpdate:
         """Test stats update with job_id deduplication."""
         tui_with_mocks._estimator = mock_estimator
 
-        progress = make_workflow_progress(
-            recent_completions=[
-                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0),
-            ]
-        )
+        job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
+        # Add job to registry (function now reads from registry, not recent_completions)
+        tui_with_mocks._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+        progress = make_workflow_progress()
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
         # Should have added stats to RuleRegistry
@@ -686,13 +684,15 @@ class TestRuleStatsUpdate:
         tui_with_mocks._estimator = mock_estimator
 
         job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0)
-        progress = make_workflow_progress(recent_completions=[job])
+        # Add job to registry (function now reads from registry, not recent_completions)
+        tui_with_mocks._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+        progress = make_workflow_progress()
 
         # Call twice with same job
         tui_with_mocks._update_rule_stats_from_completions(progress)
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should only count once (deduplication via _rule_stats_job_ids)
+        # Should only count once (deduplication via stats_recorded flag)
         rule_stats = tui_with_mocks._workflow_state.rules.get("align")
         assert rule_stats is not None
         assert rule_stats.aggregate.count == 1
@@ -703,13 +703,10 @@ class TestRuleStatsUpdate:
         """Test that thread stats are updated when job has threads."""
         tui_with_mocks._estimator = mock_estimator
 
-        progress = make_workflow_progress(
-            recent_completions=[
-                make_job_info(
-                    rule="align", job_id="1", start_time=100.0, end_time=200.0, threads=4
-                ),
-            ]
-        )
+        job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=200.0, threads=4)
+        # Add job to registry (function now reads from registry, not recent_completions)
+        tui_with_mocks._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+        progress = make_workflow_progress()
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
         # Should have thread stats in RuleRegistry
@@ -724,14 +721,13 @@ class TestRuleStatsUpdate:
         tui_with_mocks._estimator = mock_estimator
 
         # Job with no end_time means no duration
-        progress = make_workflow_progress(
-            recent_completions=[
-                make_job_info(rule="align", job_id="1", start_time=100.0, end_time=None),
-            ]
-        )
+        job = make_job_info(rule="align", job_id="1", start_time=100.0, end_time=None)
+        # Add job to registry (function now reads from registry, not recent_completions)
+        tui_with_mocks._workflow_state.jobs.apply_job_info(job, key=job.job_id)
+        progress = make_workflow_progress()
         tui_with_mocks._update_rule_stats_from_completions(progress)
 
-        # Should not have added stats
+        # Should not have added stats (job has no duration)
         assert tui_with_mocks._workflow_state.rules.get("align") is None
 
 
