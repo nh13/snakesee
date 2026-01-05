@@ -398,6 +398,64 @@ rule align:
         assert len(running) == 1
         assert running[0].wildcards == {"sample": "A", "batch": "1"}
 
+    def test_failed_jobs_excluded_from_running(self, snakemake_dir: Path) -> None:
+        """Test that failed jobs are not included in running list.
+
+        This tests the fix for the bug where failed jobs were still
+        showing as running because only 'Finished job' was being tracked.
+        """
+        log_content = """
+[Mon Jan  4 16:34:21 2026]
+rule align:
+    jobid: 1
+    log: logs/align.log
+[Mon Jan  4 16:34:21 2026]
+rule sort:
+    jobid: 2
+    log: logs/sort.log
+[Mon Jan  4 16:34:23 2026]
+Error in rule align:
+    jobid: 1
+    log: logs/align.log (check log file(s) for error details)
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        running = parse_running_jobs_from_log(log_file)
+        # Job 1 failed, so only job 2 should be running
+        assert len(running) == 1
+        assert running[0].job_id == "2"
+        assert running[0].rule == "sort"
+
+    def test_failed_job_with_error_block_context(self, snakemake_dir: Path) -> None:
+        """Test that failed job is excluded even when error has different context.
+
+        Error block may have different rule context if multiple jobs started.
+        The jobid in the error block should still be used to exclude from running.
+        """
+        log_content = """
+[Mon Jan  4 16:34:21 2026]
+rule process:
+    jobid: 99
+    log: logs/process.log
+[Mon Jan  4 16:34:21 2026]
+rule finalize:
+    jobid: 100
+    log: logs/finalize.log
+[Mon Jan  4 16:34:23 2026]
+Error in rule process:
+    jobid: 99
+    log: logs/process.log (check log file(s) for error details)
+[Mon Jan  4 16:34:24 2026]
+Finished job 100.
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        running = parse_running_jobs_from_log(log_file)
+        # Job 99 failed, job 100 finished, so nothing should be running
+        assert len(running) == 0
+
 
 class TestParseFailedJobsFromLog:
     """Tests for parse_failed_jobs_from_log function."""
@@ -483,6 +541,85 @@ Error in rule align:
         log_file = snakemake_dir / "log" / "nonexistent.log"
         failed = parse_failed_jobs_from_log(log_file)
         assert len(failed) == 0
+
+    def test_error_block_captures_jobid_after_error_line(self, snakemake_dir: Path) -> None:
+        """Test that jobid in error block (after Error in rule) is captured.
+
+        This tests the fix for the bug where jobid was not captured because
+        it appears AFTER 'Error in rule X:' in the error block.
+        """
+        log_content = """
+[Mon Jan  4 16:34:21 2026]
+rule align:
+    input: data/sample.fastq
+    output: results/aligned.bam
+    log: logs/align.log
+    jobid: 99
+[Mon Jan  4 16:34:23 2026]
+Error in rule align:
+    jobid: 99
+    input: data/sample.fastq
+    output: results/aligned.bam
+    log: logs/align.log (check log file(s) for error details)
+    shell: samtools view
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "align"
+        assert failed[0].job_id == "99"
+        # Log should be captured from error block
+        assert failed[0].log_file is not None
+        assert str(failed[0].log_file) == "logs/align.log"
+
+    def test_error_block_strips_check_log_suffix(self, snakemake_dir: Path) -> None:
+        """Test that '(check log file(s) for error details)' suffix is stripped."""
+        log_content = """
+[Mon Jan  4 16:34:23 2026]
+Error in rule process:
+    jobid: 42
+    log: logs/process.log (check log file(s) for error details)
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].log_file is not None
+        assert str(failed[0].log_file) == "logs/process.log"
+        assert "check log file" not in str(failed[0].log_file)
+
+    def test_error_block_with_different_rule_context(self, snakemake_dir: Path) -> None:
+        """Test error block when error rule differs from current context.
+
+        This tests when the error occurs for a rule that's not the most recently
+        parsed rule block (e.g., when multiple jobs run in parallel).
+        """
+        log_content = """
+[Mon Jan  4 16:34:21 2026]
+rule align:
+    jobid: 99
+    log: logs/align.log
+[Mon Jan  4 16:34:21 2026]
+rule sort:
+    jobid: 100
+    log: logs/sort.log
+[Mon Jan  4 16:34:23 2026]
+Error in rule align:
+    jobid: 99
+    log: logs/align.log (check log file(s) for error details)
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "align"
+        assert failed[0].job_id == "99"
+        assert failed[0].log_file is not None
+        assert str(failed[0].log_file) == "logs/align.log"
 
 
 class TestParseWorkflowState:
@@ -1774,10 +1911,11 @@ class TestParserPropertyBased:
 
         parser = LogLineParser()
         line = f"{completed} of {total} steps (50%) done"
-        event = parser.parse_line(line)
+        events = parser.parse_line(line)
 
         # Should parse progress
-        assert event is not None
+        assert len(events) == 1
+        event = events[0]
         assert event.event_type == ParseEventType.PROGRESS
         assert event.data["completed"] == completed
         assert event.data["total"] == total
@@ -1790,8 +1928,9 @@ class TestParserPropertyBased:
         parser = LogLineParser()
         # Should not crash on any input
         result = parser.parse_line(line)
-        # Result is either None or a valid ParseEvent
-        assert result is None or hasattr(result, "event_type")
+        # Result is a list of ParseEvents (may be empty)
+        assert isinstance(result, list)
+        assert all(hasattr(e, "event_type") for e in result)
 
     @given(line=st.text(max_size=1000))
     def test_log_line_parsing_stability(self, line: str) -> None:
@@ -1875,6 +2014,105 @@ class TestParserPropertyBased:
             assert jobs[0].rule == rule
             assert jobs[0].start_time == starttime
             assert jobs[0].end_time == endtime
+
+
+class TestLogLineParserErrorBlocks:
+    """Tests for LogLineParser deferred ERROR event handling."""
+
+    def test_error_block_defers_error_until_next_timestamp(self) -> None:
+        """Error events should be deferred until the error block ends."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+
+        # Parse error line - should NOT emit ERROR yet
+        events = parser.parse_line("Error in rule align:")
+        assert len(events) == 0  # No events yet
+
+        # Parse jobid in error block - still no ERROR
+        events = parser.parse_line("    jobid: 99")
+        assert all(e.event_type != ParseEventType.ERROR for e in events)
+
+        # Parse log in error block - still no ERROR
+        events = parser.parse_line("    log: logs/align.log")
+        assert all(e.event_type != ParseEventType.ERROR for e in events)
+
+        # Parse next timestamp - should flush pending ERROR
+        events = parser.parse_line("[Mon Jan  4 16:34:23 2026]")
+        error_events = [e for e in events if e.event_type == ParseEventType.ERROR]
+        assert len(error_events) == 1
+        assert error_events[0].data["rule"] == "align"
+        assert error_events[0].data["jobid"] == "99"
+        assert error_events[0].data["log_path"] == "logs/align.log"
+
+    def test_error_block_defers_error_until_next_rule(self) -> None:
+        """Error events should be deferred until next rule block."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+
+        # Parse error line
+        parser.parse_line("Error in rule process:")
+        parser.parse_line("    jobid: 42")
+        parser.parse_line("    log: logs/process.log (check log file(s) for error details)")
+
+        # Next rule should flush the error
+        events = parser.parse_line("rule next_rule:")
+        error_events = [e for e in events if e.event_type == ParseEventType.ERROR]
+        assert len(error_events) == 1
+        assert error_events[0].data["rule"] == "process"
+        assert error_events[0].data["jobid"] == "42"
+        # Should strip "(check log file(s) for error details)" suffix
+        assert error_events[0].data["log_path"] == "logs/process.log"
+
+    def test_flush_pending_error_at_end(self) -> None:
+        """Pending error should be flushable at end of file."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+
+        # Parse error block
+        parser.parse_line("Error in rule final:")
+        parser.parse_line("    jobid: 123")
+
+        # Flush should emit the error
+        error = parser.flush_pending_error()
+        assert error is not None
+        assert error.event_type == ParseEventType.ERROR
+        assert error.data["rule"] == "final"
+        assert error.data["jobid"] == "123"
+
+        # Second flush should return None
+        assert parser.flush_pending_error() is None
+
+    def test_consecutive_errors_each_emitted(self) -> None:
+        """Multiple consecutive errors should each be emitted."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+
+        # First error
+        parser.parse_line("Error in rule first:")
+        parser.parse_line("    jobid: 1")
+
+        # Second error should flush first
+        events = parser.parse_line("Error in rule second:")
+        error_events = [e for e in events if e.event_type == ParseEventType.ERROR]
+        assert len(error_events) == 1
+        assert error_events[0].data["rule"] == "first"
+        assert error_events[0].data["jobid"] == "1"
+
+        parser.parse_line("    jobid: 2")
+
+        # Flush second error
+        error = parser.flush_pending_error()
+        assert error is not None
+        assert error.data["rule"] == "second"
+        assert error.data["jobid"] == "2"
 
 
 class TestParseAllJobsFromLog:

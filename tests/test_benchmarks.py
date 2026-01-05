@@ -296,7 +296,7 @@ class TestLineParserBenchmarks:
             parser = LogLineParser()
             count = 0
             for line in sample_log_lines:
-                if parser.parse_line(line) is not None:
+                if parser.parse_line(line):  # non-empty list
                     count += 1
             return count
 
@@ -320,7 +320,7 @@ class TestLineParserBenchmarks:
             parser = LogLineParser()
             count = 0
             for line in nonmatching_lines:
-                if parser.parse_line(line) is None:
+                if not parser.parse_line(line):  # empty list
                     count += 1
             return count
 
@@ -343,7 +343,7 @@ class TestLineParserBenchmarks:
             parser = LogLineParser()
             count = 0
             for line in indented_lines:
-                if parser.parse_line(line) is not None:
+                if parser.parse_line(line):  # non-empty list
                     count += 1
             return count
 

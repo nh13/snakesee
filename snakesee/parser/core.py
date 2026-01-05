@@ -274,7 +274,7 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
     return rule_counts
 
 
-def parse_running_jobs_from_log(
+def parse_running_jobs_from_log(  # noqa: C901
     log_path: Path,
     *,
     _cached_lines: list[str] | None = None,
@@ -282,7 +282,7 @@ def parse_running_jobs_from_log(
     """
     Parse currently running jobs by analyzing the log file.
 
-    Tracks jobs that have started (rule + jobid) but not yet finished.
+    Tracks jobs that have started (rule + jobid) but not yet finished or failed.
 
     Args:
         log_path: Path to the snakemake log file.
@@ -296,6 +296,7 @@ def parse_running_jobs_from_log(
     # Job logs: jobid -> log_path (separate lookup by unique jobid)
     job_logs: dict[str, str] = {}
     finished_jobids: set[str] = set()
+    failed_jobids: set[str] = set()
 
     current_rule: str | None = None
     current_jobid: str | None = None
@@ -303,16 +304,33 @@ def parse_running_jobs_from_log(
     current_threads: int | None = None
     current_log_path: str | None = None
 
+    # Track pending error to capture jobid from error block
+    pending_error_rule: str | None = None
+    error_jobid: str | None = None
+
+    def record_pending_error() -> None:
+        """Record the failed jobid from a pending error block."""
+        nonlocal pending_error_rule, error_jobid
+        if pending_error_rule is not None and error_jobid is not None:
+            failed_jobids.add(error_jobid)
+        pending_error_rule = None
+        error_jobid = None
+
     try:
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line_num, line in enumerate(lines):
             # Track current rule being executed
             if match := RULE_START_PATTERN.match(line):
+                record_pending_error()
                 current_rule = match.group(1)
                 current_jobid = None  # Reset jobid for new rule block
                 current_wildcards = None
                 current_threads = None
                 current_log_path = None
+
+            # Timestamp lines end error blocks
+            elif line.startswith("[") and TIMESTAMP_PATTERN.match(line):
+                record_pending_error()
 
             # Capture wildcards within rule block
             elif match := WILDCARDS_PATTERN.match(line):
@@ -332,11 +350,12 @@ def parse_running_jobs_from_log(
                 if current_jobid:
                     job_logs[current_jobid] = current_log_path
 
-            # Capture jobid within rule block
+            # Capture jobid within rule block or error block
             elif match := JOBID_PATTERN.match(line):
-                current_jobid = match.group(1)
-                if current_rule is not None and current_jobid not in started_jobs:
-                    started_jobs[current_jobid] = (
+                jobid = match.group(1)
+                current_jobid = jobid
+                if current_rule is not None and jobid not in started_jobs:
+                    started_jobs[jobid] = (
                         current_rule,
                         line_num,
                         current_wildcards,
@@ -344,17 +363,33 @@ def parse_running_jobs_from_log(
                     )
                 # Store log by jobid if we already captured it
                 if current_log_path:
-                    job_logs[current_jobid] = current_log_path
+                    job_logs[jobid] = current_log_path
+                # If we're in an error block, capture this jobid as failed
+                if pending_error_rule is not None:
+                    error_jobid = jobid
 
             # Track finished jobs
             elif match := FINISHED_JOB_PATTERN.search(line):
                 finished_jobids.add(match.group(1))
 
+            # Track error blocks to capture failed jobids
+            elif match := ERROR_IN_RULE_PATTERN.search(line):
+                record_pending_error()
+                pending_error_rule = match.group(1)
+                # Initialize error_jobid from context if rule matches
+                if current_rule == pending_error_rule:
+                    error_jobid = current_jobid
+                else:
+                    error_jobid = None
+
+        # Record any final pending error
+        record_pending_error()
+
     except OSError as e:
         logger.info("Could not read log file %s: %s", log_path, e)
         return []
 
-    # Jobs that started but haven't finished are running
+    # Jobs that started but haven't finished or failed are running
     running: list[JobInfo] = []
     # Use try/except to avoid TOCTOU race between exists() and stat()
     log_mtime: float | None = None
@@ -363,8 +398,9 @@ def parse_running_jobs_from_log(
     except OSError:
         pass
 
+    excluded_jobids = finished_jobids | failed_jobids
     for jobid, (rule, _line_num, wildcards, threads) in started_jobs.items():
-        if jobid not in finished_jobids:
+        if jobid not in excluded_jobids:
             # Look up log by jobid - unique within this run
             job_log = job_logs.get(jobid)
             running.append(
@@ -381,7 +417,7 @@ def parse_running_jobs_from_log(
     return running
 
 
-def parse_failed_jobs_from_log(
+def parse_failed_jobs_from_log(  # noqa: C901
     log_path: Path,
     *,
     _cached_lines: list[str] | None = None,
@@ -411,60 +447,115 @@ def parse_failed_jobs_from_log(
     # Job logs: jobid -> log_path (separate lookup by unique jobid)
     job_logs: dict[str, str] = {}
 
+    # Track pending error - we defer emission until the error block is fully parsed
+    # because jobid and log come AFTER "Error in rule X:" in the error block
+    pending_error_rule: str | None = None
+    error_jobid: str | None = None
+    error_wildcards: dict[str, str] | None = None
+    error_threads: int | None = None
+    error_log_path: str | None = None
+
+    def emit_pending_error() -> None:
+        """Emit the pending error if we have one."""
+        nonlocal pending_error_rule, error_jobid, error_wildcards, error_threads, error_log_path
+        if pending_error_rule is not None:
+            # Look up log by jobid if not captured directly in error block
+            job_log = error_log_path or (job_logs.get(error_jobid) if error_jobid else None)
+            key = (pending_error_rule, error_jobid)
+            if key not in seen_failures:
+                seen_failures.add(key)
+                failed_jobs.append(
+                    JobInfo(
+                        rule=pending_error_rule,
+                        job_id=error_jobid,
+                        wildcards=error_wildcards,
+                        threads=error_threads,
+                        log_file=Path(job_log) if job_log else None,
+                    )
+                )
+            # Reset pending error state
+            pending_error_rule = None
+            error_jobid = None
+            error_wildcards = None
+            error_threads = None
+            error_log_path = None
+
     try:
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
-            # Track current rule
+            # Track current rule - this also ends any pending error block
             if match := RULE_START_PATTERN.match(line):
+                emit_pending_error()
                 current_rule = match.group(1)
                 current_jobid = None
                 current_wildcards = None
                 current_threads = None
                 current_log_path = None
 
-            # Capture wildcards
+            # Timestamp lines end error blocks
+            elif line.startswith("[") and TIMESTAMP_PATTERN.match(line):
+                emit_pending_error()
+
+            # Capture wildcards - applies to both rule blocks and error blocks
             elif match := WILDCARDS_PATTERN.match(line):
-                current_wildcards = _parse_wildcards(match.group(1))
+                wildcards = _parse_wildcards(match.group(1))
+                current_wildcards = wildcards
+                if pending_error_rule is not None:
+                    error_wildcards = wildcards
 
-            # Capture threads
+            # Capture threads - applies to both rule blocks and error blocks
             elif match := THREADS_PATTERN.match(line):
-                current_threads = int(match.group(1))
+                threads = int(match.group(1))
+                current_threads = threads
+                if pending_error_rule is not None:
+                    error_threads = threads
 
-            # Capture log path within rule block - store by jobid
+            # Capture log path - applies to both rule blocks and error blocks
             elif match := LOG_PATTERN.match(line):
-                current_log_path = match.group(1).strip()
+                # Strip "(check log file(s) for error details)" suffix from error blocks
+                log_value = match.group(1).strip()
+                if " (check log file" in log_value:
+                    log_value = log_value.split(" (check log file")[0].strip()
+                current_log_path = log_value
                 if current_jobid:
-                    job_logs[current_jobid] = current_log_path
+                    job_logs[current_jobid] = log_value
+                if pending_error_rule is not None:
+                    error_log_path = log_value
 
-            # Capture jobid
+            # Capture jobid - applies to both rule blocks and error blocks
             elif match := JOBID_PATTERN.match(line):
-                current_jobid = match.group(1)
+                jobid = match.group(1)
+                current_jobid = jobid
                 # Store log by jobid if we already captured it
                 if current_log_path:
-                    job_logs[current_jobid] = current_log_path
+                    job_logs[jobid] = current_log_path
+                if pending_error_rule is not None:
+                    error_jobid = jobid
 
-            # Detect errors
+            # Detect errors - start a new pending error block
             elif match := ERROR_IN_RULE_PATTERN.search(line):
+                # Emit any previous pending error first
+                emit_pending_error()
                 rule = match.group(1)
-                # Use context jobid/wildcards/threads/log if the error rule matches current context
-                jobid = current_jobid if current_rule == rule else None
-                wildcards = current_wildcards if current_rule == rule else None
-                threads = current_threads if current_rule == rule else None
-                # Look up log by jobid - unique within this run
-                job_log = job_logs.get(jobid) if jobid else None
-                key = (rule, jobid)
-
-                if key not in seen_failures:
-                    seen_failures.add(key)
-                    failed_jobs.append(
-                        JobInfo(
-                            rule=rule,
-                            job_id=jobid,
-                            wildcards=wildcards,
-                            threads=threads,
-                            log_file=Path(job_log) if job_log else None,
-                        )
+                # Start new pending error - we'll capture jobid/wildcards/threads/log
+                # from subsequent lines in the error block
+                pending_error_rule = rule
+                # Initialize with context from the rule block if the rule matches
+                if current_rule == rule:
+                    error_jobid = current_jobid
+                    error_wildcards = current_wildcards
+                    error_threads = current_threads
+                    error_log_path = current_log_path or (
+                        job_logs.get(current_jobid) if current_jobid else None
                     )
+                else:
+                    error_jobid = None
+                    error_wildcards = None
+                    error_threads = None
+                    error_log_path = None
+
+        # Emit any final pending error at end of file
+        emit_pending_error()
 
     except OSError as e:
         logger.info("Could not read log file %s: %s", log_path, e)

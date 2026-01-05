@@ -9,6 +9,7 @@ from snakesee.parser.failure_tracker import FailureTracker
 from snakesee.parser.file_position import LogFilePosition
 from snakesee.parser.job_tracker import JobLifecycleTracker
 from snakesee.parser.line_parser import LogLineParser
+from snakesee.parser.line_parser import ParseEvent
 from snakesee.parser.line_parser import ParseEventType
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,10 @@ class IncrementalLogReader:
                         lines_processed += 1
 
                     self._position.offset = f.tell()
+
+                    # Flush any pending error at end of file
+                    if pending := self._parser.flush_pending_error():
+                        self._process_event(pending)
             except FileNotFoundError:
                 pass
             except PermissionError as e:
@@ -133,10 +138,16 @@ class IncrementalLogReader:
         Args:
             line: Raw log line to process.
         """
-        event = self._parser.parse_line(line)
-        if event is None:
-            return
+        events = self._parser.parse_line(line)
+        for event in events:
+            self._process_event(event)
 
+    def _process_event(self, event: ParseEvent) -> None:
+        """Process a single parsed event and update state.
+
+        Args:
+            event: Parsed event to process.
+        """
         if event.event_type == ParseEventType.PROGRESS:
             completed = event.data["completed"]
             total = event.data["total"]

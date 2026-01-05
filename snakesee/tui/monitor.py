@@ -858,6 +858,10 @@ class WorkflowMonitorTUI:
                 new_failed_list.append(job)
         new_failed = len(new_failed_list)
 
+        # Filter running jobs to exclude failed jobs (a job can't be both running and failed)
+        failed_job_ids = {job.job_id for job in new_failed_list if job.job_id}
+        new_running_jobs = [job for job in new_running_jobs if job.job_id not in failed_job_ids]
+
         # Apply stored threads/wildcards to running jobs that may have lost them
         # (log-parsed jobs may not have threads if the line order varies)
         for i, job in enumerate(new_running_jobs):
