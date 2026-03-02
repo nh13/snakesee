@@ -2793,6 +2793,8 @@ class WorkflowMonitorTUI:
 
         footer.append(f"Updated: {now}", style="dim")
         footer.append("  │  ", style="dim")
+        footer.append("? help", style="bold cyan")
+        footer.append("  │  ", style="dim")
 
         # Show log position (e.g., "Log: 1/10" or "Log: 3/10 [historical]")
         total_logs = len(self._available_logs)
@@ -2834,9 +2836,6 @@ class WorkflowMonitorTUI:
         footer.append("snakesee", style=f"bold {FG_BLUE}")
         footer.append(" by ", style="dim")
         footer.append("Fulcrum Genomics", style=FG_BLUE)
-        footer.append("  │  ")
-        footer.append("?", style="bold")
-        footer.append("=help", style="dim")
 
         return Panel(footer, border_style=FG_BLUE, padding=(0, 1))
 
