@@ -234,23 +234,28 @@ class WorkflowRunner:
         return [d.to_dict() for d in discrepancies]
 
     def validate_events(
-        self, wait_for_total_jobs: bool = True, timeout: float = 3.0
+        self, wait_for_total_jobs: bool = True, timeout: float = 5.0
     ) -> "EventValidationResult":
         """Validate that events were generated correctly.
 
         This validates the event stream itself, not comparison with parser.
         Returns information about the events captured.
 
+        Polls the event file until all expected job events have arrived (i.e.
+        ``job_count >= total_jobs``), or until ``timeout`` elapses.  This
+        avoids flaky assertions caused by event-file writes still being
+        flushed to disk after Snakemake exits.
+
         Args:
             wait_for_total_jobs: If True, retry reading events until total_jobs > 0
                 or timeout is reached. This helps with CI timing issues where
                 progress events may not be flushed immediately.
-            timeout: Maximum time to wait for total_jobs (default 3 seconds).
+            timeout: Maximum time to wait for events (default 5 seconds).
         """
         event_file = get_event_file_path(self.work_dir)
 
-        # Retry loop to wait for events to be fully flushed
-        # CI environments may need extra time for filesystem sync
+        # Retry loop to wait for events to be fully flushed.
+        # CI environments may need extra time for filesystem sync.
         start_time = time.time()
         events: list[SnakeseeEvent] = []
         accumulator = EventAccumulator()
@@ -267,7 +272,8 @@ class WorkflowRunner:
                 time.sleep(0.2)
                 continue
 
-            # Read all events
+            # Re-read *all* events each iteration so late-flushed writes are
+            # picked up.
             reader = EventReader(event_file)
             events = reader.read_new_events()
 
@@ -281,11 +287,15 @@ class WorkflowRunner:
             accumulator = EventAccumulator()
             accumulator.process_events(events)
 
-            # If we don't need to wait for total_jobs, or we have it, we're done
-            if not wait_for_total_jobs or accumulator.total_jobs > 0:
+            if not wait_for_total_jobs:
                 break
 
-            # Otherwise, wait a bit and retry (progress events may still be flushing)
+            # Once we know total_jobs, keep polling until all job events have
+            # arrived (job_count >= total_jobs).  This is the key fix for the
+            # race where PROGRESS events arrive before all JOB_* events.
+            if accumulator.total_jobs > 0 and len(accumulator.jobs) >= accumulator.total_jobs:
+                break
+
             if elapsed >= timeout:
                 # Timeout reached, return what we have
                 break
