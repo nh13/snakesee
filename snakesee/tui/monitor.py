@@ -1,9 +1,12 @@
 """Rich TUI for Snakemake workflow monitoring."""
 
+import heapq
+import itertools
 import logging
 import math
 import sys
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -1760,8 +1763,8 @@ class WorkflowMonitorTUI:
 
         filtered = [j for j in jobs if self._filter_text.lower() in j.rule.lower()]
 
-        # Update filter matches for n/N navigation
-        self._filter_matches = list({j.rule for j in filtered})
+        # Update filter matches for n/N navigation (preserve insertion order)
+        self._filter_matches = list(dict.fromkeys(j.rule for j in filtered))
 
         return filtered
 
@@ -2050,19 +2053,79 @@ class WorkflowMonitorTUI:
         border = "cyan" if is_selecting_running else (f"bold {FG_BLUE}" if is_sorting else FG_BLUE)
         return Panel(table, title=title, border_style=border, padding=0)
 
+    def _get_completions_sorted(
+        self,
+        progress: WorkflowProgress,
+        *,
+        limit: int | None = None,
+    ) -> tuple[list[JobInfo], set[int]]:
+        """Get merged, filtered, and sorted completions + failed jobs.
+
+        When limit is provided and no selection mode is active, uses heapq for
+        O(n * log(limit)) top-N selection instead of a full O(n * log(n)) sort.
+
+        Args:
+            progress: Current workflow progress.
+            limit: If set, return at most this many items using heap selection.
+                When None, returns the full sorted list.
+
+        Returns:
+            Tuple of (sorted jobs list, set of failed job ids).
+        """
+        failed_job_ids = {id(job) for job in progress.failed_jobs_list}
+
+        # Determine effective sort key and direction
+        is_sorting = self._sort_table == "completions"
+        if is_sorting:
+            sort_keys: dict[int, Any] = {
+                0: lambda j: j.rule.lower(),
+                1: lambda j: j.threads or 0,
+                2: lambda j: j.duration or 0,
+                3: lambda j: j.end_time or 0,
+            }
+            key_fn = sort_keys.get(self._sort_column, sort_keys[3])
+            descending = not self._sort_ascending
+        else:
+            key_fn = lambda j: j.end_time or 0  # noqa: E731
+            descending = True
+
+        # Stream completions + failures through filter into heap selection to
+        # avoid materializing the full merged list on the hot path.
+        merged: Iterable[JobInfo] = itertools.chain(
+            progress.recent_completions, progress.failed_jobs_list
+        )
+        filter_text = self._filter_text.lower() if self._filter_text else ""
+        if filter_text:
+            merged = (j for j in merged if filter_text in j.rule.lower())
+
+        # Use heap selection when we only need the top N items
+        if limit is not None:
+            if descending:
+                jobs = heapq.nlargest(limit, merged, key=key_fn)
+            else:
+                jobs = heapq.nsmallest(limit, merged, key=key_fn)
+        else:
+            jobs = sorted(merged, key=key_fn, reverse=descending)
+
+        # Update _filter_matches for n/N navigation (preserve insertion order)
+        if filter_text:
+            self._filter_matches = list(dict.fromkeys(j.rule for j in jobs))
+
+        return jobs, failed_job_ids
+
     def _make_completions_table(self, progress: WorkflowProgress) -> Panel:
         """Create the recent completions table."""
         is_sorting = self._sort_table == "completions"
         header_style = "bold green on dark_blue" if is_sorting else "bold green"
 
-        # Merge successful completions and failed jobs for a unified view
-        failed_job_ids = {id(job) for job in progress.failed_jobs_list}
-        all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
+        # Virtual scrolling for completions table
+        max_visible = 8
+        is_selecting = self._job_selection_mode and self._log_source == "completions"
 
-        # Sort by end_time (most recent first) by default
-        all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
+        # Use heap selection when only displaying top N (not scrolling)
+        limit = None if is_selecting else max_visible
+        jobs, failed_job_ids = self._get_completions_sorted(progress, limit=limit)
 
-        jobs = self._filter_jobs(all_jobs)
         id_col_width = self._get_job_id_column_width(jobs)
 
         table = Table(expand=True, show_header=True, header_style=header_style)
@@ -2072,21 +2135,6 @@ class WorkflowMonitorTUI:
         table.add_column(f"Thr{ind('completions', 1)}", justify="right")
         table.add_column(f"Duration{ind('completions', 2)}", justify="right")
         table.add_column(f"Completed{ind('completions', 3)}", justify="right")
-
-        # Sort if this table is active
-        if is_sorting and jobs:
-            sort_keys = {
-                0: lambda j: j.rule.lower(),
-                1: lambda j: j.threads or 0,
-                2: lambda j: j.duration or 0,
-                3: lambda j: j.end_time or 0,
-            }
-            key_fn = sort_keys.get(self._sort_column, sort_keys[3])
-            jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
-
-        # Virtual scrolling for completions table
-        max_visible = 8
-        is_selecting = self._job_selection_mode and self._log_source == "completions"
 
         if is_selecting and jobs:
             # Clamp selected index to valid bounds
@@ -2290,28 +2338,8 @@ class WorkflowMonitorTUI:
         Returns:
             Tuple of (jobs_list, failed_job_ids_set)
         """
-        failed_job_ids = {id(job) for job in progress.failed_jobs_list}
-        all_jobs = list(progress.recent_completions) + list(progress.failed_jobs_list)
-
-        # Sort by end_time (most recent first) by default - matches table
-        all_jobs.sort(key=lambda j: j.end_time or 0, reverse=True)
-
-        # Apply filtering - must match _make_completions_table
-        jobs = self._filter_jobs(all_jobs)
-
-        # Apply custom sorting if completions table is being sorted
-        is_sorting = self._sort_table == "completions"
-        if is_sorting and jobs:
-            sort_keys = {
-                0: lambda j: j.rule.lower(),
-                1: lambda j: j.threads or 0,
-                2: lambda j: j.duration or 0,
-                3: lambda j: j.end_time or 0,
-            }
-            key_fn = sort_keys.get(self._sort_column, sort_keys[3])
-            jobs = sorted(jobs, key=key_fn, reverse=not self._sort_ascending)
-
-        return jobs, failed_job_ids
+        # Always return the full sorted list (used for index-based selection)
+        return self._get_completions_sorted(progress)
 
     def _get_running_jobs_list(self, progress: WorkflowProgress) -> list[JobInfo]:
         """Get running jobs list with same order as table.
