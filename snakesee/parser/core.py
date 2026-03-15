@@ -1261,7 +1261,7 @@ def parse_workflow_state(
         failed_jobs_list=failed_list,
         incomplete_jobs_list=incomplete_list,
         running_jobs=running,
-        recent_completions=completions[:10],
+        recent_completions=completions,
         start_time=start_time,
         log_file=log_path,
     )
