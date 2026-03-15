@@ -268,6 +268,107 @@ class TestWorkflowMonitorTUI:
         panel = tui._make_completions_table(progress)
         assert panel.title == "Recent Completions"
 
+    def test_get_completions_sorted_uses_heap_for_limit(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that _get_completions_sorted with limit returns top-N by end_time."""
+        jobs = [
+            JobInfo(rule=f"rule_{i}", start_time=float(i), end_time=float(i * 10))
+            for i in range(20)
+        ]
+        progress = make_workflow_progress(recent_completions=jobs)
+
+        result, failed_ids = tui._get_completions_sorted(progress, limit=5)
+
+        assert len(result) == 5
+        assert len(failed_ids) == 0
+        # Default sort is by end_time descending — top 5 should be the last 5 jobs
+        expected_rules = [f"rule_{i}" for i in range(19, 14, -1)]
+        assert [j.rule for j in result] == expected_rules
+
+    def test_get_completions_sorted_full_list_without_limit(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that _get_completions_sorted without limit returns all jobs sorted."""
+        jobs = [
+            JobInfo(rule=f"rule_{i}", start_time=float(i), end_time=float(i * 10))
+            for i in range(20)
+        ]
+        progress = make_workflow_progress(recent_completions=jobs)
+
+        result, _ = tui._get_completions_sorted(progress)
+
+        assert len(result) == 20
+        # All jobs sorted by end_time descending
+        assert result[0].rule == "rule_19"
+        assert result[-1].rule == "rule_0"
+
+    def test_get_completions_sorted_custom_sort_column(self, tui: WorkflowMonitorTUI) -> None:
+        """Test heap selection with a custom sort column (rule name ascending)."""
+        jobs = [
+            JobInfo(rule="zebra", start_time=1.0, end_time=10.0),
+            JobInfo(rule="alpha", start_time=2.0, end_time=20.0),
+            JobInfo(rule="middle", start_time=3.0, end_time=30.0),
+        ]
+        progress = make_workflow_progress(recent_completions=jobs)
+
+        tui._sort_table = "completions"
+        tui._sort_column = 0  # rule name
+        tui._sort_ascending = True
+
+        result, _ = tui._get_completions_sorted(progress, limit=2)
+
+        assert len(result) == 2
+        assert result[0].rule == "alpha"
+        assert result[1].rule == "middle"
+
+    def test_get_completions_sorted_includes_failed_jobs(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that failed jobs are merged and their IDs tracked."""
+        completed = [JobInfo(rule="align", start_time=1.0, end_time=10.0)]
+        failed = [JobInfo(rule="sort", start_time=2.0, end_time=20.0)]
+        progress = make_workflow_progress(recent_completions=completed, failed_jobs_list=failed)
+
+        result, failed_ids = tui._get_completions_sorted(progress)
+
+        assert len(result) == 2
+        assert id(failed[0]) in failed_ids
+        assert id(completed[0]) not in failed_ids
+
+    def test_get_completions_sorted_with_filter(self, tui: WorkflowMonitorTUI) -> None:
+        """Test that filtering is applied before heap selection."""
+        jobs = [
+            JobInfo(rule="align_reads", start_time=1.0, end_time=10.0),
+            JobInfo(rule="sort_bam", start_time=2.0, end_time=20.0),
+            JobInfo(rule="align_index", start_time=3.0, end_time=30.0),
+        ]
+        progress = make_workflow_progress(recent_completions=jobs)
+
+        tui._filter_text = "align"
+        result, _ = tui._get_completions_sorted(progress, limit=5)
+
+        assert len(result) == 2
+        assert all("align" in j.rule for j in result)
+
+    def test_get_completions_sorted_empty(self, tui: WorkflowMonitorTUI) -> None:
+        """Test with no completions or failures."""
+        progress = make_workflow_progress()
+
+        result, failed_ids = tui._get_completions_sorted(progress, limit=8)
+
+        assert result == []
+        assert failed_ids == set()
+
+    def test_get_completions_sorted_fewer_than_limit(self, tui: WorkflowMonitorTUI) -> None:
+        """Test when there are fewer jobs than the limit."""
+        jobs = [
+            JobInfo(rule="align", start_time=1.0, end_time=10.0),
+            JobInfo(rule="sort", start_time=2.0, end_time=20.0),
+        ]
+        progress = make_workflow_progress(recent_completions=jobs)
+
+        result, _ = tui._get_completions_sorted(progress, limit=8)
+
+        # Falls back to full sort when len(jobs) <= limit
+        assert len(result) == 2
+        assert result[0].rule == "sort"  # end_time=20, descending
+        assert result[1].rule == "align"
+
     def test_make_failed_jobs_panel_empty(self, tui: WorkflowMonitorTUI) -> None:
         """Test failed jobs panel with no failures."""
         progress = WorkflowProgress(
