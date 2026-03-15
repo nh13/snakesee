@@ -1,5 +1,6 @@
 """Pytest fixtures for integration tests."""
 
+import logging
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from snakesee.events import get_event_file_path
 from snakesee.parser import parse_workflow_state
 from snakesee.validation import EventAccumulator
 from snakesee.validation import compare_states
+
+logger = logging.getLogger(__name__)
 
 # Path to the workflows directory
 WORKFLOWS_DIR = Path(__file__).parent / "workflows"
@@ -254,14 +257,32 @@ class WorkflowRunner:
         """
         event_file = get_event_file_path(self.work_dir)
 
+        # Log initial state for CI debugging (see GitHub issue #21)
+        file_exists = event_file.exists()
+        logger.warning(
+            "validate_events: work_dir=%s, event_file=%s, exists=%s",
+            self.work_dir,
+            event_file,
+            file_exists,
+        )
+        if file_exists:
+            stat = event_file.stat()
+            logger.warning(
+                "validate_events: file size=%d bytes, mtime=%.3f",
+                stat.st_size,
+                stat.st_mtime,
+            )
+
         # Retry loop to wait for events to be fully flushed.
         # CI environments may need extra time for filesystem sync.
         start_time = time.time()
         events: list[SnakeseeEvent] = []
         accumulator = EventAccumulator()
+        poll_count = 0
 
         while True:
             elapsed = time.time() - start_time
+            poll_count += 1
 
             if not event_file.exists():
                 if elapsed >= timeout:
@@ -279,7 +300,11 @@ class WorkflowRunner:
 
             if not events:
                 if elapsed >= timeout:
-                    raise RuntimeError("No events found in event file")
+                    file_size = event_file.stat().st_size if event_file.exists() else -1
+                    raise RuntimeError(
+                        f"No events found in event file after {timeout}s "
+                        f"({poll_count} polls, file size={file_size} bytes)"
+                    )
                 time.sleep(0.2)
                 continue
 
@@ -297,10 +322,35 @@ class WorkflowRunner:
                 break
 
             if elapsed >= timeout:
-                # Timeout reached, return what we have
+                # Timeout reached — log diagnostic details for CI debugging
+                event_types: dict[str, int] = {}
+                for e in events:
+                    event_types[e.event_type.value] = event_types.get(e.event_type.value, 0) + 1
+                file_size = event_file.stat().st_size if event_file.exists() else -1
+                logger.warning(
+                    "validate_events: timeout after %.1fs (%d polls). "
+                    "event_count=%d, file_size=%d, total_jobs=%d, "
+                    "job_count=%d, event_types=%s",
+                    elapsed,
+                    poll_count,
+                    len(events),
+                    file_size,
+                    accumulator.total_jobs,
+                    len(accumulator.jobs),
+                    event_types,
+                )
                 break
 
             time.sleep(0.2)
+
+        logger.warning(
+            "validate_events: done in %.3fs (%d polls), events=%d, total_jobs=%d, job_count=%d",
+            time.time() - start_time,
+            poll_count,
+            len(events),
+            accumulator.total_jobs,
+            len(accumulator.jobs),
+        )
 
         return EventValidationResult(
             events=events,
