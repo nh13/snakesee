@@ -266,12 +266,15 @@ class WorkflowRunner:
             file_exists,
         )
         if file_exists:
-            stat = event_file.stat()
-            logger.warning(
-                "validate_events: file size=%d bytes, mtime=%.3f",
-                stat.st_size,
-                stat.st_mtime,
-            )
+            try:
+                stat = event_file.stat()
+                logger.warning(
+                    "validate_events: file size=%d bytes, mtime=%.3f",
+                    stat.st_size,
+                    stat.st_mtime,
+                )
+            except FileNotFoundError:
+                pass
 
         # Retry loop to wait for events to be fully flushed.
         # CI environments may need extra time for filesystem sync.
@@ -300,7 +303,10 @@ class WorkflowRunner:
 
             if not events:
                 if elapsed >= timeout:
-                    file_size = event_file.stat().st_size if event_file.exists() else -1
+                    try:
+                        file_size = event_file.stat().st_size
+                    except FileNotFoundError:
+                        file_size = -1
                     raise RuntimeError(
                         f"No events found in event file after {timeout}s "
                         f"({poll_count} polls, file size={file_size} bytes)"
@@ -326,7 +332,10 @@ class WorkflowRunner:
                 event_types: dict[str, int] = {}
                 for e in events:
                     event_types[e.event_type.value] = event_types.get(e.event_type.value, 0) + 1
-                file_size = event_file.stat().st_size if event_file.exists() else -1
+                try:
+                    file_size = event_file.stat().st_size
+                except FileNotFoundError:
+                    file_size = -1
                 logger.warning(
                     "validate_events: timeout after %.1fs (%d polls). "
                     "event_count=%d, file_size=%d, total_jobs=%d, "
