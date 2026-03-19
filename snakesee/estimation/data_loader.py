@@ -119,16 +119,19 @@ class HistoricalDataLoader:
                     timestamp = event.get("timestamp")
                     rule_name = event.get("rule_name")
                     wildcards = event.get("wildcards")
+                    threads = event.get("threads")
 
                     if duration is None or timestamp is None or rule_name is None:
                         continue
 
                     wc_dict = wildcards if isinstance(wildcards, dict) else None
+                    threads_int = int(threads) if threads is not None else None
                     self._registry.record_completion(
                         rule=rule_name,
                         duration=duration,
                         timestamp=timestamp,
                         wildcards=wc_dict,
+                        threads=threads_int,
                     )
 
                     if wc_dict:

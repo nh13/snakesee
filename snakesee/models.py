@@ -626,6 +626,7 @@ class TimeEstimate:
     upper_bound: float
     confidence: float
     method: str
+    inferred_cores: float | None = None
 
     def format_eta(self) -> str:
         """
@@ -678,6 +679,7 @@ class WorkflowProgress:
     pending_jobs_list: list[JobInfo] = field(default_factory=list)
     start_time: float | None = None
     log_file: Path | None = None
+    max_observed_thread_sum: float = 0.0
 
     @property
     def percent_complete(self) -> float:

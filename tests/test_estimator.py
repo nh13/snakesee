@@ -640,49 +640,33 @@ class TestRuleRegistryIntegration:
 class TestEstimatorHelperMethods:
     """Tests for extracted helper methods in TimeEstimator."""
 
-    def test_estimate_parallelism_with_history(self) -> None:
-        """Test parallelism estimation from historical completion rate."""
-        from snakesee.state.rule_registry import RuleRegistry
+    def test_estimate_cores_from_max_observed(self) -> None:
+        """Test core estimation uses max_observed_thread_sum when available."""
+        estimator = TimeEstimator()
 
-        registry = RuleRegistry()
-        estimator = TimeEstimator(rule_registry=registry)
-
-        # Create progress with history: 10 jobs in 100 seconds = 0.1 jobs/sec
-        # With global mean of 60s, parallelism = 0.1 * 60 = 6 -> sqrt(6) ≈ 2.45
         import tempfile
 
-        tmp_dir = Path(tempfile.gettempdir())
         progress = WorkflowProgress(
-            workflow_dir=tmp_dir,
+            workflow_dir=Path(tempfile.gettempdir()),
             status=WorkflowStatus.RUNNING,
             total_jobs=20,
             completed_jobs=10,
             running_jobs=[],
-            start_time=0.0,
-        )
-        # Mock elapsed time
-        progress = WorkflowProgress(
-            workflow_dir=tmp_dir,
-            status=WorkflowStatus.RUNNING,
-            total_jobs=20,
-            completed_jobs=10,
-            running_jobs=[],
-            start_time=0.0,
+            max_observed_thread_sum=32.0,
         )
 
-        # Test with no elapsed time (fallback path)
-        parallelism = estimator._estimate_parallelism(progress, 60.0)
-        assert parallelism >= 1.0
+        cores = estimator._estimate_cores(progress)
+        assert cores == 32.0
 
-    def test_estimate_parallelism_fallback(self) -> None:
-        """Test parallelism fallback when no history available."""
+    def test_estimate_cores_fallback_to_running(self) -> None:
+        """Test core estimation falls back to sum of running job threads."""
         estimator = TimeEstimator()
 
         running = [
-            JobInfo(rule="align", job_id="1"),
-            JobInfo(rule="align", job_id="2"),
-            JobInfo(rule="align", job_id="3"),
-            JobInfo(rule="align", job_id="4"),
+            JobInfo(rule="align", job_id="1", threads=4),
+            JobInfo(rule="align", job_id="2", threads=4),
+            JobInfo(rule="align", job_id="3", threads=4),
+            JobInfo(rule="align", job_id="4", threads=4),
         ]
 
         import tempfile
@@ -695,9 +679,9 @@ class TestEstimatorHelperMethods:
             running_jobs=running,
         )
 
-        parallelism = estimator._estimate_parallelism(progress, 60.0)
-        # With 4 running jobs, fallback is min(4, sqrt(4)) = 2
-        assert parallelism == pytest.approx(2.0)
+        cores = estimator._estimate_cores(progress)
+        # 4 jobs * 4 threads = 16 cores
+        assert cores == 16.0
 
     def test_calculate_confidence_scores_empty(self) -> None:
         """Test confidence calculation with no data."""

@@ -574,6 +574,8 @@ class TimeEstimator:
         """
         Estimate when no jobs have completed yet.
 
+        Uses thread-seconds / inferred-cores model for parallelism adjustment.
+
         Args:
             progress: Current workflow progress.
 
@@ -581,11 +583,24 @@ class TimeEstimator:
             TimeEstimate with very low confidence.
         """
         global_mean = self.global_mean_duration()
-        estimate = global_mean * progress.total_jobs
+        default_threads = self.config.default_threads_per_job
 
-        # Adjust for parallelism if jobs are running
-        parallelism = max(1, len(progress.running_jobs))
-        estimate = estimate / math.sqrt(parallelism)
+        # Compute total thread-seconds: each pending job contributes
+        # expected_duration * typical_threads for that rule
+        total_thread_seconds = 0.0
+        for job in progress.pending_jobs_list:
+            typical = self._rule_registry.typical_threads(job.rule)
+            total_thread_seconds += global_mean * (job.threads or typical)
+        for job in progress.running_jobs:
+            typical = self._rule_registry.typical_threads(job.rule)
+            total_thread_seconds += global_mean * (job.threads or typical)
+
+        # If no per-job list, fall back to count * mean * default_threads
+        if total_thread_seconds == 0.0:
+            total_thread_seconds = global_mean * progress.total_jobs * default_threads
+
+        cores = self._estimate_cores(progress)
+        estimate = total_thread_seconds / cores
 
         return TimeEstimate(
             seconds_remaining=estimate,
@@ -593,6 +608,7 @@ class TimeEstimator:
             upper_bound=estimate * self.config.bootstrap_upper_multiplier,
             confidence=self.config.confidence_thresholds.bootstrap_confidence,
             method="bootstrap",
+            inferred_cores=cores,
         )
 
     def _estimate_simple(self, progress: WorkflowProgress) -> TimeEstimate:
@@ -634,31 +650,27 @@ class TimeEstimator:
             method="simple",
         )
 
-    def _estimate_parallelism(self, progress: WorkflowProgress, global_mean: float) -> float:
-        """Estimate effective parallelism from workflow progress.
+    def _estimate_cores(self, progress: WorkflowProgress) -> float:
+        """Estimate the number of available cores from workflow state.
 
-        Uses historical completion rate when available, otherwise falls back
-        to current running job count with conservative clamping.
+        Uses max_observed_thread_sum (peak sum of threads across running jobs)
+        when available, otherwise falls back to the current sum of running
+        job threads.
 
         Args:
             progress: Current workflow progress.
-            global_mean: Global mean job duration.
 
         Returns:
-            Estimated parallelism factor (>= 1.0).
+            Estimated core count (>= 1.0).
         """
-        elapsed = progress.elapsed_seconds
-        if elapsed and elapsed > 0 and progress.completed_jobs > 0:
-            # Infer historical parallelism from completion rate
-            historical_rate = progress.completed_jobs / elapsed
-            if historical_rate > 0:
-                avg_job_time = global_mean
-                historical_parallelism = historical_rate * avg_job_time
-                # Clamp to reasonable range and use sqrt for conservative adjustment
-                return max(1.0, min(8.0, math.sqrt(historical_parallelism)))
-            return 1.0
-        # Fall back to current running jobs but cap the effect
-        return max(1.0, min(4.0, math.sqrt(len(progress.running_jobs))))
+        if progress.max_observed_thread_sum > 0:
+            return progress.max_observed_thread_sum
+
+        # Fallback: sum threads of currently running jobs
+        if progress.running_jobs:
+            return max(1.0, sum(j.threads or 1 for j in progress.running_jobs))
+
+        return 1.0
 
     def _calculate_confidence_scores(
         self,
@@ -724,10 +736,10 @@ class TimeEstimator:
            point rather than the mean. This provides robustness to outliers
            (e.g., test files that are much smaller than production files).
 
-        3. **Parallelism Estimation**: We infer effective parallelism from the
-           historical completion rate rather than just counting running jobs.
-           This accounts for I/O-bound or memory-bound jobs that don't fully
-           utilize available cores.
+        3. **Thread-Aware Core Estimation**: Rather than using a naive sqrt(parallelism)
+           formula, we compute total thread-seconds for remaining work and divide by
+           the inferred number of available cores. Cores are estimated from the peak
+           observed sum of running job threads (approximating snakemake's -j value).
 
         4. **Confidence Scoring**: Confidence is a weighted combination of:
            - Sample size (more historical data = more confidence)
@@ -772,8 +784,8 @@ class TimeEstimator:
             rule_completed, pending, self.current_rules, running_by_rule
         )
 
-        # Calculate expected remaining time
-        total_expected = 0.0
+        # Calculate expected remaining thread-seconds and variance
+        total_thread_seconds = 0.0
         total_variance = 0.0
         global_mean = self.global_mean_duration()
 
@@ -791,8 +803,9 @@ class TimeEstimator:
                     input_size=job.input_size,
                     threads=job.threads,
                 )
-                total_expected += expected
-                total_variance += variance
+                threads = job.threads or self._rule_registry.typical_threads(job.rule)
+                total_thread_seconds += expected * threads
+                total_variance += variance * threads * threads
         else:
             # Fall back to rule-count-based estimation
             for rule, count in pending_rules.items():
@@ -809,8 +822,9 @@ class TimeEstimator:
                     rule_mean = global_mean
                     rule_var = (global_mean * self.config.variance.global_fallback) ** 2
 
-                total_expected += count * rule_mean
-                total_variance += count * rule_var
+                threads = self._rule_registry.typical_threads(rule)
+                total_thread_seconds += count * rule_mean * threads
+                total_variance += count * rule_var * threads * threads
 
         # Add time for running jobs - use wildcard-specific estimates when available
         for job in progress.running_jobs:
@@ -825,17 +839,17 @@ class TimeEstimator:
             # Use actual elapsed time if available
             elapsed = job.elapsed or 0.0
             remaining = max(0, expected - elapsed)
-            total_expected += remaining
-            total_variance += variance
+            threads = job.threads or self._rule_registry.typical_threads(job.rule)
+            total_thread_seconds += remaining * threads
+            total_variance += variance * threads * threads
 
-        # Estimate parallelism and apply adjustment
-        parallelism = self._estimate_parallelism(progress, global_mean)
-        effective_time = total_expected / parallelism
+        # Convert thread-seconds to wall-clock time using inferred cores
+        cores = self._estimate_cores(progress)
+        effective_time = total_thread_seconds / cores
 
-        # Calculate confidence bounds (variance also scales with parallelism)
+        # Calculate confidence bounds (variance scales with cores^2)
         fallback_std = effective_time * self.config.variance.rule_fallback
-        # When jobs run in parallel, both expected time and variance scale down
-        std_dev = (math.sqrt(total_variance) / parallelism) if total_variance > 0 else fallback_std
+        std_dev = (math.sqrt(total_variance) / cores) if total_variance > 0 else fallback_std
         lower = max(0, effective_time - 2 * std_dev)
         upper = effective_time + 2 * std_dev
 
@@ -858,6 +872,7 @@ class TimeEstimator:
             upper_bound=upper,
             confidence=confidence,
             method="weighted",
+            inferred_cores=cores,
         )
 
     def _infer_pending_rules(

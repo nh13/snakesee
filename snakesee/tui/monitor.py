@@ -249,6 +249,9 @@ class WorkflowMonitorTUI:
         # Cutoff time for historical view (updated in _poll_state)
         self._cutoff_time: float | None = None
 
+        # Track peak thread sum for thread-aware estimation
+        self._max_observed_thread_sum: float = 0.0
+
         # Job log viewer state (two nested modes)
         # Normal → [Enter] → Table Mode → [Enter] → Log Mode
         #                        ↑                      |
@@ -895,6 +898,10 @@ class WorkflowMonitorTUI:
                 new_running_jobs, all_completed, new_failed_list
             )
 
+        # Track peak thread sum for thread-aware estimation
+        current_thread_sum = sum(j.threads or 1 for j in new_running_jobs)
+        self._max_observed_thread_sum = max(self._max_observed_thread_sum, current_thread_sum)
+
         # Return updated progress
         return WorkflowProgress(
             workflow_dir=progress.workflow_dir,
@@ -908,6 +915,7 @@ class WorkflowMonitorTUI:
             pending_jobs_list=pending_jobs_list,
             start_time=progress.start_time,
             log_file=progress.log_file,
+            max_observed_thread_sum=self._max_observed_thread_sum,
         )
 
     def _update_rule_stats_from_completions(self, progress: WorkflowProgress) -> None:
@@ -1712,8 +1720,11 @@ class WorkflowMonitorTUI:
                 completion_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                 eta_parts.append(f"(completion: {completion_str})")
 
-            # Show estimation method for transparency
-            eta_parts.append(f"[dim][{estimate.method}][/dim]")
+            # Show estimation method and inferred cores for transparency
+            method_info = estimate.method
+            if estimate.inferred_cores is not None and estimate.inferred_cores > 1:
+                method_info += f" cores≈{estimate.inferred_cores:.0f}"
+            eta_parts.append(f"[dim][{method_info}][/dim]")
         elif not self.use_estimation:
             eta_parts.append("[dim]ETA: disabled[/dim]")
 
@@ -3077,6 +3088,16 @@ class WorkflowMonitorTUI:
 
         # Update rule_stats with newly completed jobs (for Rule Statistics panel)
         self._update_rule_stats_from_completions(progress)
+
+        # Update peak thread sum for thread-aware estimation (also covers no-event path)
+        current_thread_sum = sum(j.threads or 1 for j in progress.running_jobs)
+        self._max_observed_thread_sum = max(self._max_observed_thread_sum, current_thread_sum)
+        if progress.max_observed_thread_sum < self._max_observed_thread_sum:
+            from dataclasses import replace
+
+            progress = replace(
+                progress, max_observed_thread_sum=self._max_observed_thread_sum
+            )
 
         estimate = None
         if self._estimator is not None:
