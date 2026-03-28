@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from snakesee.constants import STALE_WORKFLOW_THRESHOLD_SECONDS
 from snakesee.models import JobInfo
@@ -33,6 +34,9 @@ from snakesee.parser.patterns import RULE_START_PATTERN
 from snakesee.parser.patterns import THREADS_PATTERN
 from snakesee.parser.patterns import TIMESTAMP_PATTERN
 from snakesee.parser.patterns import WILDCARDS_PATTERN
+
+if TYPE_CHECKING:
+    from snakesee.persistence.backend import PersistenceBackend
 from snakesee.parser.stats import collect_rule_timing_stats
 from snakesee.parser.stats import collect_wildcard_timing_stats
 from snakesee.parser.utils import _parse_non_negative_int
@@ -879,6 +883,7 @@ def parse_all_jobs_from_log(
 def is_workflow_running(
     snakemake_dir: Path,
     stale_threshold: float = STALE_WORKFLOW_THRESHOLD_SECONDS,
+    backend: PersistenceBackend | None = None,
 ) -> bool:
     """
     Check if a workflow is currently running.
@@ -896,6 +901,8 @@ def is_workflow_running(
         snakemake_dir: Path to the .snakemake directory.
         stale_threshold: Seconds since last log modification before considering
             the workflow stale/dead. Default 1800 seconds (30 minutes).
+        backend: Optional persistence backend. If provided, uses it for
+            lock and incomplete checks instead of filesystem.
 
     Returns:
         True if workflow appears to be actively running, False otherwise.
@@ -903,6 +910,29 @@ def is_workflow_running(
     from snakesee.state.clock import get_clock
     from snakesee.state.paths import WorkflowPaths
 
+    # Use backend for lock/incomplete checks if provided
+    if backend is not None:
+        has_locks = backend.has_locks()
+        if not has_locks:
+            return False
+
+        if backend.has_incomplete_jobs():
+            return True
+
+        # Fall back to log freshness check
+        paths = WorkflowPaths(snakemake_dir.parent)
+        log_file = paths.find_latest_log()
+        if log_file is None:
+            return True
+
+        try:
+            log_mtime = log_file.stat().st_mtime
+            age = get_clock().now() - log_mtime
+            return age < stale_threshold
+        except OSError:
+            return True
+
+    # Original filesystem-based logic (unchanged below)
     locks_dir = snakemake_dir / "locks"
     if not locks_dir.exists():
         return False
@@ -1152,6 +1182,12 @@ def parse_workflow_state(
     from snakesee.state.paths import WorkflowPaths
 
     paths = WorkflowPaths(workflow_dir)
+
+    # Auto-detect persistence backend (SQLite DB or filesystem)
+    from snakesee.persistence import detect_backend
+
+    backend = detect_backend(workflow_dir)
+
     snakemake_dir = paths.snakemake_dir
 
     # Use specified log file or find latest
@@ -1160,7 +1196,7 @@ def parse_workflow_state(
     is_latest_log = log_file is None or log_file == latest_log
 
     # Determine status from lock files (only relevant for latest log)
-    workflow_is_running = is_latest_log and is_workflow_running(snakemake_dir)
+    workflow_is_running = is_latest_log and is_workflow_running(snakemake_dir, backend=backend)
     if workflow_is_running:
         status = WorkflowStatus.RUNNING
     else:
@@ -1228,13 +1264,18 @@ def parse_workflow_state(
             running = parse_running_jobs_from_log(log_path, _cached_lines=cached_lines)
             failed_list = parse_failed_jobs_from_log(log_path, _cached_lines=cached_lines)
 
-    # Check for incomplete markers (jobs that were in progress when workflow was interrupted)
-    incomplete_dir = snakemake_dir / "incomplete"
-    incomplete_list = (
-        list(parse_incomplete_jobs(incomplete_dir, min_start_time=start_time))
-        if is_latest_log
-        else []
-    )
+    # Check for incomplete jobs (from DB or filesystem markers)
+    if is_latest_log:
+        incomplete_list = [
+            JobInfo(
+                rule=ij.rule or "unknown",
+                start_time=ij.start_time,
+                output_file=ij.output_file,
+            )
+            for ij in backend.iterate_incomplete_jobs(min_start_time=start_time)
+        ]
+    else:
+        incomplete_list = []
 
     # Reconcile running, failed, and incomplete job lists
     running, incomplete_list = _reconcile_job_lists(

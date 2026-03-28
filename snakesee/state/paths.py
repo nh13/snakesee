@@ -62,6 +62,7 @@ LOCKS_DIR = "locks"
 LOG_GLOB_PATTERN = "*.snakemake.log"
 EVENT_FILE_NAME = ".snakesee_events.jsonl"
 VALIDATION_LOG_NAME = ".snakesee_validation.log"
+METADATA_DB_NAME = "metadata.db"
 DEFAULT_PROFILE_NAME = ".snakesee-profile.json"
 
 
@@ -119,6 +120,11 @@ class WorkflowPaths:
         """Path to .snakemake/locks/ directory."""
         return self.snakemake_dir / LOCKS_DIR
 
+    @property
+    def metadata_db(self) -> Path:
+        """Path to Snakemake's SQLite metadata database."""
+        return self.snakemake_dir / METADATA_DB_NAME
+
     # =========================================================================
     # Event and validation file paths
     # =========================================================================
@@ -151,6 +157,11 @@ class WorkflowPaths:
     def has_metadata(self) -> bool:
         """Check if metadata directory exists."""
         return _cached_exists(self.metadata_dir)
+
+    @property
+    def has_metadata_db(self) -> bool:
+        """Whether a SQLite metadata database exists."""
+        return _cached_exists(self.metadata_db)
 
     @property
     def has_logs(self) -> bool:

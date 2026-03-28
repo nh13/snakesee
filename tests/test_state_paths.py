@@ -442,6 +442,34 @@ class TestProfileDiscovery:
         assert result == profile
 
 
+class TestWorkflowPathsDb:
+    """Tests for SQLite DB path properties."""
+
+    def test_metadata_db_path(self, tmp_path: Path) -> None:
+        """Test metadata_db returns correct path."""
+        paths = WorkflowPaths(tmp_path)
+        assert paths.metadata_db == tmp_path / ".snakemake" / "metadata.db"
+
+    def test_has_metadata_db_false_when_missing(self, tmp_path: Path) -> None:
+        """Test has_metadata_db is False when file doesn't exist."""
+        from snakesee.state.paths import clear_exists_cache
+
+        clear_exists_cache()
+        paths = WorkflowPaths(tmp_path)
+        assert paths.has_metadata_db is False
+
+    def test_has_metadata_db_true_when_exists(self, tmp_path: Path) -> None:
+        """Test has_metadata_db is True when file exists."""
+        from snakesee.state.paths import clear_exists_cache
+
+        clear_exists_cache()
+        smk_dir = tmp_path / ".snakemake"
+        smk_dir.mkdir()
+        (smk_dir / "metadata.db").touch()
+        paths = WorkflowPaths(tmp_path)
+        assert paths.has_metadata_db is True
+
+
 class TestExistsCache:
     """Tests for the exists cache functions."""
 

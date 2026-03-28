@@ -362,11 +362,13 @@ class WorkflowMonitorTUI:
         )
 
         metadata_dir = self.workflow_dir / ".snakemake" / "metadata"
-        has_metadata = metadata_dir.exists()
+        has_metadata_fs = metadata_dir.exists()
         has_profile = self.profile_path is not None and self.profile_path.exists()
 
         # Check if there's anything to load (worth showing progress)
         paths = WorkflowPaths(self.workflow_dir)
+        has_metadata_db = paths.has_metadata_db
+        has_metadata = has_metadata_fs or has_metadata_db
         log_paths = paths.find_all_logs()
 
         # Skip progress display if nothing to load
@@ -394,19 +396,28 @@ class WorkflowMonitorTUI:
                     logger.debug("Failed to load profile %s: %s", self.profile_path, e)
                 progress.update(task, completed=1)
 
-            # Load metadata (single-pass for efficiency)
+            # Load metadata via persistence backend (supports both FS and DB)
+            from snakesee.persistence import detect_backend
+
+            backend = detect_backend(self.workflow_dir)
+
             if has_metadata:
-                metadata_files = list(metadata_dir.rglob("*"))
-                metadata_files = [f for f in metadata_files if f.is_file()]
-                file_count = len(metadata_files)
+                # Determine progress bar total from FS file count (DB has no cheap count)
+                if has_metadata_fs and not has_metadata_db:
+                    metadata_files = list(metadata_dir.rglob("*"))
+                    metadata_files = [f for f in metadata_files if f.is_file()]
+                    file_count = len(metadata_files)
+                else:
+                    file_count = 0
 
-                if file_count > 0:
-                    task = progress.add_task("Loading metadata...", total=file_count)
+                task = progress.add_task(
+                    "Loading metadata...", total=file_count if file_count > 0 else None
+                )
 
-                    def metadata_cb(current: int, _total: int) -> None:
-                        progress.update(task, completed=current)
+                def metadata_cb(current: int, _total: int) -> None:
+                    progress.update(task, completed=current)
 
-                    self._estimator.load_from_metadata(metadata_dir, progress_callback=metadata_cb)
+                self._estimator.load_from_backend(backend, progress_callback=metadata_cb)
 
             # Load historical timing from events file (complements metadata)
             events_file = get_event_file_path(self.workflow_dir)
