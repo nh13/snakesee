@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import threading
 from pathlib import Path
 from typing import TextIO
 
@@ -12,7 +13,11 @@ class EventWriter:
     """Thread-safe JSONL event writer with file locking.
 
     Writes events to a JSON Lines file with proper file locking
-    to support concurrent access from multiple processes.
+    for inter-process safety and a threading lock for intra-process safety.
+
+    Thread safety is critical because Snakemake dispatches log events via a
+    ``QueueListener`` background thread, while handler ``close()`` may be
+    called from the main thread during cleanup.
 
     Attributes:
         path: Path to the event file.
@@ -31,9 +36,13 @@ class EventWriter:
         self.buffer_size = buffer_size
         self._buffer: list[SnakeseeEvent] = []
         self._file: TextIO | None = None
+        self._lock = threading.Lock()
+        self._closed = False
 
     def _ensure_open(self) -> TextIO:
         """Ensure the file is open for appending.
+
+        Must be called while holding ``_lock``.
 
         Returns:
             The open file handle.
@@ -49,14 +58,16 @@ class EventWriter:
 
         Should be called when a new workflow starts to ensure fresh state.
         """
-        # Close existing handle if open
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        with self._lock:
+            self._closed = False
+            # Close existing handle if open
+            if self._file is not None:
+                self._file.close()
+                self._file = None
 
-        # Truncate by opening in write mode
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(self.path, "w", encoding="utf-8")
+            # Truncate by opening in write mode
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(self.path, "w", encoding="utf-8")
 
     def write(self, event: SnakeseeEvent) -> None:
         """Write an event to the file.
@@ -66,15 +77,23 @@ class EventWriter:
         Args:
             event: The event to write.
         """
-        self._buffer.append(event)
-        if len(self._buffer) >= self.buffer_size:
-            self.flush()
+        with self._lock:
+            if self._closed:
+                return
+            self._buffer.append(event)
+            if len(self._buffer) >= self.buffer_size:
+                self._flush_locked()
 
     def flush(self) -> None:
         """Flush buffered events to disk.
 
         Uses file locking to ensure safe concurrent access.
         """
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush buffered events to disk.  Must be called while holding ``_lock``."""
         if not self._buffer:
             return
 
@@ -94,10 +113,16 @@ class EventWriter:
 
     def close(self) -> None:
         """Close the file and flush any remaining events."""
-        self.flush()
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._flush_locked()
+            finally:
+                if self._file is not None:
+                    self._file.close()
+                    self._file = None
 
     def __enter__(self) -> "EventWriter":
         """Context manager entry."""
