@@ -1,6 +1,7 @@
 """Tests for LogHandler."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,12 +10,14 @@ from snakemake_logger_plugin_snakesee.handler import LogEvent, LogHandler
 from snakemake_logger_plugin_snakesee.settings import LogHandlerSettings
 
 
-def create_mock_record(**kwargs: Any) -> MagicMock:
-    """Create a mock log record with the given attributes."""
-    record = MagicMock()
-    for key, value in kwargs.items():
-        setattr(record, key, value)
-    return record
+def create_mock_record(**kwargs: Any) -> SimpleNamespace:
+    """Create a mock log record with the given attributes.
+
+    Uses SimpleNamespace instead of MagicMock so that getattr() returns the
+    default value for attributes that were not explicitly set, rather than
+    auto-creating a MagicMock.
+    """
+    return SimpleNamespace(**kwargs)
 
 
 def create_handler(tmp_path: Path) -> LogHandler:
@@ -53,8 +56,7 @@ class TestLogHandler:
     def test_emit_ignores_none_event(self, tmp_path: Path) -> None:
         """Test that records without event attribute are ignored."""
         handler = create_handler(tmp_path)
-        record = create_mock_record()
-        del record.event  # No event attribute
+        record = create_mock_record()  # No event attribute set
 
         handler.emit(record)
         handler.close()
@@ -66,14 +68,13 @@ class TestLogHandler:
         """Test handling JOB_INFO event."""
         handler = create_handler(tmp_path)
 
-        # Create mock wildcards object
-        wildcards = MagicMock()
-        wildcards.__dict__ = {"sample": "A", "lane": "1"}
+        # Create wildcards object with attributes (like Snakemake's Wildcards)
+        wildcards = SimpleNamespace(sample="A", lane="1")
 
         record = create_mock_record(
             event=LogEvent.JOB_INFO,
             jobid=42,
-            name="align",
+            rule="align",
             wildcards=wildcards,
             threads=4,
             input=["input.fastq"],
@@ -119,7 +120,7 @@ class TestLogHandler:
         info_record = create_mock_record(
             event=LogEvent.JOB_INFO,
             jobid=42,
-            name="align",
+            rule="align",
         )
         handler.emit(info_record)
 
@@ -156,7 +157,7 @@ class TestLogHandler:
         record = create_mock_record(
             event=LogEvent.JOB_ERROR,
             jobid=42,
-            name="sort",
+            rule="sort",
             msg="Sort failed: out of memory",
         )
 
@@ -213,7 +214,7 @@ class TestLogHandler:
         record = create_mock_record(
             event=LogEvent.JOB_INFO,
             jobid=42,
-            name="align",
+            rule="align",
             wildcards={"sample": "A"},
         )
 
@@ -238,7 +239,7 @@ class TestLogHandler:
             create_mock_record(
                 event=LogEvent.JOB_INFO,
                 jobid=1,
-                name="align",
+                rule="align",
                 wildcards={"sample": "A"},
             )
         )
@@ -257,7 +258,7 @@ class TestLogHandler:
             create_mock_record(
                 event=LogEvent.JOB_INFO,
                 jobid=2,
-                name="sort",
+                rule="sort",
                 wildcards={"sample": "A"},
             )
         )
