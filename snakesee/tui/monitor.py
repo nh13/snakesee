@@ -53,6 +53,9 @@ from snakesee.plugins.base import ToolProgress
 from snakesee.state.clock import get_clock
 from snakesee.state.paths import WorkflowPaths
 from snakesee.state.workflow_state import WorkflowState
+from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+from snakesee.tui.accessibility import DEFAULT_CONFIG
+from snakesee.tui.accessibility import AccessibilityConfig
 from snakesee.validation import EventAccumulator
 from snakesee.validation import ValidationLogger
 from snakesee.validation import compare_states
@@ -145,6 +148,7 @@ class WorkflowMonitorTUI:
         p: Pause/resume auto-refresh
         e: Toggle time estimation
         w: Toggle wildcard conditioning (estimate per sample/batch)
+        a: Toggle colorblind-accessible mode
         r: Force refresh
         Ctrl+r: Hard refresh (reload historical data)
 
@@ -192,6 +196,7 @@ class WorkflowMonitorTUI:
         weighting_strategy: WeightingStrategy = "index",
         half_life_logs: int = 10,
         half_life_days: float = 7.0,
+        accessibility_config: AccessibilityConfig | None = None,
     ) -> None:
         """
         Initialize the TUI.
@@ -205,6 +210,8 @@ class WorkflowMonitorTUI:
             weighting_strategy: Strategy for weighting historical data ("index" or "time").
             half_life_logs: Half-life in run count for index-based weighting.
             half_life_days: Half-life in days for time-based weighting.
+            accessibility_config: Visual encoding config for colorblind accessibility.
+                Defaults to DEFAULT_CONFIG (standard block characters).
         """
         self.workflow_dir = workflow_dir
         self.refresh_rate = refresh_rate
@@ -213,6 +220,7 @@ class WorkflowMonitorTUI:
         self.weighting_strategy = weighting_strategy
         self.half_life_logs = half_life_logs
         self.half_life_days = half_life_days
+        self._accessibility_config = accessibility_config or DEFAULT_CONFIG
         self.console = Console()
         self._running = True
         self._estimator: TimeEstimator | None = None
@@ -1019,7 +1027,7 @@ class WorkflowMonitorTUI:
         return False
 
     def _handle_toggle_key(self, key: str) -> bool:
-        """Handle toggle keys (?, p, e, w, r, Ctrl+r). Returns True if key was handled."""
+        """Handle toggle keys (?, p, e, w, a, r, Ctrl+r). Returns True if handled."""
         if key == "?":
             self._show_help = True
             self._force_refresh = True
@@ -1040,6 +1048,14 @@ class WorkflowMonitorTUI:
             self._force_refresh = True
             return True
         if key.lower() == "r":
+            self._force_refresh = True
+            return True
+        if key.lower() == "a":
+            # Toggle colorblind-accessible mode
+            if self._accessibility_config == DEFAULT_CONFIG:
+                self._accessibility_config = ACCESSIBLE_CONFIG
+            else:
+                self._accessibility_config = DEFAULT_CONFIG
             self._force_refresh = True
             return True
         if key == "\x12":  # Ctrl+r - hard refresh
@@ -1559,6 +1575,7 @@ class WorkflowMonitorTUI:
         help_text.add_row("p", "Pause/resume auto-refresh")
         help_text.add_row("e", "Toggle time estimation")
         help_text.add_row("w", "Toggle wildcard conditioning")
+        help_text.add_row("a", "Toggle colorblind-accessible mode")
         help_text.add_row("r", "Force refresh")
         help_text.add_row("Ctrl+r", "Hard refresh (reload historical data)")
         help_text.add_row("", "")
@@ -1648,20 +1665,28 @@ class WorkflowMonitorTUI:
         total = max(1, progress.total_jobs)
         succeeded = progress.completed_jobs
         failed = progress.failed_jobs
+        config = self._accessibility_config
 
         # Calculate widths for each segment
         succeeded_width = int((succeeded / total) * width)
         failed_width = int((failed / total) * width)
-        remaining_width = width - succeeded_width - failed_width
+        unfinished = max(0, progress.total_jobs - progress.completed_jobs - progress.failed_jobs)
+        incomplete = (
+            min(len(progress.incomplete_jobs_list), unfinished)
+            if progress.status == WorkflowStatus.INCOMPLETE
+            else 0
+        )
+        incomplete_width = int((incomplete / total) * width)
+        remaining_width = width - succeeded_width - failed_width - incomplete_width
 
         # Build the bar with colored segments
         bar = Text()
-        bar.append("█" * succeeded_width, style="green")
-        bar.append("█" * failed_width, style="red")
-        if progress.status == WorkflowStatus.INCOMPLETE:
-            bar.append("░" * remaining_width, style="yellow")  # Incomplete = yellow
-        else:
-            bar.append("░" * remaining_width, style="dim")
+        bar.append(config.succeeded.char * succeeded_width, style="green")
+        bar.append(config.failed.char * failed_width, style="red")
+        if incomplete_width > 0:
+            bar.append(config.incomplete.char * incomplete_width, style="yellow")
+        if remaining_width > 0:
+            bar.append(config.remaining.char * remaining_width, style="dim")
 
         return bar
 
@@ -1719,14 +1744,35 @@ class WorkflowMonitorTUI:
 
         eta_text = Text.from_markup("  ".join(eta_parts)) if eta_parts else Text("")
 
-        # Legend for the progress bar when there are failures
+        # Legend for the progress bar
+        config = self._accessibility_config
         legend = Text()
-        if progress.failed_jobs > 0:
+        show_legend = progress.failed_jobs > 0 or config.show_legend
+        if show_legend:
             legend.append("  (", style="dim")
-            legend.append("█", style="green")
-            legend.append(f"={progress.completed_jobs} succeeded  ", style="dim")
-            legend.append("█", style="red")
-            legend.append(f"={progress.failed_jobs} failed", style="dim")
+            legend.append(config.succeeded.char, style="green")
+            legend.append(f"={progress.completed_jobs} {config.succeeded.label}", style="dim")
+            if progress.failed_jobs > 0:
+                legend.append("  ", style="dim")
+                legend.append(config.failed.char, style="red")
+                legend.append(f"={progress.failed_jobs} {config.failed.label}", style="dim")
+            unfinished = max(
+                0, progress.total_jobs - progress.completed_jobs - progress.failed_jobs
+            )
+            incomplete = (
+                min(len(progress.incomplete_jobs_list), unfinished)
+                if progress.status == WorkflowStatus.INCOMPLETE
+                else 0
+            )
+            remaining = unfinished - incomplete
+            if incomplete > 0:
+                legend.append("  ", style="dim")
+                legend.append(config.incomplete.char, style="yellow")
+                legend.append(f"={incomplete} {config.incomplete.label}", style="dim")
+            if remaining > 0:
+                legend.append("  ", style="dim")
+                legend.append(config.remaining.char, style="dim")
+                legend.append(f"={remaining} {config.remaining.label}", style="dim")
             legend.append(")", style="dim")
 
         # Border color based on status (use FG colors for normal states)
@@ -1740,7 +1786,7 @@ class WorkflowMonitorTUI:
         border_style = border_colors.get(progress.status, FG_BLUE)
 
         # Combine progress line with legend if present
-        if progress.failed_jobs > 0:
+        if show_legend:
             full_progress = Text()
             full_progress.append(progress_line)
             full_progress.append(legend)

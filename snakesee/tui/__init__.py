@@ -28,6 +28,9 @@ The monitor.py could be further split into MVC components:
 """
 
 # Re-export public API for backward compatibility
+from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+from snakesee.tui.accessibility import DEFAULT_CONFIG
+from snakesee.tui.accessibility import AccessibilityConfig
 from snakesee.tui.monitor import DEFAULT_REFRESH_RATE
 from snakesee.tui.monitor import FG_BLUE
 from snakesee.tui.monitor import FG_GREEN
@@ -37,6 +40,9 @@ from snakesee.tui.monitor import LayoutMode
 from snakesee.tui.monitor import WorkflowMonitorTUI
 
 __all__ = [
+    "ACCESSIBLE_CONFIG",
+    "AccessibilityConfig",
+    "DEFAULT_CONFIG",
     "DEFAULT_REFRESH_RATE",
     "FG_BLUE",
     "FG_GREEN",

@@ -63,6 +63,7 @@ def watch(
     weighting_strategy: Literal["index", "time"] = "index",
     half_life_logs: int = 10,
     half_life_days: float = 7.0,
+    colorblind: bool = False,
 ) -> None:
     """
     Watch a Snakemake workflow in real-time with a TUI dashboard.
@@ -88,6 +89,8 @@ def watch(
         half_life_days: Half-life in days for time-based weighting.
                        After this many days, a run's weight is halved. Default: 7.0.
                        Only used when weighting_strategy="time".
+        colorblind: Use colorblind-accessible mode with distinct characters in
+                    progress bars. Can also be toggled with 'a' key in TUI.
     """
     try:
         workflow_dir = _validate_workflow_dir(workflow_dir)
@@ -115,6 +118,9 @@ def watch(
     profile_path = profile or find_profile(workflow_dir)
 
     from snakesee.tui import WorkflowMonitorTUI
+    from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+    accessibility_config = ACCESSIBLE_CONFIG if colorblind else None
 
     tui = WorkflowMonitorTUI(
         workflow_dir=workflow_dir,
@@ -125,6 +131,7 @@ def watch(
         weighting_strategy=weighting_strategy,
         half_life_logs=half_life_logs,
         half_life_days=half_life_days,
+        accessibility_config=accessibility_config,
     )
     tui.run()
 
