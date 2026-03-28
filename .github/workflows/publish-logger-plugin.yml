@@ -3,7 +3,7 @@ name: publish-logger-plugin
 on:
   push:
     tags:
-      - 'logger-[0-9]+.[0-9]+.[0-9]+'
+      - 'snakesee-logger-[0-9]+.[0-9]+.[0-9]+'
 
 env:
   UV_VERSION: 0.8.22

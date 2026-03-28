@@ -64,9 +64,9 @@ git add snakemake-logger-plugin-snakesee/pyproject.toml
 git commit -m "chore: bump logger plugin version to X.Y.Z"
 git push origin main
 
-# 3. Create and push a tag (prefixed with 'logger-')
-git tag logger-X.Y.Z
-git push origin logger-X.Y.Z
+# 3. Create and push a tag (prefixed with 'snakesee-logger-')
+git tag snakesee-logger-X.Y.Z
+git push origin snakesee-logger-X.Y.Z
 
 # 4. Verify
 #    - PyPI: https://pypi.org/project/snakemake-logger-plugin-snakesee/
@@ -81,8 +81,8 @@ CI automatically:
 4. Publishes to PyPI (OIDC authentication)
 5. Creates GitHub Release
 
-**Tag format**: Use `logger-X.Y.Z` (e.g., `logger-0.1.0`). This is distinct
-from the main snakesee tags which use bare semver.
+**Tag format**: Use `snakesee-logger-X.Y.Z` (e.g., `snakesee-logger-0.1.0`).
+This is distinct from the main snakesee tags which use bare semver.
 
 ---
 
