@@ -263,15 +263,21 @@ def parse_rules_from_log(log_path: Path) -> dict[str, int]:
     """
     rule_counts: dict[str, int] = {}
     current_rule: str | None = None
+    job_rules: dict[str, str] = {}
 
     try:
         for line in log_path.read_text().splitlines():
             # Track current rule being executed
-            if match := RULE_START_PATTERN.match(line):
+            if match := RULE_START_PATTERN.match(line.lstrip()):
                 current_rule = match.group(1)
-            # Count "Finished job" as rule completion
-            elif "Finished job" in line and current_rule is not None:
-                rule_counts[current_rule] = rule_counts.get(current_rule, 0) + 1
+            # Map jobid to current rule
+            elif (match := JOBID_PATTERN.match(line)) and current_rule is not None:
+                job_rules[match.group(1)] = current_rule
+            # Count finished jobs using jobid-to-rule mapping
+            elif match := FINISHED_JOB_PATTERN.search(line):
+                rule = job_rules.get(match.group(1), current_rule)
+                if rule is not None:
+                    rule_counts[rule] = rule_counts.get(rule, 0) + 1
     except OSError as e:
         logger.info("Could not read log file %s: %s", log_path, e)
 
@@ -324,7 +330,7 @@ def parse_running_jobs_from_log(  # noqa: C901
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line_num, line in enumerate(lines):
             # Track current rule being executed
-            if match := RULE_START_PATTERN.match(line):
+            if match := RULE_START_PATTERN.match(line.lstrip()):
                 record_pending_error()
                 current_rule = match.group(1)
                 current_jobid = None  # Reset jobid for new rule block
@@ -333,7 +339,7 @@ def parse_running_jobs_from_log(  # noqa: C901
                 current_log_path = None
 
             # Timestamp lines end error blocks
-            elif line.startswith("[") and TIMESTAMP_PATTERN.match(line):
+            elif TIMESTAMP_PATTERN.match(line.lstrip()):
                 record_pending_error()
 
             # Capture wildcards within rule block
@@ -488,7 +494,7 @@ def parse_failed_jobs_from_log(  # noqa: C901
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
             # Track current rule - this also ends any pending error block
-            if match := RULE_START_PATTERN.match(line):
+            if match := RULE_START_PATTERN.match(line.lstrip()):
                 emit_pending_error()
                 current_rule = match.group(1)
                 current_jobid = None
@@ -497,7 +503,7 @@ def parse_failed_jobs_from_log(  # noqa: C901
                 current_log_path = None
 
             # Timestamp lines end error blocks
-            elif line.startswith("[") and TIMESTAMP_PATTERN.match(line):
+            elif TIMESTAMP_PATTERN.match(line.lstrip()):
                 emit_pending_error()
 
             # Capture wildcards - applies to both rule blocks and error blocks
@@ -637,12 +643,12 @@ def _get_first_log_timestamp(
     try:
         if _cached_lines is not None:
             for line in _cached_lines:
-                if match := TIMESTAMP_PATTERN.match(line):
+                if match := TIMESTAMP_PATTERN.match(line.lstrip()):
                     return _parse_timestamp(match.group(1))
         else:
             with log_path.open() as f:
                 for line in f:
-                    if match := TIMESTAMP_PATTERN.match(line):
+                    if match := TIMESTAMP_PATTERN.match(line.lstrip()):
                         return _parse_timestamp(match.group(1))
     except OSError as e:
         logger.info("Could not read log file %s: %s", log_path, e)
@@ -685,11 +691,11 @@ def parse_completed_jobs_from_log(
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
             # Check for timestamp
-            if match := TIMESTAMP_PATTERN.match(line):
+            if match := TIMESTAMP_PATTERN.match(line.lstrip()):
                 current_timestamp = _parse_timestamp(match.group(1))
 
             # Track current rule being executed
-            elif match := RULE_START_PATTERN.match(line):
+            elif match := RULE_START_PATTERN.match(line.lstrip()):
                 current_rule = match.group(1)
                 current_wildcards = None
                 current_threads = None
@@ -773,7 +779,7 @@ def parse_threads_from_log(log_path: Path) -> dict[str, int]:
     try:
         for line in log_path.read_text().splitlines():
             # Track current rule (resets context)
-            if RULE_START_PATTERN.match(line):
+            if RULE_START_PATTERN.match(line.lstrip()):
                 current_jobid = None
                 current_threads = None
 
@@ -830,7 +836,7 @@ def parse_all_jobs_from_log(
         lines = _cached_lines if _cached_lines is not None else log_path.read_text().splitlines()
         for line in lines:
             # Track current rule being scheduled
-            if match := RULE_START_PATTERN.match(line):
+            if match := RULE_START_PATTERN.match(line.lstrip()):
                 # Save previous job if complete
                 if current_rule is not None and current_jobid is not None:
                     if current_jobid not in seen_jobids:

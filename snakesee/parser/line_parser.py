@@ -178,12 +178,10 @@ class LogLineParser:
                 events.append(ParseEvent(ParseEventType.TIMESTAMP, {"timestamp": timestamp}))
             return events
 
-        # Indented lines (properties) start with space/tab
+        # Indented lines start with space/tab.  In group/pipe job blocks,
+        # rule starts and timestamps are indented by 4 spaces.
         if first_char in (" ", "\t"):
-            event = self._parse_indented_line(line)
-            if event:
-                events.append(event)
-            return events
+            return self._parse_indented_or_group_line(line, events)
 
         # Rule/checkpoint start - this ends error blocks
         # Matches: "rule X:", "localrule X:", "checkpoint X:", "localcheckpoint X:"
@@ -242,6 +240,56 @@ class LogLineParser:
             ParseEvent for the pending error, or None if no pending error.
         """
         return self.context.get_pending_error()
+
+    def _parse_indented_or_group_line(
+        self, line: str, events: list[ParseEvent]
+    ) -> list[ParseEvent]:
+        """Parse indented lines: group-block elements or property lines.
+
+        In group/pipe job blocks, rule starts and timestamps are indented by
+        4 spaces.  Property lines are indented by 4 (normal) or 8 (group) spaces.
+
+        Args:
+            line: Indented log line starting with space/tab.
+            events: Mutable list to append events to.
+
+        Returns:
+            The events list (same object passed in).
+        """
+        stripped = line.lstrip()
+        if not stripped:
+            return events
+
+        first_stripped = stripped[0]
+
+        # Indented timestamp: "    [Mon Jan  6 10:00:00 2026]"
+        if first_stripped == "[":
+            if match := TIMESTAMP_PATTERN.match(stripped):
+                if pending := self.context.get_pending_error():
+                    events.append(pending)
+                timestamp = _parse_timestamp(match.group(1))
+                self.context.timestamp = timestamp
+                events.append(ParseEvent(ParseEventType.TIMESTAMP, {"timestamp": timestamp}))
+            return events
+
+        # Indented rule start: "    rule X:", "    localrule X:",
+        # "    checkpoint X:", or "    localcheckpoint X:"
+        if first_stripped in ("r", "l", "c") and stripped.startswith(
+            ("rule ", "localrule ", "checkpoint ", "localcheckpoint ")
+        ):
+            if match := RULE_START_PATTERN.match(stripped):
+                if pending := self.context.get_pending_error():
+                    events.append(pending)
+                rule = match.group(1)
+                self.context.reset_for_new_rule(rule)
+                events.append(ParseEvent(ParseEventType.RULE_START, {"rule": rule}))
+            return events
+
+        # Property lines (wildcards, threads, log, jobid)
+        event = self._parse_indented_line(line)
+        if event:
+            events.append(event)
+        return events
 
     def _parse_indented_line(self, line: str) -> ParseEvent | None:
         """Parse indented property lines (wildcards, threads, log, jobid).
