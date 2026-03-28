@@ -9,8 +9,8 @@ import re
 # Pattern: "15 of 50 steps (30%) done"
 PROGRESS_PATTERN = re.compile(r"(\d+) of (\d+) steps \((\d+(?:\.\d+)?)%\) done")
 
-# Pattern for rule start: "rule align:" or "localrule all:"
-RULE_START_PATTERN = re.compile(r"(?:local)?rule (\w+):")
+# Pattern for rule start: "rule align:", "localrule all:", "checkpoint X:", "localcheckpoint X:"
+RULE_START_PATTERN = re.compile(r"(?:local)?(?:rule|checkpoint) (\w+):")
 
 # Pattern for job ID in log: "    jobid: 5"
 JOBID_PATTERN = re.compile(r"\s+jobid:\s*(\d+)")
