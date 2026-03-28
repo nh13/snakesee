@@ -51,6 +51,41 @@ Before releasing, ensure:
 
 ---
 
+## Releasing the Logger Plugin
+
+The Snakemake logger plugin (`snakemake-logger-plugin-snakesee/`) has its own
+independent release cycle.
+
+```bash
+# 1. Bump version in snakemake-logger-plugin-snakesee/pyproject.toml
+
+# 2. Commit the version bump
+git add snakemake-logger-plugin-snakesee/pyproject.toml
+git commit -m "chore: bump logger plugin version to X.Y.Z"
+git push origin main
+
+# 3. Create and push a tag (prefixed with 'logger-')
+git tag logger-X.Y.Z
+git push origin logger-X.Y.Z
+
+# 4. Verify
+#    - PyPI: https://pypi.org/project/snakemake-logger-plugin-snakesee/
+#    - GitHub: https://github.com/nh13/snakesee/releases
+#    - Install: pip install snakemake-logger-plugin-snakesee==X.Y.Z
+```
+
+CI automatically:
+1. Verifies the tag is on `main`
+2. Runs plugin tests (Python 3.11, 3.12, 3.13)
+3. Builds source distribution from the subdirectory
+4. Publishes to PyPI (OIDC authentication)
+5. Creates GitHub Release
+
+**Tag format**: Use `logger-X.Y.Z` (e.g., `logger-0.1.0`). This is distinct
+from the main snakesee tags which use bare semver.
+
+---
+
 ## First-time Setup (already completed)
 
 These steps were done during initial project setup and are kept here for reference.
@@ -58,7 +93,10 @@ These steps were done during initial project setup and are kept here for referen
 ### PyPI Publishing
 
 Publishing uses OIDC token authentication (configured in `.github/workflows/publish.yml`
-with environment `pypi`). No API tokens need to be stored as secrets.
+and `.github/workflows/publish-logger-plugin.yml` with environment `pypi`). No API
+tokens need to be stored as secrets. The logger plugin reuses the same `pypi` environment
+— ensure `snakemake-logger-plugin-snakesee` is registered as a trusted publisher in
+PyPI settings.
 
 ### Bioconda
 
