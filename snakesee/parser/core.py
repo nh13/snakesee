@@ -62,6 +62,7 @@ __all__ = [
     "calculate_input_size",
     "estimate_input_size_from_output",
     # Local functions
+    "parse_cores_from_log",
     "parse_job_stats_from_log",
     "parse_job_stats_counts_from_log",
     "parse_progress_from_log",
@@ -214,6 +215,33 @@ def parse_job_stats_counts_from_log(log_path: Path) -> dict[str, int]:
                         pass
 
     return counts
+
+
+def parse_cores_from_log(log_path: Path) -> int | None:
+    """
+    Parse the ``Provided cores: N`` line from a Snakemake log.
+
+    This line appears near the start of a run and reflects the ``-j``/``--cores``
+    value passed to Snakemake.  Only the first occurrence is used.
+
+    Args:
+        log_path: Path to the Snakemake log file.
+
+    Returns:
+        The core count, or ``None`` if the line was not found.
+    """
+    from snakesee.parser.patterns import CORES_PATTERN
+
+    try:
+        content = log_path.read_text(errors="ignore")
+    except OSError as e:
+        logger.info("Could not read log file %s: %s", log_path, e)
+        return None
+
+    match = CORES_PATTERN.search(content)
+    if match is not None:
+        return int(match.group(1))
+    return None
 
 
 def parse_progress_from_log(

@@ -140,29 +140,38 @@ class TestTimeEstimator:
         assert estimate.seconds_remaining > 0
         assert estimate.confidence > 0
 
-    def test_estimate_with_running_elapsed(self, metadata_dir: Path) -> None:
-        """Test estimation subtracts elapsed time for running jobs."""
-        estimator = TimeEstimator()
-        estimator.load_from_metadata(metadata_dir)
+    def test_estimate_with_running_job_elapsed(self, metadata_dir: Path) -> None:
+        """Test estimation subtracts elapsed time from running jobs via JobInfo.elapsed."""
+        from snakesee.state.clock import FrozenClock
+        from snakesee.state.clock import set_clock
 
-        progress = WorkflowProgress(
-            workflow_dir=Path("."),
-            status=WorkflowStatus.RUNNING,
-            total_jobs=10,
-            completed_jobs=8,
-            running_jobs=[JobInfo(rule="align")],
-            recent_completions=[
-                JobInfo(rule="align", start_time=1000.0, end_time=1100.0),
-            ],
-            start_time=1000.0,
-        )
+        clock = FrozenClock(1050.0)
+        set_clock(clock)
 
-        # With elapsed time for the running job
-        running_elapsed = {"align": 50.0}  # 50s of 100s expected elapsed
-        estimate = estimator.estimate_remaining(progress, running_elapsed)
+        try:
+            estimator = TimeEstimator()
+            estimator.load_from_metadata(metadata_dir)
 
-        # Should account for the 50s already elapsed
-        assert estimate.seconds_remaining > 0
+            progress = WorkflowProgress(
+                workflow_dir=Path("."),
+                status=WorkflowStatus.RUNNING,
+                total_jobs=10,
+                completed_jobs=8,
+                running_jobs=[JobInfo(rule="align", start_time=1000.0)],
+                recent_completions=[
+                    JobInfo(rule="align", start_time=1000.0, end_time=1100.0),
+                ],
+                start_time=1000.0,
+            )
+
+            estimate = estimator.estimate_remaining(progress)
+
+            # Should account for the 50s already elapsed on the running job
+            assert estimate.seconds_remaining > 0
+        finally:
+            from snakesee.state.clock import reset_clock
+
+            reset_clock()
 
     def test_infer_pending_rules(self) -> None:
         """Test pending rule inference."""
@@ -640,48 +649,34 @@ class TestRuleRegistryIntegration:
 class TestEstimatorHelperMethods:
     """Tests for extracted helper methods in TimeEstimator."""
 
-    def test_estimate_cores_from_max_observed(self) -> None:
-        """Test core estimation uses max_observed_thread_sum when available."""
-        estimator = TimeEstimator()
-
+    def test_estimated_cores_tracks_peak(self) -> None:
+        """Test core estimation tracks peak thread sum across calls."""
         import tempfile
 
-        progress = WorkflowProgress(
+        estimator = TimeEstimator()
+
+        # First call with 32 threads running
+        running_32 = [JobInfo(rule="align", job_id=str(i), threads=4) for i in range(8)]
+        progress_32 = WorkflowProgress(
             workflow_dir=Path(tempfile.gettempdir()),
             status=WorkflowStatus.RUNNING,
             total_jobs=20,
             completed_jobs=10,
-            running_jobs=[],
-            max_observed_thread_sum=32.0,
+            running_jobs=running_32,
         )
+        estimator.estimate_remaining(progress_32)
+        assert estimator.estimated_cores == 32.0
 
-        cores = estimator._estimate_cores(progress)
-        assert cores == 32.0
-
-    def test_estimate_cores_fallback_to_running(self) -> None:
-        """Test core estimation falls back to sum of running job threads."""
-        estimator = TimeEstimator()
-
-        running = [
-            JobInfo(rule="align", job_id="1", threads=4),
-            JobInfo(rule="align", job_id="2", threads=4),
-            JobInfo(rule="align", job_id="3", threads=4),
-            JobInfo(rule="align", job_id="4", threads=4),
-        ]
-
-        import tempfile
-
-        progress = WorkflowProgress(
+        # Second call with fewer running jobs — peak is retained
+        progress_empty = WorkflowProgress(
             workflow_dir=Path(tempfile.gettempdir()),
             status=WorkflowStatus.RUNNING,
-            total_jobs=10,
-            completed_jobs=0,
-            running_jobs=running,
+            total_jobs=20,
+            completed_jobs=15,
+            running_jobs=[],
         )
-
-        cores = estimator._estimate_cores(progress)
-        # 4 jobs * 4 threads = 16 cores
-        assert cores == 16.0
+        estimator.estimate_remaining(progress_empty)
+        assert estimator.estimated_cores == 32.0
 
     def test_calculate_confidence_scores_empty(self) -> None:
         """Test confidence calculation with no data."""

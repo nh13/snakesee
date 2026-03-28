@@ -7,6 +7,7 @@ could delegate these calculations to shared helpers in VarianceCalculator.
 """
 
 import math
+from itertools import chain
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from snakesee.estimation.data_loader import HistoricalDataLoader
 from snakesee.estimation.pending_inferrer import PendingRuleInferrer
 from snakesee.estimation.rule_matcher import RuleMatchingEngine
 from snakesee.estimation.rule_matcher import levenshtein_distance
+from snakesee.models import JobInfo
 from snakesee.models import RuleTimingStats
 from snakesee.models import ThreadTimingStats
 from snakesee.models import TimeEstimate
@@ -105,6 +107,9 @@ class TimeEstimator:
         self.half_life_logs = (
             half_life_logs if half_life_logs is not None else self.config.half_life_logs
         )
+
+        self._max_observed_thread_sum: float = 0.0
+        self._provided_cores: int | None = None
 
         # Helper components
         self._rule_matcher = RuleMatchingEngine(max_distance=self.config.fuzzy_match_max_distance)
@@ -452,7 +457,10 @@ class TimeEstimator:
             threads: Optional thread count for thread-specific estimates.
 
         Returns:
-            Tuple of (expected_duration, variance).
+            Tuple of (expected_duration, variance).  The duration is always
+            wall-clock seconds, even when thread-specific stats are used.
+            Callers that need thread-seconds should multiply by the job's
+            thread count: ``duration * threads = thread_seconds``.
         """
         # Strategy 1: Full combination stats (wildcards + threads together)
         # This is the most precise when we have data for the exact combination
@@ -520,7 +528,6 @@ class TimeEstimator:
     def estimate_remaining(
         self,
         progress: WorkflowProgress,
-        running_elapsed: dict[str, float] | None = None,
     ) -> TimeEstimate:
         """
         Estimate remaining time for a workflow.
@@ -531,13 +538,15 @@ class TimeEstimator:
 
         Args:
             progress: Current workflow progress state.
-            running_elapsed: Optional dict mapping rule names to seconds already
-                elapsed for running jobs. Used to subtract from estimates.
 
         Returns:
             TimeEstimate with expected time, confidence bounds, and method.
         """
-        running_elapsed = running_elapsed or {}
+
+        # Update peak observed thread sum from currently running jobs
+        if progress.running_jobs:
+            current = sum(self._job_threads(j) for j in progress.running_jobs)
+            self._max_observed_thread_sum = max(self._max_observed_thread_sum, current)
 
         # Handle edge case: no jobs to do
         if progress.total_jobs == 0:
@@ -565,7 +574,7 @@ class TimeEstimator:
 
         # Try weighted estimation with historical data
         if self.rule_stats:
-            return self._estimate_weighted(progress, running_elapsed)
+            return self._estimate_weighted(progress)
 
         # Fall back to simple estimation
         return self._estimate_simple(progress)
@@ -583,23 +592,20 @@ class TimeEstimator:
             TimeEstimate with very low confidence.
         """
         global_mean = self.global_mean_duration()
-        default_threads = self.config.default_threads_per_job
 
-        # Compute total thread-seconds: each pending job contributes
-        # expected_duration * typical_threads for that rule
-        total_thread_seconds = 0.0
-        for job in progress.pending_jobs_list:
-            typical = self._rule_registry.typical_threads(job.rule)
-            total_thread_seconds += global_mean * (job.threads or typical)
-        for job in progress.running_jobs:
-            typical = self._rule_registry.typical_threads(job.rule)
-            total_thread_seconds += global_mean * (job.threads or typical)
+        # Compute total thread-seconds from known jobs when available.
+        # When we have a job list we can use per-job thread counts;
+        # otherwise we assume 1 thread per job (no thread info available).
+        has_job_list = bool(progress.pending_jobs_list or progress.running_jobs)
+        if has_job_list:
+            total_thread_seconds = sum(
+                global_mean * self._job_threads(job)
+                for job in chain(progress.pending_jobs_list, progress.running_jobs)
+            )
+        else:
+            total_thread_seconds = global_mean * progress.total_jobs
 
-        # If no per-job list, fall back to count * mean * default_threads
-        if total_thread_seconds == 0.0:
-            total_thread_seconds = global_mean * progress.total_jobs * default_threads
-
-        cores = self._estimate_cores(progress)
+        cores = self.estimated_cores
         estimate = total_thread_seconds / cores
 
         return TimeEstimate(
@@ -613,7 +619,16 @@ class TimeEstimator:
 
     def _estimate_simple(self, progress: WorkflowProgress) -> TimeEstimate:
         """
-        Simple linear estimation based on average time per step.
+        Simple linear estimation using thread-seconds when possible.
+
+        When pending/running job lists are available, computes an observed
+        thread-second rate from completed work (elapsed × cores) and
+        estimates remaining thread-seconds from pending job threads.  This
+        handles mixed-thread workloads better than plain job-count
+        extrapolation.
+
+        When no job lists are available, falls back to the classic
+        elapsed/completed × remaining linear extrapolation.
 
         Args:
             progress: Current workflow progress.
@@ -625,13 +640,37 @@ class TimeEstimator:
         if elapsed is None or elapsed <= 0:
             return self._estimate_no_progress(progress)
 
-        # Guard against division by zero when no jobs completed yet
         if progress.completed_jobs <= 0:
             return self._estimate_no_progress(progress)
 
-        avg_time_per_step = elapsed / progress.completed_jobs
-        remaining_steps = progress.total_jobs - progress.completed_jobs
-        estimate = avg_time_per_step * remaining_steps
+        cores = self.estimated_cores
+
+        # When we have pending/running job lists, use thread-seconds model
+        # (same pattern as _estimate_weighted and _estimate_no_progress):
+        # compute total remaining thread-seconds, then divide by cores.
+        has_job_list = bool(progress.pending_jobs_list or progress.running_jobs)
+        if has_job_list:
+            # Observed wall-clock rate per job → thread-seconds per job
+            avg_wall_per_job = elapsed / progress.completed_jobs
+            avg_thread_seconds_per_job = avg_wall_per_job * cores
+
+            # Sum remaining thread-seconds across pending + running jobs
+            total_thread_seconds = sum(
+                avg_thread_seconds_per_job * self._job_threads(job)
+                for job in chain(progress.pending_jobs_list, progress.running_jobs)
+            )
+            # Subtract elapsed thread-seconds for running jobs
+            for job in progress.running_jobs:
+                job_elapsed = job.elapsed or 0.0
+                t = self._job_threads(job)
+                total_thread_seconds = max(0.0, total_thread_seconds - job_elapsed * t)
+
+            estimate = total_thread_seconds / cores
+        else:
+            # Classic linear extrapolation (no thread info available)
+            avg_time_per_step = elapsed / progress.completed_jobs
+            remaining_steps = progress.total_jobs - progress.completed_jobs
+            estimate = avg_time_per_step * remaining_steps
 
         # Confidence grows with more completed jobs
         confidence = min(
@@ -648,29 +687,47 @@ class TimeEstimator:
             upper_bound=estimate * (1 + uncertainty * 2),
             confidence=confidence,
             method="simple",
+            inferred_cores=cores,
         )
 
-    def _estimate_cores(self, progress: WorkflowProgress) -> float:
-        """Estimate the number of available cores from workflow state.
+    def _job_threads(self, job: JobInfo) -> float:
+        """Resolve effective thread count for a job.
 
-        Uses max_observed_thread_sum (peak sum of threads across running jobs)
-        when available, otherwise falls back to the current sum of running
-        job threads.
+        Uses the job's declared threads if available, otherwise falls back
+        to the weighted-average thread count from historical data for the rule.
+        """
+        if job.threads is not None:
+            return float(job.threads)
+        return self._rule_registry.typical_threads(job.rule)
+
+    def set_provided_cores(self, cores: int) -> None:
+        """Set the Snakemake ``-j``/``--cores`` value parsed from the log.
+
+        When available, this provides a definitive upper bound for
+        parallelism rather than relying solely on peak observed thread sums.
 
         Args:
-            progress: Current workflow progress.
+            cores: Resolved core count (integer) from ``Provided cores: N``
+                log line.  Snakemake resolves ``--cores all`` to the machine's
+                CPU count before logging, so this is always an integer.
+        """
+        self._provided_cores = cores
+
+    @property
+    def estimated_cores(self) -> float:
+        """Inferred core count used to convert thread-seconds to wall-clock time.
+
+        Priority:
+        1. ``Provided cores: N`` parsed from the Snakemake log (definitive).
+        2. Peak observed sum of running-job threads (approximation of ``-j``).
+        3. Fallback to 1.0 when no data is available.
 
         Returns:
             Estimated core count (>= 1.0).
         """
-        if progress.max_observed_thread_sum > 0:
-            return progress.max_observed_thread_sum
-
-        # Fallback: sum threads of currently running jobs
-        if progress.running_jobs:
-            return max(1.0, sum(j.threads or 1 for j in progress.running_jobs))
-
-        return 1.0
+        if self._provided_cores is not None:
+            return float(self._provided_cores)
+        return max(1.0, self._max_observed_thread_sum)
 
     def _calculate_confidence_scores(
         self,
@@ -709,7 +766,6 @@ class TimeEstimator:
     def _estimate_weighted(
         self,
         progress: WorkflowProgress,
-        running_elapsed: dict[str, float],  # noqa: ARG002 - kept for API compatibility
     ) -> TimeEstimate:
         """Weighted estimation using per-rule historical timing.
 
@@ -749,7 +805,6 @@ class TimeEstimator:
 
         Args:
             progress: Current workflow progress.
-            running_elapsed: Dict mapping rule names to elapsed seconds (unused, for API compat).
 
         Returns:
             TimeEstimate using weighted historical data.
@@ -803,9 +858,10 @@ class TimeEstimator:
                     input_size=job.input_size,
                     threads=job.threads,
                 )
-                threads = job.threads or self._rule_registry.typical_threads(job.rule)
-                total_thread_seconds += expected * threads
-                total_variance += variance * threads * threads
+                t = self._job_threads(job)
+                total_thread_seconds += expected * t
+                # Variance in seconds² → thread-seconds²: Var(t·T) = T²·Var(t)
+                total_variance += variance * t * t
         else:
             # Fall back to rule-count-based estimation
             for rule, count in pending_rules.items():
@@ -839,12 +895,12 @@ class TimeEstimator:
             # Use actual elapsed time if available
             elapsed = job.elapsed or 0.0
             remaining = max(0, expected - elapsed)
-            threads = job.threads or self._rule_registry.typical_threads(job.rule)
-            total_thread_seconds += remaining * threads
-            total_variance += variance * threads * threads
+            t = self._job_threads(job)
+            total_thread_seconds += remaining * t
+            total_variance += variance * t * t
 
         # Convert thread-seconds to wall-clock time using inferred cores
-        cores = self._estimate_cores(progress)
+        cores = self.estimated_cores
         effective_time = total_thread_seconds / cores
 
         # Calculate confidence bounds (variance scales with cores^2)

@@ -164,13 +164,6 @@ class TestEstimationConfig:
         with pytest.raises(ValueError, match="half_life_days must be > 0"):
             EstimationConfig(half_life_days=-1.0)
 
-    def test_default_threads_per_job_must_be_positive(self) -> None:
-        """Test that default_threads_per_job must be > 0."""
-        with pytest.raises(ValueError, match="default_threads_per_job must be > 0"):
-            EstimationConfig(default_threads_per_job=0.0)
-        with pytest.raises(ValueError, match="default_threads_per_job must be > 0"):
-            EstimationConfig(default_threads_per_job=-1.0)
-
     def test_default_global_mean_must_be_positive(self) -> None:
         """Test that default_global_mean must be > 0."""
         with pytest.raises(ValueError, match="default_global_mean must be > 0"):

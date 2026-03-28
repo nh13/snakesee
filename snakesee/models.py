@@ -618,7 +618,8 @@ class TimeEstimate:
         lower_bound: Optimistic estimate (95% CI lower).
         upper_bound: Pessimistic estimate (95% CI upper).
         confidence: Confidence level (0.0 to 1.0).
-        method: Estimation method used ("simple", "weighted", "throughput").
+        method: Estimation method used ("simple", "weighted", "bootstrap").
+        inferred_cores: Estimated core count used for thread-aware estimation.
     """
 
     seconds_remaining: float
@@ -679,7 +680,6 @@ class WorkflowProgress:
     pending_jobs_list: list[JobInfo] = field(default_factory=list)
     start_time: float | None = None
     log_file: Path | None = None
-    max_observed_thread_sum: float = 0.0
 
     @property
     def percent_complete(self) -> float:

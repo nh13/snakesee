@@ -37,3 +37,7 @@ THREADS_PATTERN = re.compile(r"\s+threads:\s*(\d+)")
 
 # Pattern for log line: "    log: logs/sample.log"
 LOG_PATTERN = re.compile(r"\s+log:\s*(.+)")
+
+# Pattern for Snakemake cores line: "Provided cores: 16"
+# Appears near the start of a run, optionally with a parenthetical hint.
+CORES_PATTERN = re.compile(r"Provided cores:\s+(\d+)")

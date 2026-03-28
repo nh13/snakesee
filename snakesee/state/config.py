@@ -132,11 +132,8 @@ class EstimationConfig:
         min_pairs_for_size_scaling: Minimum pairs for size correlation.
         high_variance_cv: Coefficient of variation threshold for "high variance".
         default_global_mean: Fallback duration when no data available.
-        default_threads_per_job: Default thread count assumed per job when unknown.
-
     Raises:
-        ValueError: If any parameter is invalid (e.g., non-positive half_life,
-            default_threads_per_job, etc.).
+        ValueError: If any parameter is invalid (e.g., non-positive half_life).
     """
 
     weighting_strategy: WeightingStrategy = "index"
@@ -162,9 +159,6 @@ class EstimationConfig:
     default_global_mean: float = 60.0
     default_recency_factor: float = 0.5
 
-    # Thread-aware estimation defaults
-    default_threads_per_job: float = 1.0
-
     # Size scaling bounds
     size_dampening_power: float = 0.5
     size_ratio_min: float = 0.5
@@ -189,10 +183,6 @@ class EstimationConfig:
             raise ValueError(f"half_life_logs must be > 0, got {self.half_life_logs}")
         if self.half_life_days <= 0:
             raise ValueError(f"half_life_days must be > 0, got {self.half_life_days}")
-        if self.default_threads_per_job <= 0:
-            raise ValueError(
-                f"default_threads_per_job must be > 0, got {self.default_threads_per_job}"
-            )
         if self.default_global_mean <= 0:
             raise ValueError(f"default_global_mean must be > 0, got {self.default_global_mean}")
 
