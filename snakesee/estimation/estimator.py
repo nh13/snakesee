@@ -25,6 +25,7 @@ from snakesee.state.config import DEFAULT_CONFIG
 from snakesee.state.config import EstimationConfig
 
 if TYPE_CHECKING:
+    from snakesee.persistence import PersistenceBackend
     from snakesee.state.rule_registry import RuleRegistry
     from snakesee.types import ProgressCallback
 
@@ -166,6 +167,24 @@ class TimeEstimator:
         """
         loader = self._get_data_loader()
         loader.load_from_metadata(metadata_dir, progress_callback)
+        self.code_hash_to_rules = loader.code_hash_to_rules
+
+    def load_from_backend(
+        self,
+        backend: "PersistenceBackend",
+        progress_callback: "ProgressCallback | None" = None,
+    ) -> None:
+        """Load historical execution times from a persistence backend.
+
+        Supports both filesystem and SQLite backends via the PersistenceBackend
+        protocol. Delegates to HistoricalDataLoader.load_from_backend().
+
+        Args:
+            backend: Persistence backend to read metadata from.
+            progress_callback: Optional callback(current, total) for progress reporting.
+        """
+        loader = self._get_data_loader()
+        loader.load_from_backend(backend, progress_callback)
         self.code_hash_to_rules = loader.code_hash_to_rules
 
     def load_from_events(self, events_file: Path) -> None:

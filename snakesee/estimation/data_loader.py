@@ -1,6 +1,7 @@
 """Historical data loading for time estimation."""
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,8 +9,10 @@ import orjson
 
 from snakesee.constants import MAX_EVENTS_LINE_LENGTH
 from snakesee.parser import parse_metadata_files_full
+from snakesee.parser.metadata import MetadataRecord
 
 if TYPE_CHECKING:
+    from snakesee.persistence.backend import PersistenceBackend
     from snakesee.state.rule_registry import RuleRegistry
     from snakesee.types import ProgressCallback
 
@@ -53,9 +56,36 @@ class HistoricalDataLoader:
             metadata_dir: Path to .snakemake/metadata/ directory.
             progress_callback: Optional callback(current, total) for progress.
         """
+        self._consume_metadata_records(parse_metadata_files_full(metadata_dir, progress_callback))
+
+    def load_from_backend(
+        self,
+        backend: "PersistenceBackend",
+        progress_callback: "ProgressCallback | None" = None,
+    ) -> None:
+        """Load historical execution times from a persistence backend.
+
+        Works with both filesystem and SQLite backends via the
+        PersistenceBackend protocol.
+
+        Args:
+            backend: Persistence backend to read from.
+            progress_callback: Optional callback(current, total) for progress.
+        """
+        self._consume_metadata_records(backend.iterate_metadata(progress_callback))
+
+    def _consume_metadata_records(
+        self,
+        records: "Iterator[MetadataRecord]",
+    ) -> None:
+        """Process metadata records into the registry and code hash map.
+
+        Args:
+            records: Iterator of MetadataRecord instances.
+        """
         hash_to_rules: dict[str, set[str]] = {}
 
-        for record in parse_metadata_files_full(metadata_dir, progress_callback):
+        for record in records:
             duration = record.duration
             end_time = record.end_time
 

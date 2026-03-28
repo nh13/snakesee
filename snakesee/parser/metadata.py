@@ -64,7 +64,7 @@ class MetadataRecord:
         )
 
 
-def _calculate_input_size(input_files: list[str] | None) -> int | None:
+def calculate_metadata_input_size(input_files: list[str] | None) -> int | None:
     """Calculate total input size from file list.
 
     Args:
@@ -119,7 +119,7 @@ def parse_metadata_files(
                 start_time=starttime,
                 end_time=endtime,
                 wildcards=wildcards,
-                input_size=_calculate_input_size(data.get("input")),
+                input_size=calculate_metadata_input_size(data.get("input")),
             )
 
 
@@ -167,7 +167,7 @@ def parse_metadata_files_full(
             start_time=starttime,
             end_time=endtime,
             wildcards=wildcards,
-            input_size=_calculate_input_size(data.get("input")),
+            input_size=calculate_metadata_input_size(data.get("input")),
             code_hash=code_hash,
         )
 

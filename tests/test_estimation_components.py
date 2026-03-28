@@ -371,3 +371,64 @@ class TestHistoricalDataLoader:
         # No valid events should be loaded
         rule_stats = registry.to_rule_stats_dict()
         assert "test" not in rule_stats
+
+    def test_load_from_backend_fs(self, tmp_path: Path) -> None:
+        """Test loading via FsPersistence backend."""
+        from snakesee.persistence.fs import FsPersistence
+        from snakesee.state.paths import WorkflowPaths
+
+        metadata_dir = tmp_path / ".snakemake" / "metadata"
+        metadata_dir.mkdir(parents=True)
+        meta_file = metadata_dir / "abc123"
+        meta_file.write_text(
+            json.dumps(
+                {
+                    "rule": "test_rule",
+                    "starttime": 1000.0,
+                    "endtime": 1010.0,
+                    "code": "echo hello",
+                }
+            )
+        )
+
+        registry = RuleRegistry()
+        loader = HistoricalDataLoader(registry)
+        backend = FsPersistence(WorkflowPaths(tmp_path))
+        loader.load_from_backend(backend)
+
+        rule_stats = registry.to_rule_stats_dict()
+        assert "test_rule" in rule_stats
+        assert rule_stats["test_rule"].durations[0] == pytest.approx(10.0)
+
+    def test_load_from_backend_db(self, tmp_path: Path) -> None:
+        """Test loading via DbPersistence backend."""
+        import sqlite3
+
+        from snakesee.persistence.db import DbPersistence
+        from snakesee.state.paths import WorkflowPaths
+        from tests.db_helpers import create_metadata_schema
+
+        smk_dir = tmp_path / ".snakemake"
+        smk_dir.mkdir(parents=True)
+        db_path = smk_dir / "metadata.db"
+        namespace = str(smk_dir.resolve())
+
+        conn = sqlite3.connect(str(db_path))
+        create_metadata_schema(conn)
+        conn.execute(
+            """INSERT INTO snakemake_metadata
+               (namespace, target, rule, starttime, endtime, code, record_format_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (namespace, "output.bam", "db_rule", 2000.0, 2020.0, "echo db", 6),
+        )
+        conn.commit()
+        conn.close()
+
+        registry = RuleRegistry()
+        loader = HistoricalDataLoader(registry)
+        backend = DbPersistence(WorkflowPaths(tmp_path))
+        loader.load_from_backend(backend)
+
+        rule_stats = registry.to_rule_stats_dict()
+        assert "db_rule" in rule_stats
+        assert rule_stats["db_rule"].durations[0] == pytest.approx(20.0)

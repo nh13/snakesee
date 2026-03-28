@@ -2389,3 +2389,70 @@ class TestLogLineParserCheckpoint:
         jobid_event = events[0]
         assert jobid_event.event_type == ParseEventType.JOBID
         assert jobid_event.data["rule"] == "discover"
+
+
+class TestParseWorkflowStateWithDb:
+    """Tests for parse_workflow_state using SQLite backend."""
+
+    def test_detects_running_from_db_locks(self, tmp_path: Path) -> None:
+        """Test that DB lock rows are detected as running."""
+        import sqlite3
+
+        from snakesee.persistence.db import DbPersistence
+        from snakesee.state.paths import WorkflowPaths
+        from tests.db_helpers import create_metadata_schema
+
+        smk_dir = tmp_path / ".snakemake"
+        smk_dir.mkdir(parents=True)
+        (smk_dir / "log").mkdir()
+        namespace = str(smk_dir.resolve())
+
+        db_path = smk_dir / "metadata.db"
+        conn = sqlite3.connect(str(db_path))
+        create_metadata_schema(conn)
+        conn.execute(
+            "INSERT INTO snakemake_locks VALUES (?, ?, ?)",
+            (namespace, "output.bam", "output"),
+        )
+        conn.execute(
+            """INSERT INTO snakemake_metadata
+               (namespace, target, rule, starttime, incomplete, record_format_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (namespace, "output.bam", "align", 1000.0, 1, 6),
+        )
+        conn.commit()
+        conn.close()
+
+        backend = DbPersistence(WorkflowPaths(tmp_path))
+        assert backend.has_locks() is True
+        assert backend.has_incomplete_jobs() is True
+
+    def test_detects_incomplete_from_db(self, tmp_path: Path) -> None:
+        """Test that incomplete DB rows are found as incomplete jobs."""
+        import sqlite3
+
+        from snakesee.persistence.db import DbPersistence
+        from snakesee.state.paths import WorkflowPaths
+        from tests.db_helpers import create_metadata_schema
+
+        smk_dir = tmp_path / ".snakemake"
+        smk_dir.mkdir(parents=True)
+        namespace = str(smk_dir.resolve())
+
+        db_path = smk_dir / "metadata.db"
+        conn = sqlite3.connect(str(db_path))
+        create_metadata_schema(conn)
+        conn.execute(
+            """INSERT INTO snakemake_metadata
+               (namespace, target, rule, starttime, incomplete, record_format_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (namespace, "output.bam", "align", 1000.0, 1, 6),
+        )
+        conn.commit()
+        conn.close()
+
+        backend = DbPersistence(WorkflowPaths(tmp_path))
+        incomplete = list(backend.iterate_incomplete_jobs())
+        assert len(incomplete) == 1
+        assert incomplete[0].rule == "align"
+        assert incomplete[0].output_file == Path("output.bam")

@@ -1,6 +1,7 @@
 """Shared test fixtures for snakesee tests."""
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from snakesee.models import JobInfo
 from snakesee.models import TimeEstimate
 from snakesee.models import WorkflowProgress
 from snakesee.models import WorkflowStatus
+from tests.db_helpers import create_metadata_schema
 
 if TYPE_CHECKING:
     from snakesee.tui import WorkflowMonitorTUI
@@ -217,6 +219,49 @@ def metadata_dir(tmp_path: Path) -> Path:
         (meta_dir / f"sort_{i}").write_text(json.dumps(metadata))
 
     return meta_dir
+
+
+@pytest.fixture
+def metadata_db(tmp_path: Path) -> Path:
+    """Create a mock .snakemake directory with SQLite metadata DB."""
+    smk_dir = tmp_path / ".snakemake"
+    smk_dir.mkdir(parents=True)
+    (smk_dir / "log").mkdir()
+    (smk_dir / "locks").mkdir()
+
+    db_path = smk_dir / "metadata.db"
+    namespace = str(smk_dir.resolve())
+
+    conn = sqlite3.connect(str(db_path))
+    create_metadata_schema(conn)
+
+    now = time.time()
+    day_seconds = 86400
+
+    # Same data as the filesystem metadata_dir fixture
+    for i in range(5):
+        days_ago = (4 - i) * 2
+        base_time = now - (days_ago * day_seconds)
+        conn.execute(
+            """INSERT INTO snakemake_metadata
+               (namespace, target, rule, starttime, endtime, record_format_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (namespace, f"align_{i}.bam", "align", base_time, base_time + 100.0, 6),
+        )
+
+    for i in range(3):
+        days_ago = (2 - i) * 3
+        base_time = now - (days_ago * day_seconds)
+        conn.execute(
+            """INSERT INTO snakemake_metadata
+               (namespace, target, rule, starttime, endtime, record_format_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (namespace, f"sort_{i}.bam", "sort", base_time, base_time + 50.0, 6),
+        )
+
+    conn.commit()
+    conn.close()
+    return db_path
 
 
 @pytest.fixture
