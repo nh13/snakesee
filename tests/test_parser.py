@@ -2456,3 +2456,407 @@ class TestParseWorkflowStateWithDb:
         assert len(incomplete) == 1
         assert incomplete[0].rule == "align"
         assert incomplete[0].output_file == Path("output.bam")
+
+
+# Log output from a Snakemake pipe() workflow with group jobs.
+# Jobs within a group are indented by 4 spaces; their properties by 8 spaces.
+# This mirrors real Snakemake output captured from a pipe() workflow.
+GROUP_JOB_LOG = """\
+Building DAG of jobs...
+Using shell: /bin/bash
+Provided cores: 4
+Select jobs to execute...
+Execute 2 jobs...
+[Mon Jan  6 10:00:00 2026] Group job 94d4c6cf-c623-42c0-a0c6-c9f8df411a23 (jobs in lexicogr. order):
+    [Mon Jan  6 10:00:00 2026]
+    localrule consumer:
+        input: output/B.pipe.txt
+        output: output/B.done
+        wildcards: sample=B
+        threads: 2
+        log: logs/consumer.B.log
+        jobid: 3
+    [Mon Jan  6 10:00:00 2026]
+    localrule producer:
+        output: output/B.pipe.txt
+        wildcards: sample=B
+        threads: 4
+        log: logs/producer.B.log
+        jobid: 4
+[Mon Jan  6 10:00:00 2026] Group job ae98aca4-aa8d-45af-b3dc-d1068c2841be (jobs in lexicogr. order):
+    [Mon Jan  6 10:00:00 2026]
+    localrule consumer:
+        input: output/A.pipe.txt
+        output: output/A.done
+        wildcards: sample=A
+        threads: 2
+        log: logs/consumer.A.log
+        jobid: 1
+    [Mon Jan  6 10:00:00 2026]
+    localrule producer:
+        output: output/A.pipe.txt
+        wildcards: sample=A
+        threads: 4
+        log: logs/producer.A.log
+        jobid: 2
+[Mon Jan  6 10:00:03 2026]
+Finished jobid: 4 (Rule: producer)
+[Mon Jan  6 10:00:03 2026]
+Finished jobid: 3 (Rule: consumer)
+2 of 5 steps (40%) done
+[Mon Jan  6 10:00:03 2026]
+Finished jobid: 2 (Rule: producer)
+[Mon Jan  6 10:00:03 2026]
+Finished jobid: 1 (Rule: consumer)
+4 of 5 steps (80%) done
+Select jobs to execute...
+Execute 1 jobs...
+[Mon Jan  6 10:00:03 2026]
+localrule all:
+    input: output/A.done, output/B.done
+    jobid: 0
+[Mon Jan  6 10:00:03 2026]
+Finished jobid: 0 (Rule: all)
+5 of 5 steps (100%) done
+"""
+
+# Same log but truncated mid-execution (jobs 3 and 4 still running).
+GROUP_JOB_LOG_RUNNING = """\
+[Mon Jan  6 10:00:00 2026] Group job 94d4c6cf (jobs in lexicogr. order):
+    [Mon Jan  6 10:00:00 2026]
+    localrule consumer:
+        input: output/B.pipe.txt
+        output: output/B.done
+        wildcards: sample=B
+        threads: 2
+        log: logs/consumer.B.log
+        jobid: 3
+    [Mon Jan  6 10:00:00 2026]
+    localrule producer:
+        output: output/B.pipe.txt
+        wildcards: sample=B
+        threads: 4
+        log: logs/producer.B.log
+        jobid: 4
+"""
+
+# Group job log with an error in a grouped job.
+GROUP_JOB_LOG_ERROR = """\
+[Mon Jan  6 10:00:00 2026] Group job 94d4c6cf (jobs in lexicogr. order):
+    [Mon Jan  6 10:00:00 2026]
+    localrule consumer:
+        input: output/B.pipe.txt
+        output: output/B.done
+        wildcards: sample=B
+        log: logs/consumer.B.log
+        jobid: 3
+    [Mon Jan  6 10:00:00 2026]
+    localrule producer:
+        output: output/B.pipe.txt
+        wildcards: sample=B
+        log: logs/producer.B.log
+        jobid: 4
+[Mon Jan  6 10:00:03 2026]
+Error in rule producer:
+    jobid: 4
+    wildcards: sample=B
+    log: logs/producer.B.log (check log file(s) for error details)
+"""
+
+
+class TestGroupJobParsing:
+    """Tests for parsing Snakemake group/pipe job logs.
+
+    When Snakemake uses pipe() or group directives, the log output for jobs
+    within the group is indented by 4 spaces. The parser must handle this
+    indentation correctly.
+    """
+
+    def test_running_jobs_in_group(self, snakemake_dir: Path) -> None:
+        """Running jobs within a group block are correctly identified."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(GROUP_JOB_LOG_RUNNING)
+
+        running = parse_running_jobs_from_log(log_file)
+        assert len(running) == 2
+        rules = {j.rule for j in running}
+        assert rules == {"consumer", "producer"}
+        job_ids = {j.job_id for j in running}
+        assert job_ids == {"3", "4"}
+
+    def test_running_jobs_wildcards_in_group(self, snakemake_dir: Path) -> None:
+        """Wildcards are captured correctly for jobs inside a group block."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(GROUP_JOB_LOG_RUNNING)
+
+        running = parse_running_jobs_from_log(log_file)
+        for job in running:
+            assert job.wildcards == {"sample": "B"}
+
+    def test_running_jobs_threads_in_group(self, snakemake_dir: Path) -> None:
+        """Threads are captured correctly for jobs inside a group block."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(GROUP_JOB_LOG_RUNNING)
+
+        running = parse_running_jobs_from_log(log_file)
+        threads_by_rule = {j.rule: j.threads for j in running}
+        assert threads_by_rule["consumer"] == 2
+        assert threads_by_rule["producer"] == 4
+
+    def test_failed_job_in_group(self, snakemake_dir: Path) -> None:
+        """Failed jobs within a group block are correctly identified."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(GROUP_JOB_LOG_ERROR)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "producer"
+        assert failed[0].job_id == "4"
+        assert failed[0].wildcards == {"sample": "B"}
+        assert failed[0].log_file is not None
+        assert str(failed[0].log_file) == "logs/producer.B.log"
+
+    def test_completed_jobs_in_group(self, tmp_path: Path) -> None:
+        """Completed jobs within group blocks have correct rule names and timing."""
+        from snakesee.parser import parse_completed_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(GROUP_JOB_LOG)
+
+        completed = parse_completed_jobs_from_log(log_file)
+        # 4 group jobs + "all" = 5 completed jobs
+        assert len(completed) == 5
+        rules = {j.rule for j in completed}
+        assert rules == {"producer", "consumer", "all"}
+        # Verify each group job has correct rule name
+        for job in completed:
+            if job.job_id in ("1", "3"):
+                assert job.rule == "consumer"
+            elif job.job_id in ("2", "4"):
+                assert job.rule == "producer"
+            elif job.job_id == "0":
+                assert job.rule == "all"
+
+    def test_completed_jobs_timing_in_group(self, tmp_path: Path) -> None:
+        """Completed group jobs have start and end times."""
+        from snakesee.parser import parse_completed_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(GROUP_JOB_LOG)
+
+        completed = parse_completed_jobs_from_log(log_file)
+        for job in completed:
+            assert job.start_time is not None, f"job {job.job_id} ({job.rule}) missing start_time"
+            assert job.end_time is not None, f"job {job.job_id} ({job.rule}) missing end_time"
+            assert job.end_time >= job.start_time
+
+    def test_all_jobs_in_group(self, tmp_path: Path) -> None:
+        """All scheduled jobs (including group jobs) are parsed."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(GROUP_JOB_LOG)
+
+        jobs = parse_all_jobs_from_log(log_file)
+        assert len(jobs) == 5
+        rules = {j.rule for j in jobs}
+        assert rules == {"producer", "consumer", "all"}
+
+    def test_all_jobs_wildcards_in_group(self, tmp_path: Path) -> None:
+        """Wildcards are captured for all group jobs."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(GROUP_JOB_LOG)
+
+        jobs = parse_all_jobs_from_log(log_file)
+        for job in jobs:
+            if job.rule in ("producer", "consumer"):
+                assert job.wildcards is not None, f"job {job.job_id} ({job.rule}) missing wildcards"
+                assert "sample" in job.wildcards
+
+    def test_mixed_group_and_normal_jobs(self, snakemake_dir: Path) -> None:
+        """Both group jobs and normal (non-indented) jobs are parsed together."""
+        log_content = """\
+[Mon Jan  6 10:00:00 2026]
+rule setup:
+    output: output/setup.done
+    jobid: 10
+[Mon Jan  6 10:00:01 2026]
+Finished jobid: 10 (Rule: setup)
+1 of 3 steps (33%) done
+[Mon Jan  6 10:00:01 2026] Group job abc-123 (jobs in lexicogr. order):
+    [Mon Jan  6 10:00:01 2026]
+    rule consumer:
+        jobid: 12
+        wildcards: sample=A
+    [Mon Jan  6 10:00:01 2026]
+    rule producer:
+        jobid: 11
+        wildcards: sample=A
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        running = parse_running_jobs_from_log(log_file)
+        # setup finished, so only the 2 group jobs should be running
+        assert len(running) == 2
+        rules = {j.rule for j in running}
+        assert rules == {"consumer", "producer"}
+
+
+class TestLogLineParserGroupJobs:
+    """Tests for LogLineParser handling of indented group job lines."""
+
+    def test_indented_rule_start(self) -> None:
+        """Indented rule lines within group blocks are parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("    rule consumer:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "consumer"
+
+    def test_indented_localrule_start(self) -> None:
+        """Indented localrule lines within group blocks are parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("    localrule producer:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "producer"
+
+    def test_indented_checkpoint_start(self) -> None:
+        """Indented checkpoint lines within group blocks are parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("    checkpoint decide:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "decide"
+
+    def test_indented_localcheckpoint_start(self) -> None:
+        """Indented localcheckpoint lines within group blocks are parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("    localcheckpoint decide:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "decide"
+
+    def test_indented_timestamp(self) -> None:
+        """Indented timestamp lines within group blocks are parsed as TIMESTAMP."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("    [Mon Jan  6 10:00:00 2026]")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.TIMESTAMP
+
+    def test_group_job_full_block(self) -> None:
+        """Full group job block parses correctly with rule names and properties."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        lines = [
+            "[Mon Jan  6 10:00:00 2026] Group job abc-123 (jobs in lexicogr. order):",
+            "    [Mon Jan  6 10:00:00 2026]",
+            "    localrule consumer:",
+            "        input: output/B.pipe.txt",
+            "        output: output/B.done",
+            "        jobid: 3",
+            "        wildcards: sample=B",
+            "    [Mon Jan  6 10:00:00 2026]",
+            "    localrule producer:",
+            "        output: output/B.pipe.txt",
+            "        jobid: 4",
+            "        wildcards: sample=B",
+        ]
+        all_events = []
+        for line in lines:
+            all_events.extend(parser.parse_line(line))
+
+        rule_events = [e for e in all_events if e.event_type == ParseEventType.RULE_START]
+        assert len(rule_events) == 2
+        assert rule_events[0].data["rule"] == "consumer"
+        assert rule_events[1].data["rule"] == "producer"
+
+        jobid_events = [e for e in all_events if e.event_type == ParseEventType.JOBID]
+        assert len(jobid_events) == 2
+        # Each jobid should be associated with the correct rule
+        assert jobid_events[0].data["jobid"] == "3"
+        assert jobid_events[0].data["rule"] == "consumer"
+        assert jobid_events[1].data["jobid"] == "4"
+        assert jobid_events[1].data["rule"] == "producer"
+
+
+class TestParseRulesFromLogGroupJobs:
+    """Tests for parse_rules_from_log with group/pipe job output."""
+
+    def test_group_jobs_counted_per_rule(self, tmp_path: Path) -> None:
+        """Each group job completion is attributed to its own rule, not the last-seen rule."""
+        from snakesee.parser import parse_rules_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(GROUP_JOB_LOG)
+
+        counts = parse_rules_from_log(log_file)
+        assert counts["consumer"] == 2
+        assert counts["producer"] == 2
+        assert counts["all"] == 1
+
+
+class TestTimestampFalsePositive:
+    """Regression tests: timestamp detection must not match mid-line fragments."""
+
+    def test_embedded_timestamp_not_detected_as_timestamp_line(self, snakemake_dir: Path) -> None:
+        """A timestamp fragment in a tool's error output must not end an error block."""
+        log_content = """\
+[Mon Jan  6 10:00:00 2026]
+rule failing_tool:
+    output: output/result.txt
+    jobid: 1
+[Mon Jan  6 10:00:05 2026]
+Error in rule failing_tool:
+    stderr: tool printed [Mon Jan  6 10:00:06 2026] before the real error metadata
+    jobid: 1
+    log: logs/failing_tool.log (check log file(s) for error details)
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "failing_tool"
+        assert failed[0].job_id == "1"
+
+    def test_midline_timestamp_does_not_corrupt_running_jobs(self, snakemake_dir: Path) -> None:
+        """A mid-line timestamp fragment must not prematurely close an error block."""
+        log_content = """\
+[Mon Jan  6 10:00:00 2026]
+rule my_tool:
+    output: output/result.txt
+    jobid: 1
+[Mon Jan  6 10:00:05 2026]
+Error in rule my_tool:
+    stderr: crash at [Mon Jan  6 10:00:04 2026] during processing
+    jobid: 1
+    log: logs/my_tool.log (check log file(s) for error details)
+"""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(log_content)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "my_tool"
+        assert failed[0].job_id == "1"
