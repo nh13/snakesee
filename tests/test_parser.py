@@ -2219,3 +2219,173 @@ rule align:
 
         assert len(jobs) == 1
         assert jobs[0].job_id == "1"
+
+
+# Snakemake logs checkpoint rules as "checkpoint X:" or "localcheckpoint X:"
+# instead of "rule X:" or "localrule X:".
+CHECKPOINT_LOG = """\
+[Mon Jan  6 10:00:00 2026]
+localcheckpoint discover:
+    output: output/discovered
+    wildcards: sample=A
+    jobid: 5
+[Mon Jan  6 10:00:02 2026]
+Finished jobid: 5 (Rule: discover)
+1 of 3 steps (33%) done
+[Mon Jan  6 10:00:02 2026]
+rule process:
+    input: output/discovered/C.txt
+    output: output/processed/C.done
+    wildcards: sample=C
+    jobid: 6
+[Mon Jan  6 10:00:04 2026]
+Finished jobid: 6 (Rule: process)
+2 of 3 steps (67%) done
+[Mon Jan  6 10:00:04 2026]
+localrule all:
+    input: output/processed/C.done
+    jobid: 0
+[Mon Jan  6 10:00:04 2026]
+Finished jobid: 0 (Rule: all)
+3 of 3 steps (100%) done
+"""
+
+CHECKPOINT_LOG_RUNNING = """\
+[Mon Jan  6 10:00:00 2026]
+checkpoint discover:
+    output: output/discovered
+    wildcards: sample=A
+    jobid: 5
+"""
+
+CHECKPOINT_LOG_ERROR = """\
+[Mon Jan  6 10:00:00 2026]
+checkpoint discover:
+    output: output/discovered
+    wildcards: sample=A
+    jobid: 5
+[Mon Jan  6 10:00:02 2026]
+Error in rule discover:
+    jobid: 5
+    log: logs/discover.log (check log file(s) for error details)
+"""
+
+
+class TestCheckpointParsing:
+    """Tests for parsing Snakemake checkpoint rules.
+
+    Snakemake logs checkpoint rules as "checkpoint X:" or "localcheckpoint X:"
+    instead of "rule X:" or "localrule X:". The parser must handle both forms.
+    """
+
+    def test_running_checkpoint_job(self, snakemake_dir: Path) -> None:
+        """A checkpoint job in progress is detected as running."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(CHECKPOINT_LOG_RUNNING)
+
+        running = parse_running_jobs_from_log(log_file)
+        assert len(running) == 1
+        assert running[0].rule == "discover"
+        assert running[0].job_id == "5"
+        assert running[0].wildcards == {"sample": "A"}
+
+    def test_completed_checkpoint_job(self, tmp_path: Path) -> None:
+        """Completed checkpoint jobs have correct rule name and timing."""
+        from snakesee.parser import parse_completed_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(CHECKPOINT_LOG)
+
+        completed = parse_completed_jobs_from_log(log_file)
+        assert len(completed) == 3
+        rules = {j.rule for j in completed}
+        assert rules == {"discover", "process", "all"}
+
+        # Verify the checkpoint job specifically
+        cp_job = next(j for j in completed if j.rule == "discover")
+        assert cp_job.job_id == "5"
+        assert cp_job.start_time is not None
+        assert cp_job.end_time is not None
+        assert cp_job.end_time >= cp_job.start_time
+
+    def test_failed_checkpoint_job(self, snakemake_dir: Path) -> None:
+        """A failed checkpoint job is detected with correct rule name."""
+        log_file = snakemake_dir / "log" / "test.snakemake.log"
+        log_file.write_text(CHECKPOINT_LOG_ERROR)
+
+        failed = parse_failed_jobs_from_log(log_file)
+        assert len(failed) == 1
+        assert failed[0].rule == "discover"
+        assert failed[0].job_id == "5"
+
+    def test_all_jobs_includes_checkpoint(self, tmp_path: Path) -> None:
+        """parse_all_jobs_from_log includes checkpoint jobs."""
+        from snakesee.parser import parse_all_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(CHECKPOINT_LOG)
+
+        jobs = parse_all_jobs_from_log(log_file)
+        assert len(jobs) == 3
+        rules = {j.rule for j in jobs}
+        assert rules == {"discover", "process", "all"}
+
+        cp_job = next(j for j in jobs if j.rule == "discover")
+        assert cp_job.wildcards == {"sample": "A"}
+
+    def test_checkpoint_does_not_steal_next_rule_timing(self, tmp_path: Path) -> None:
+        """A checkpoint must not cause the following rule's timing to be wrong.
+
+        Before the fix, the checkpoint line was not matched, so the next rule's
+        jobid got associated with whatever rule came before the checkpoint.
+        """
+        from snakesee.parser import parse_completed_jobs_from_log
+
+        log_file = tmp_path / "test.log"
+        log_file.write_text(CHECKPOINT_LOG)
+
+        completed = parse_completed_jobs_from_log(log_file)
+        process_job = next(j for j in completed if j.rule == "process")
+        assert process_job.job_id == "6"
+        # Duration should be ~2 seconds, not inflated
+        assert process_job.duration is not None
+        assert process_job.duration < 10.0
+
+
+class TestLogLineParserCheckpoint:
+    """Tests for LogLineParser handling of checkpoint rule lines."""
+
+    def test_checkpoint_rule_start(self) -> None:
+        """'checkpoint X:' is parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("checkpoint discover:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "discover"
+
+    def test_localcheckpoint_rule_start(self) -> None:
+        """'localcheckpoint X:' is parsed as RULE_START."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        events = parser.parse_line("localcheckpoint discover:")
+        assert len(events) == 1
+        assert events[0].event_type == ParseEventType.RULE_START
+        assert events[0].data["rule"] == "discover"
+
+    def test_checkpoint_sets_context_rule(self) -> None:
+        """Checkpoint line sets the parser context so subsequent jobid gets correct rule."""
+        from snakesee.parser.line_parser import LogLineParser
+        from snakesee.parser.line_parser import ParseEventType
+
+        parser = LogLineParser()
+        parser.parse_line("checkpoint discover:")
+        events = parser.parse_line("    jobid: 5")
+
+        jobid_event = events[0]
+        assert jobid_event.event_type == ParseEventType.JOBID
+        assert jobid_event.data["rule"] == "discover"

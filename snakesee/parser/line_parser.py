@@ -185,18 +185,11 @@ class LogLineParser:
                 events.append(event)
             return events
 
-        # Rule start: "rule X:" or "localrule X:" - this ends error blocks
-        if first_char == "r" and line.startswith("rule "):
-            if match := RULE_START_PATTERN.match(line):
-                # Flush any pending error before emitting rule start
-                if pending := self.context.get_pending_error():
-                    events.append(pending)
-                rule = match.group(1)
-                self.context.reset_for_new_rule(rule)
-                events.append(ParseEvent(ParseEventType.RULE_START, {"rule": rule}))
-            return events
-
-        if first_char == "l" and line.startswith("localrule "):
+        # Rule/checkpoint start - this ends error blocks
+        # Matches: "rule X:", "localrule X:", "checkpoint X:", "localcheckpoint X:"
+        if first_char in ("r", "l", "c") and (
+            line.startswith(("rule ", "localrule ", "checkpoint ", "localcheckpoint "))
+        ):
             if match := RULE_START_PATTERN.match(line):
                 # Flush any pending error before emitting rule start
                 if pending := self.context.get_pending_error():
