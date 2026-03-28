@@ -2161,3 +2161,189 @@ class TestEventFileCurrentValidation:
         )
 
         assert _is_event_file_current(event_file, log_start_time) is True
+
+
+class TestAccessibility:
+    """Tests for colorblind-accessible mode."""
+
+    def test_default_config_uses_block_chars(self) -> None:
+        """Default config uses filled/light block Unicode characters."""
+        from snakesee.tui.accessibility import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG.succeeded.char == "\u2588"
+        assert DEFAULT_CONFIG.failed.char == "\u2588"
+        assert DEFAULT_CONFIG.remaining.char == "\u2591"
+        assert DEFAULT_CONFIG.incomplete.char == "\u2591"
+        assert DEFAULT_CONFIG.show_legend is False
+
+    def test_accessible_config_uses_distinct_ascii_chars(self) -> None:
+        """Accessible config uses visually distinct characters."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        # All characters must be distinct from each other
+        chars = {
+            ACCESSIBLE_CONFIG.succeeded.char,
+            ACCESSIBLE_CONFIG.failed.char,
+            ACCESSIBLE_CONFIG.remaining.char,
+            ACCESSIBLE_CONFIG.incomplete.char,
+        }
+        assert len(chars) == 4, "All accessible characters must be distinct"
+        assert ACCESSIBLE_CONFIG.show_legend is True
+
+    def test_accessible_progress_bar_uses_distinct_chars(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """In accessible mode, progress bar uses distinct characters per segment."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        tui_with_mocks._accessibility_config = ACCESSIBLE_CONFIG
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50, failed_jobs=10)
+        bar = tui_with_mocks._make_progress_bar(progress, width=40)
+        plain = bar.plain
+
+        assert len(plain) == 40
+        # Succeeded segment uses '='
+        assert "=" in plain
+        # Failed segment uses 'X'
+        assert "X" in plain
+        # Remaining segment uses middle dot
+        assert "\u00b7" in plain
+        # No block characters from default mode
+        assert "\u2588" not in plain
+        assert "\u2591" not in plain
+
+    def test_default_progress_bar_uses_block_chars(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """Default mode still uses block characters (regression test)."""
+        from snakesee.tui.accessibility import DEFAULT_CONFIG
+
+        tui_with_mocks._accessibility_config = DEFAULT_CONFIG
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50, failed_jobs=10)
+        bar = tui_with_mocks._make_progress_bar(progress, width=40)
+        plain = bar.plain
+
+        assert "\u2588" in plain
+        assert "\u2591" in plain
+
+    def test_accessible_mode_always_shows_legend(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """In accessible mode, legend is shown even with zero failures."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        tui_with_mocks._accessibility_config = ACCESSIBLE_CONFIG
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50, failed_jobs=0)
+        panel = tui_with_mocks._make_progress_panel(progress, None)
+        # Render the panel to text and check for legend content
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, width=120, force_terminal=True)
+        console.print(panel)
+        output = buf.getvalue()
+        assert "succeeded" in output
+        assert "remaining" in output
+
+    def test_default_mode_no_legend_without_failures(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """In default mode, legend is not shown when there are no failures."""
+        from snakesee.tui.accessibility import DEFAULT_CONFIG
+
+        tui_with_mocks._accessibility_config = DEFAULT_CONFIG
+        progress = make_workflow_progress(total_jobs=100, completed_jobs=50, failed_jobs=0)
+        panel = tui_with_mocks._make_progress_panel(progress, None)
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, width=120, force_terminal=True)
+        console.print(panel)
+        output = buf.getvalue()
+        assert "succeeded" not in output
+
+    def test_toggle_accessible_mode_with_key(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Pressing 'a' toggles between default and accessible mode."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+        from snakesee.tui.accessibility import DEFAULT_CONFIG
+
+        assert tui_with_mocks._accessibility_config == DEFAULT_CONFIG
+        tui_with_mocks._handle_key("a")
+        assert tui_with_mocks._accessibility_config == ACCESSIBLE_CONFIG
+        tui_with_mocks._handle_key("a")
+        assert tui_with_mocks._accessibility_config == DEFAULT_CONFIG
+
+    def test_incomplete_bar_uses_accessible_char(self, tui_with_mocks: WorkflowMonitorTUI) -> None:
+        """Incomplete workflow uses '?' character in accessible mode."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        tui_with_mocks._accessibility_config = ACCESSIBLE_CONFIG
+        incomplete_jobs = [JobInfo(rule=f"rule_{i}") for i in range(10)]
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            total_jobs=100,
+            completed_jobs=50,
+            failed_jobs=0,
+            incomplete_jobs_list=incomplete_jobs,
+        )
+        bar = tui_with_mocks._make_progress_bar(progress, width=40)
+        assert "?" in bar.plain
+
+    def test_incomplete_bar_splits_interrupted_from_pending(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """Incomplete workflow bar shows interrupted jobs separately from pending jobs."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        tui_with_mocks._accessibility_config = ACCESSIBLE_CONFIG
+        # 100 total, 50 completed, 0 failed => 50 unfinished
+        # But only 5 were actually in progress (interrupted)
+        incomplete_jobs = [JobInfo(rule=f"rule_{i}") for i in range(5)]
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            total_jobs=100,
+            completed_jobs=50,
+            failed_jobs=0,
+            incomplete_jobs_list=incomplete_jobs,
+        )
+        bar = tui_with_mocks._make_progress_bar(progress, width=100)
+        plain = bar.plain
+
+        # Should have both '?' (incomplete) and middle dot (remaining)
+        assert "?" in plain
+        assert "\u00b7" in plain
+        # The number of '?' chars should be proportional to 5/100 = 5 chars in 100-width bar
+        assert plain.count("?") == 5
+        # The number of middle dot chars should be proportional to 45/100 = 45 chars
+        assert plain.count("\u00b7") == 45
+
+    def test_incomplete_legend_splits_interrupted_from_pending(
+        self, tui_with_mocks: WorkflowMonitorTUI
+    ) -> None:
+        """Incomplete workflow legend shows both incomplete and remaining counts."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        tui_with_mocks._accessibility_config = ACCESSIBLE_CONFIG
+        incomplete_jobs = [JobInfo(rule=f"rule_{i}") for i in range(5)]
+        progress = make_workflow_progress(
+            status=WorkflowStatus.INCOMPLETE,
+            total_jobs=100,
+            completed_jobs=50,
+            failed_jobs=0,
+            incomplete_jobs_list=incomplete_jobs,
+        )
+        panel = tui_with_mocks._make_progress_panel(progress, None)
+        buf = StringIO()
+        console = Console(file=buf, width=200, force_terminal=True)
+        console.print(panel)
+        output = buf.getvalue()
+
+        # Should show both incomplete and remaining counts
+        assert "5 incomplete" in output
+        assert "45 remaining" in output

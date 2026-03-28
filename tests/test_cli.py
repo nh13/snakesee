@@ -63,6 +63,28 @@ class TestWatch:
                 weighting_strategy="index",
                 half_life_logs=10,
                 half_life_days=7.0,
+                accessibility_config=None,
+            )
+            mock_instance.run.assert_called_once()
+
+    def test_watch_calls_tui_in_accessible_mode(self, snakemake_dir: Path, tmp_path: Path) -> None:
+        """Test that watch enables accessible rendering when requested."""
+        from snakesee.tui.accessibility import ACCESSIBLE_CONFIG
+
+        with patch("snakesee.tui.WorkflowMonitorTUI") as mock_tui:
+            mock_instance = mock_tui.return_value
+            watch(tmp_path, refresh=2.0, no_estimate=True, colorblind=True)
+
+            mock_tui.assert_called_once_with(
+                workflow_dir=tmp_path,
+                refresh_rate=2.0,
+                use_estimation=False,
+                profile_path=None,
+                use_wildcard_conditioning=True,
+                weighting_strategy="index",
+                half_life_logs=10,
+                half_life_days=7.0,
+                accessibility_config=ACCESSIBLE_CONFIG,
             )
             mock_instance.run.assert_called_once()
 
