@@ -543,9 +543,14 @@ class TimeEstimator:
             TimeEstimate with expected time, confidence bounds, and method.
         """
 
-        # Update peak observed thread sum from currently running jobs
+        # Update peak observed thread sum from currently running jobs.
+        # Only use explicitly declared threads (not historical defaults) so
+        # the peak stays grounded in runtime data.
         if progress.running_jobs:
-            current = sum(self._job_threads(j) for j in progress.running_jobs)
+            current = sum(
+                float(job.threads) if job.threads is not None else 1.0
+                for job in progress.running_jobs
+            )
             self._max_observed_thread_sum = max(self._max_observed_thread_sum, current)
 
         # Handle edge case: no jobs to do
@@ -711,7 +716,7 @@ class TimeEstimator:
                 log line.  Snakemake resolves ``--cores all`` to the machine's
                 CPU count before logging, so this is always an integer.
         """
-        self._provided_cores = cores
+        self._provided_cores = cores if cores >= 1 else None
 
     @property
     def estimated_cores(self) -> float:
@@ -726,7 +731,7 @@ class TimeEstimator:
             Estimated core count (>= 1.0).
         """
         if self._provided_cores is not None:
-            return float(self._provided_cores)
+            return max(1.0, float(self._provided_cores))
         return max(1.0, self._max_observed_thread_sum)
 
     def _calculate_confidence_scores(
