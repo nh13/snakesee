@@ -132,11 +132,8 @@ class EstimationConfig:
         min_pairs_for_size_scaling: Minimum pairs for size correlation.
         high_variance_cv: Coefficient of variation threshold for "high variance".
         default_global_mean: Fallback duration when no data available.
-        parallelism_max: Maximum effective parallelism for estimation.
-
     Raises:
-        ValueError: If any parameter is invalid (e.g., non-positive half_life,
-            parallelism_max < parallelism_min, etc.).
+        ValueError: If any parameter is invalid (e.g., non-positive half_life).
     """
 
     weighting_strategy: WeightingStrategy = "index"
@@ -162,11 +159,6 @@ class EstimationConfig:
     default_global_mean: float = 60.0
     default_recency_factor: float = 0.5
 
-    # Parallelism estimation bounds
-    parallelism_min: float = 1.0
-    parallelism_max: float = 8.0
-    parallelism_fallback_max: float = 4.0
-
     # Size scaling bounds
     size_dampening_power: float = 0.5
     size_ratio_min: float = 0.5
@@ -191,13 +183,6 @@ class EstimationConfig:
             raise ValueError(f"half_life_logs must be > 0, got {self.half_life_logs}")
         if self.half_life_days <= 0:
             raise ValueError(f"half_life_days must be > 0, got {self.half_life_days}")
-        if self.parallelism_max < self.parallelism_min:
-            raise ValueError(
-                f"parallelism_max ({self.parallelism_max}) must be >= "
-                f"parallelism_min ({self.parallelism_min})"
-            )
-        if self.parallelism_min <= 0:
-            raise ValueError(f"parallelism_min must be > 0, got {self.parallelism_min}")
         if self.default_global_mean <= 0:
             raise ValueError(f"default_global_mean must be > 0, got {self.default_global_mean}")
 

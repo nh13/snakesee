@@ -481,8 +481,9 @@ class WorkflowMonitorTUI:
                 )
 
     def _init_current_rules_from_log(self) -> None:
-        """Parse current rules, job counts, and all scheduled jobs from the latest log."""
+        """Parse current rules, job counts, cores, and all scheduled jobs from the latest log."""
         from snakesee.parser import parse_all_jobs_from_log
+        from snakesee.parser import parse_cores_from_log
         from snakesee.parser import parse_job_stats_counts_from_log
         from snakesee.parser import parse_job_stats_from_log
 
@@ -503,6 +504,11 @@ class WorkflowMonitorTUI:
         job_counts = parse_job_stats_counts_from_log(log_path)
         if job_counts:
             self._estimator.expected_job_counts = job_counts
+
+        # Parse "Provided cores: N" for definitive parallelism info
+        cores = parse_cores_from_log(log_path)
+        if cores is not None:
+            self._estimator.set_provided_cores(cores)
 
         # Parse all scheduled jobs with wildcards for pending job estimation
         all_jobs = parse_all_jobs_from_log(log_path)
@@ -1748,8 +1754,11 @@ class WorkflowMonitorTUI:
                 completion_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                 eta_parts.append(f"(completion: {completion_str})")
 
-            # Show estimation method for transparency
-            eta_parts.append(f"[dim][{estimate.method}][/dim]")
+            # Show estimation method and inferred cores for transparency
+            method_info = estimate.method
+            if estimate.inferred_cores is not None and estimate.inferred_cores > 1:
+                method_info += f" cores≈{estimate.inferred_cores:.0f}"
+            eta_parts.append(f"[dim][{method_info}][/dim]")
         elif not self.use_estimation:
             eta_parts.append("[dim]ETA: disabled[/dim]")
 

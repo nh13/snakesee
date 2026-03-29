@@ -618,7 +618,8 @@ class TimeEstimate:
         lower_bound: Optimistic estimate (95% CI lower).
         upper_bound: Pessimistic estimate (95% CI upper).
         confidence: Confidence level (0.0 to 1.0).
-        method: Estimation method used ("simple", "weighted", "throughput").
+        method: Estimation method used ("simple", "weighted", "bootstrap").
+        inferred_cores: Estimated core count used for thread-aware estimation.
     """
 
     seconds_remaining: float
@@ -626,6 +627,7 @@ class TimeEstimate:
     upper_bound: float
     confidence: float
     method: str
+    inferred_cores: float | None = None
 
     def format_eta(self) -> str:
         """

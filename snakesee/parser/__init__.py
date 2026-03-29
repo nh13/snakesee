@@ -27,6 +27,7 @@ from snakesee.parser.core import _augment_completions_with_threads
 from snakesee.parser.core import is_workflow_running
 from snakesee.parser.core import parse_all_jobs_from_log
 from snakesee.parser.core import parse_completed_jobs_from_log
+from snakesee.parser.core import parse_cores_from_log
 from snakesee.parser.core import parse_failed_jobs_from_log
 from snakesee.parser.core import parse_incomplete_jobs
 from snakesee.parser.core import parse_job_stats_counts_from_log
@@ -88,6 +89,7 @@ __all__ = [  # noqa: RUF022 (keep grouped by category for readability)
     "estimate_input_size_from_output",
     "is_workflow_running",
     "parse_all_jobs_from_log",
+    "parse_cores_from_log",
     "parse_completed_jobs_from_log",
     "parse_failed_jobs_from_log",
     "parse_incomplete_jobs",

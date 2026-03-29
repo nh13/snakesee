@@ -164,18 +164,6 @@ class TestEstimationConfig:
         with pytest.raises(ValueError, match="half_life_days must be > 0"):
             EstimationConfig(half_life_days=-1.0)
 
-    def test_parallelism_max_must_be_gte_min(self) -> None:
-        """Test that parallelism_max >= parallelism_min."""
-        with pytest.raises(ValueError, match="parallelism_max.*must be >= parallelism_min"):
-            EstimationConfig(parallelism_min=10.0, parallelism_max=5.0)
-
-    def test_parallelism_min_must_be_positive(self) -> None:
-        """Test that parallelism_min must be > 0."""
-        with pytest.raises(ValueError, match="parallelism_min must be > 0"):
-            EstimationConfig(parallelism_min=0.0)
-        with pytest.raises(ValueError, match="parallelism_min must be > 0"):
-            EstimationConfig(parallelism_min=-1.0)
-
     def test_default_global_mean_must_be_positive(self) -> None:
         """Test that default_global_mean must be > 0."""
         with pytest.raises(ValueError, match="default_global_mean must be > 0"):

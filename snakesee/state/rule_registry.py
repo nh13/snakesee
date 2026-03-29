@@ -86,6 +86,25 @@ class RuleStatistics:
                 input_sizes=list(self.aggregate.input_sizes),
             )
 
+    @property
+    def typical_threads(self) -> float:
+        """Weighted average of thread counts from historical data.
+
+        Uses the number of observations at each thread count as weights.
+        Defaults to 1.0 if no thread data is available.
+        """
+        if self.by_threads is None or not self.by_threads.stats_by_threads:
+            return 1.0
+
+        total_weight = 0
+        weighted_sum = 0.0
+        for thread_count, stats in self.by_threads.stats_by_threads.items():
+            n = stats.count
+            weighted_sum += thread_count * n
+            total_weight += n
+
+        return weighted_sum / total_weight if total_weight > 0 else 1.0
+
     def record_completion(
         self,
         duration: float,
@@ -402,6 +421,21 @@ class RuleRegistry:
                 return None
 
             return combo_stats
+
+    def typical_threads(self, rule: str) -> float:
+        """Get the typical thread count for a rule.
+
+        Args:
+            rule: Rule name.
+
+        Returns:
+            Weighted average thread count, or 1.0 if no thread data.
+        """
+        with self._lock:
+            stats = self._rules.get(rule)
+            if stats is None:
+                return 1.0
+            return stats.typical_threads
 
     def total_sample_count(self) -> int:
         """Get total number of samples across all rules."""
