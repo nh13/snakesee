@@ -125,7 +125,18 @@ class HistoricalDataLoader:
                         continue
 
                     wc_dict = wildcards if isinstance(wildcards, dict) else None
-                    threads_int = int(threads) if threads is not None else None
+                    threads_int = None
+                    if threads is not None:
+                        try:
+                            candidate = int(threads)
+                        except (TypeError, ValueError):
+                            logger.debug(
+                                "Ignoring invalid thread count in events file: %r",
+                                threads,
+                            )
+                        else:
+                            if candidate > 0:
+                                threads_int = candidate
                     self._registry.record_completion(
                         rule=rule_name,
                         duration=duration,
